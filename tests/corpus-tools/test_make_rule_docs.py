@@ -3572,6 +3572,10 @@ class Packages(unittest.TestCase):
             f"{wps}bodyPr": ([{f"{a}prstTxWarp"},
                               {f"{a}noAutofit", f"{a}normAutofit", f"{a}spAutoFit"}], []),
             f"{pic}pic": ([{f"{pic}nvPicPr"}, {f"{pic}blipFill"}, {f"{pic}spPr"}], [0, 1, 2]),
+            f"{pic}nvPicPr": ([{f"{pic}cNvPr"}, {f"{pic}cNvPicPr"}, {f"{pic}nvPr"}], [0, 1]),
+            f"{pic}blipFill": ([{f"{a}blip"}, {f"{a}srcRect"}, {f"{a}tile", f"{a}stretch"}],
+                               []),
+            f"{a}xfrm": ([{f"{a}off"}, {f"{a}ext"}], []),
         }
         seen = set()
         for doc in self.docs:
@@ -3782,7 +3786,7 @@ class Packages(unittest.TestCase):
         for style in styles[:4]:
             self.assertEqual((style["margin-left"], style["margin-top"],
                               style["mso-position-horizontal-relative"]),
-                             ("144pt", "0", "margin"))
+                             ("144pt", "12pt", "margin"))
         for n, shape in enumerate(shapes[:4], 1):
             holder = next(p for p in body.findall(f"{W}p") if shape in list(p.iter(f"{v}shape")))
             self.assertTrue(texts(holder).endswith(f"The anchor of case {n:02d}."), n)
@@ -3805,9 +3809,16 @@ class Packages(unittest.TestCase):
                          {("paragraph", "0", "margin", str(144 * emu))})
         self.assertEqual({size(d) for d in anchors}, {(144, 36)})
         self.assertEqual([len(box_paragraphs(boxes(d)[0])) for d in anchors], [1] * 4)
-        holders = [p for p in body.findall(f"{W}p") if p.find(f".//{wp}anchor") is not None]
+        children = body.findall(f"{W}p")
+        holders = [p for p in children if p.find(f".//{wp}anchor") is not None]
         self.assertEqual([twips(p, f"{W}spacing", "before") for p in holders],
                          ["80", "80", "80", "0"])
+        # Before each, an empty paragraph without space after, so that the space before
+        # takes effect: Word lays out the larger of the two.
+        for holder in holders:
+            before = children[children.index(holder) - 1]
+            self.assertEqual((texts(before), twips(before, f"{W}spacing", "after")), ("", None))
+            self.assertTrue(texts(children[children.index(holder) - 2]).startswith("Case "))
 
         # E-textbox-bar-tab: the same paragraph with a bar tab at 72 pt and 12 pt before
         # and after, in a box 288 pt wide and in the body, 288 pt wide too.

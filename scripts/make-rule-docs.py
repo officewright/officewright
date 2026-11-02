@@ -4512,10 +4512,10 @@ WRAPPING_BOX_TEXT = ("Box text that starts at the insets and runs on long enough
 
 
 def box_cases(cases: list[tuple[str, str]], before: float = 6, after: float = 12) -> str:
-    """Each case's label, then a paragraph holding its drawing, with before pt above it and
-    after pt below it."""
+    """Each case's label, kept on the page of the paragraph after it, which holds its
+    drawing, with before pt above it and after pt below it."""
     return "".join(
-        para(run(f"Case {n:02d}: {label}"), space=spacing(before=12))
+        para(run(f"Case {n:02d}: {label}"), space=spacing(before=12), keep_next=True)
         + para(drawing, space=spacing(before=before, after=after))
         for n, (label, drawing) in enumerate(cases, 1)
     )
@@ -4738,10 +4738,13 @@ def textbox_from_paragraph() -> Doc:
         ("anchor bottom, from a paragraph with 4 pt before (to compare)", "b", 4),
         ("anchor centre, from a paragraph with no space before (to compare)", "ctr", 0),
     ]
-    # 12 pt below each label keep it clear of the box, whichever top of the paragraph Word
-    # places it from.
+    # An empty paragraph without space after it lies between each label and the anchor's
+    # paragraph: Word lays out the larger of a paragraph's space after and the next one's
+    # space before, so the 4 pt take effect, and the box stays clear of the label whichever
+    # top of the paragraph Word places it from.
     body = "".join(
-        para(run(f"Case {n:02d}: {label}"), space=spacing(before=12, after=12))
+        para(run(f"Case {n:02d}: {label}"), space=spacing(before=12), keep_next=True)
+        + para(keep_next=True)
         + para(placed(n, anchor) + run(f"The anchor of case {n:02d}."),
                space=spacing(before=before, after=48))
         for n, (label, anchor, before) in enumerate(cases, 1)
@@ -4778,9 +4781,10 @@ def vml_box(shape_id: str, style: str, content: str, inset: str | None = None,
 def textbox_vml() -> Doc:
     content = para(run(WRAPPING_BOX_TEXT))
     size = "width:216pt;height:90pt"
-    # Floating, as older documents write them: 144 pt from the left margin, at the top of
-    # the paragraph that holds the case's anchor.
-    floating = ("position:absolute;margin-left:144pt;margin-top:0;" + size
+    # Floating, as older documents write them: 144 pt from the left margin and 12 pt below
+    # the top of the paragraph that holds the case's anchor, clear of the label above it
+    # whether Word takes that top above the paragraph's space before or below it.
+    floating = ("position:absolute;margin-left:144pt;margin-top:12pt;" + size
                 + ";z-index:{z};mso-position-horizontal-relative:margin")
     cases = [
         ("floating, no inset written (the defaults of VML)",
@@ -4802,7 +4806,7 @@ def textbox_vml() -> Doc:
         "Where Word puts the text of VML text boxes (w:pict, v:textbox), as older documents "
         "write them, floating: the default inset, an inset of 18 pt, v-text-anchor middle "
         "and bottom; and an inline one; 216 x 90 pt with a 0.5 pt outline",
-        box_cases(anchored + inline, after=96) + para(run("End of the document.")),
+        box_cases(anchored + inline, after=108) + para(run("End of the document.")),
     )
 
 
