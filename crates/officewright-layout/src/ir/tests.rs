@@ -2826,6 +2826,30 @@ fn a_text_box_s_insets_are_not_negative_and_its_content_is_checked_and_clamped()
         ]
     );
 
+    // A box in the result of a field is clamped too; one in the result of a field inside
+    // that result, which `validate` refuses, is left alone.
+    let mut document = document_with(|style| {
+        let one = || {
+            boxed(TextBox::new().with_blocks([Paragraph::new(style).with_props(beyond()).into()]))
+        };
+        let inner = Field::new(FieldKind::Other("QUOTE".into()), style).with_result(vec![one()]);
+        let outer = Field::new(FieldKind::Other("QUOTE".into()), style)
+            .with_result(vec![one(), Inline::Field(inner)]);
+        vec![
+            Paragraph::new(style)
+                .with_inlines([Inline::Field(outer)])
+                .into(),
+        ]
+    });
+    assert_eq!(
+        entries(&document.clamp()),
+        [
+            "sections[0].blocks[0].inlines[0].result[0].content.blocks[0].props.tabs[0].position: \
+             tab stop position 1700 pt is outside Word's range of -1584 to 1584 pt and becomes \
+             1584 pt"
+        ]
+    );
+
     // Two boxes side by side: each is clamped.
     let mut document = document_with(|style| {
         let one = || {

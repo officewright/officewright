@@ -173,6 +173,11 @@ impl Clamper {
         self.location.push(Step::Field(field));
     }
 
+    /// Steps into an entry of the list being clamped.
+    pub(crate) fn enter_index(&mut self, index: usize) {
+        self.location.push(Step::Index(index));
+    }
+
     /// Steps back out of the field last entered.
     pub(crate) fn leave(&mut self) {
         self.location.pop();

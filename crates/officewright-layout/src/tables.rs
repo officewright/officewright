@@ -1839,7 +1839,7 @@ fn stack<'d>(
                     context.fonts.report_once(
                         ReportKind::FeatureUnsupported,
                         location,
-                        "floating pictures in table cells are not drawn yet".to_owned(),
+                        "floating objects in table cells are not drawn yet".to_owned(),
                     );
                 }
                 // Widow control keeps two lines on each side of a page's end, as in the
@@ -3353,7 +3353,7 @@ mod tests {
         assert!(
             messages
                 .iter()
-                .any(|message| message.starts_with("floating pictures in table cells")),
+                .any(|message| message.starts_with("floating objects in table cells")),
             "{messages:?}"
         );
         let (_, bands) = laid(&document, &table, (400.0, &[]));
