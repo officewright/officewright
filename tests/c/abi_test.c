@@ -423,6 +423,8 @@ static void fonts_by_name(const char *fonts, const char *dir) {
     double width = 0.0;
     uint8_t *data = NULL;
     size_t len = 0;
+    OwPdfDocument *doc = NULL;
+    size_t page = 99;
     FILE *file;
 
     EXPECT(ow_font_book_new(&book), OW_STATUS_OK, NULL);
@@ -479,6 +481,19 @@ static void fonts_by_name(const char *fonts, const char *dir) {
     EXPECT(ow_font_resolver_substitution(resolver, 0, &kind, &message), OW_STATUS_OK, NULL);
     CHECK(kind == OW_RESOLUTION_EXACT);
     CHECK(message != NULL && strstr(message, "with synthetic italic") != NULL);
+    /* Text in it is slanted by a third about its baseline, inside q ... Q. */
+    EXPECT(ow_pdf_document_new(&doc), OW_STATUS_OK, NULL);
+    EXPECT(ow_pdf_document_add_page(doc, 595.0, 842.0, &page), OW_STATUS_OK, NULL);
+    EXPECT(ow_pdf_document_add_text(doc, page, 72.0, 700.0, liberation, 12.0, "Sans"),
+           OW_STATUS_OK, NULL);
+    EXPECT(ow_pdf_document_set_compression(doc, OW_COMPRESSION_NONE), OW_STATUS_OK, NULL);
+    EXPECT(ow_pdf_document_save_bytes(doc, &data, &len), OW_STATUS_OK, NULL);
+    CHECK(contains(data, len, "q\nBT\n/F1 12 Tf\n1 0 0.3333 1 72 700 Tm\n"));
+    CHECK(contains(data, len, "Tj\nET\nQ\n"));
+    ow_bytes_free(data, len);
+    data = NULL;
+    ow_pdf_document_free(doc);
+    doc = NULL;
     ow_font_resolver_free(resolver);
     ow_pdf_font_free(liberation);
 

@@ -21,11 +21,13 @@ use officewright_opc::xml::{Event, Input, NsId, Reader, StartTag};
 use super::capture::{Budget, Capture};
 use super::styles::{Properties, check_properties};
 use super::{
-    A, A_STRICT, PIC, PIC_STRICT, R, R_STRICT, W, W_STRICT, WP, WP_STRICT, section, shorten,
+    A, A_STRICT, O, PIC, PIC_STRICT, R, R_STRICT, V, W, W_STRICT, W10, WP, WP_STRICT, section,
+    shorten,
 };
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::Names;
 use crate::model::drawing;
+use crate::model::vml;
 use crate::model::xml::{Span, Sym};
 use crate::model::{
     Break, BreakClear, BreakKind, Conformance, ControlLevel, Document, FieldCharKind,
@@ -180,10 +182,11 @@ pub(super) fn read(
     let mut mce = Processor::new(&mut reader);
     let w = [reader.intern(W), reader.intern(W_STRICT)];
     let r = [reader.intern(R), reader.intern(R_STRICT)];
-    // DrawingML too, which the picture reader reads inside w:drawing, so that what lies
-    // below w:drawing goes through Markup Compatibility as the rest of the body does
-    // (#312).
-    let drawing = [A, A_STRICT, WP, WP_STRICT, PIC, PIC_STRICT].map(|uri| reader.intern(uri));
+    // DrawingML and VML too, which the picture readers read inside w:drawing and w:pict,
+    // so that what lies below those goes through Markup Compatibility as the rest of the
+    // body does (#312).
+    let drawing =
+        [A, A_STRICT, WP, WP_STRICT, PIC, PIC_STRICT, V, O, W10].map(|uri| reader.intern(uri));
     for namespace in w.iter().chain(&r).chain(&drawing) {
         mce.understand(*namespace);
     }
@@ -538,6 +541,7 @@ impl Reading<'_, '_, '_> {
             "softHyphen" => RunItem::SoftHyphen,
             "lastRenderedPageBreak" => RunItem::LastRenderedPageBreak,
             "drawing" => return self.drawing(reader, mce, tag, run),
+            "pict" => return self.vml_drawing(reader, mce, tag, run),
             "footnoteRef" | "endnoteRef" => RunItem::NoteNumber,
             "separator" => RunItem::Separator,
             "continuationSeparator" => RunItem::ContinuationSeparator,
@@ -1143,6 +1147,32 @@ impl Reading<'_, '_, '_> {
             None => None,
         };
         self.push_item(run, RunItem::Drawing { element, image })
+    }
+
+    /// A VML drawing (`w:pict`), kept whole, with the image its picture shows read as
+    /// [`drawing`](Self::drawing) reads a drawing's: the part `v:imagedata`'s `r:id`
+    /// names, the only relationship Word takes for it in a document (MS-OI29500, Part 4,
+    /// §19.1.2.11(p, q)).
+    fn vml_drawing(
+        &mut self,
+        reader: &mut Reader<'_>,
+        mce: &mut Processor,
+        tag: StartTag<'_>,
+        run: u32,
+    ) -> Result<()> {
+        let offset = tag.offset();
+        let element = self
+            .c
+            .capture(reader, mce, tag, Some(Disposition::Understood))?;
+        let document = &*self.c.document;
+        let embed = vml::picture(document.element(element), &document.names)
+            .and_then(|shape| vml::embedded_image(shape, &document.names))
+            .map(str::to_owned);
+        let image = match embed {
+            Some(id) => self.image(&id, offset)?,
+            None => None,
+        };
+        self.push_item(run, RunItem::VmlDrawing { element, image })
     }
 
     /// The image the relationship `id` of the part leads to, read the first time a

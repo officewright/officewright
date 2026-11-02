@@ -198,9 +198,11 @@ scripts/check-capi.sh target/capi
 if [ "$os" != windows ]; then
 	step "PDF output (qpdf, pdftotext, pdffonts, pdfimages, pdftoppm)"
 	cargo build -p officewright-cli
-	cargo build -p officewright-pdf --example primitives --example images --example embed_report
+	cargo build -p officewright-pdf --example primitives --example images --example embed_report \
+		--example synthetic
 	OW_CLI=${CARGO_TARGET_DIR:-target}/debug/officewright \
 		OW_PRIMITIVES=${CARGO_TARGET_DIR:-target}/debug/examples/primitives \
+		OW_SYNTHETIC=${CARGO_TARGET_DIR:-target}/debug/examples/synthetic \
 		OW_IMAGES=${CARGO_TARGET_DIR:-target}/debug/examples/images \
 		OW_EMBED_REPORT=${CARGO_TARGET_DIR:-target}/debug/examples/embed_report \
 		"$python" -B -m unittest discover -s tests/pdf-output -v

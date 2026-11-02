@@ -25,7 +25,8 @@
 //! What the model does not represent yet (equations, bookmarks, and the properties not
 //! typed yet) is kept as it was read; such content shows as `Other` with an [`Opaque`]
 //! view. Drawings show as [`RunContent::Drawing`]: their frame and picture are read, and
-//! [`Drawing::to_xml`] gives a shape, chart or group as written.
+//! [`Drawing::to_xml`] gives a shape, chart or group as written; so do VML drawings
+//! (`w:pict`) as [`RunContent::VmlDrawing`], whose pictures are read.
 //!
 //! Opening never panics on a damaged file: it either returns an [`Error`], or opens the
 //! document and lists in [`Document::diagnostics`] what it repaired, as Word does.
@@ -68,7 +69,7 @@ pub use model::{
     TableLook, TableOverlap, TablePosition, TableProperties, TableRow, TableRowProperties,
     TableStyleCondition, TableWidth, TextDirection, Theme, ThemeColor, ThemeFont, Underline,
     UnderlineStyle, VerticalAlignment, VerticalJustification, VerticalPosition, VerticalReference,
-    WrapKind,
+    VmlDrawing, VmlPicture, WrapKind,
 };
 // What `Document::save_pdf` and the like report, the options they take, and how the
 // streams of the PDF are compressed (`RenderOptions::with_compression`).

@@ -87,9 +87,10 @@ tests/pdf-output/       checks text-to-pdf output, in Helvetica and with Liberat
                         (CFF) from tests/fonts embedded, the page of glyph runs and vector graphics that
                         officewright-pdf's example `primitives` draws in both fonts, and the JPEG and PNG files
                         images.py makes (also the fuzz seeds in fuzz/seeds/png and jpeg) drawn by the example
-                        `images`, with qpdf, pdftotext, pdffonts, pdfimages and pdftoppm, and what the example
-                        `embed_report` counts for fonts it cannot embed (Linux, macOS; Windows has no official
-                        poppler build, and the golden snapshot proves the bytes are the same)
+                        `images`, the synthetic italic and bold the example `synthetic` draws for a family
+                        resolved without those faces, with qpdf, pdftotext, pdffonts, pdfimages and pdftoppm,
+                        and what the example `embed_report` counts for fonts it cannot embed (Linux, macOS;
+                        Windows has no official poppler build, and the golden snapshot proves the bytes are the same)
 tests/corpus/           small curated real documents (committed) + SOURCES.md + baseline.json
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
 tests/corpus/poi/        unmodified Apache POI test documents (Apache-2.0) with POI's LICENSE and NOTICE
@@ -316,7 +317,7 @@ gh pr merge <n> --squash --auto --match-head-commit <the head commit checked>
 where the head commit checked is the PR's head that the first condition compared with the commit the last review names (for a Dependabot PR, which gets no review and is queued only with its checks green, the head whose update was checked), so that nothing pushed since is queued. The command may be run before the PR's checks have finished on that head: it turns on auto-merge, and GitHub puts the PR into the queue only once the required checks pass. Auto-merge does not keep the head it was turned on for (a push leaves it on, for the new head), and what a push does to a queued PR is not documented, so nothing is pushed to the branch (a fix, or a merge of main) while the PR may still be merged. The author reads the PR's state with
 
 ```sh
-gh api graphql -f query='{repository(owner:"officewright",name:"officewright"){pullRequest(number:<n>){state isInMergeQueue autoMergeRequest{enabledAt} timelineItems(last:1,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{__typename ... on RemovedFromMergeQueueEvent{reason actor{login}}}}}}}'
+gh api graphql -f query='{repository(owner:"officewright",name:"officewright"){pullRequest(number:<n>){state isInMergeQueue autoMergeRequest{enabledAt} timelineItems(last:1,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT,AUTO_MERGE_ENABLED_EVENT]){nodes{__typename ... on RemovedFromMergeQueueEvent{reason actor{login}}}}}}}'
 ```
 
 takes a queued PR (`isInMergeQueue` true), which gh cannot take out of the queue, out first with
@@ -325,7 +326,7 @@ takes a queued PR (`isInMergeQueue` true), which gh cannot take out of the queue
 gh api graphql -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{state}}}' -f id="$(gh pr view <n> --json id --jq .id)"
 ```
 
-then turns auto-merge off with `gh pr merge <n> --disable-auto`, reads the state again, and pushes only when it shows `isInMergeQueue` false and `autoMergeRequest` null; once the merge conditions hold for the new head, it runs the command again with that head. The author follows the PR with the same query until its state is `MERGED`. An open PR whose last queue event is a removal by `github-merge-queue` with a reason other than `merged` was dropped by the queue (above); an open PR whose checks have passed, with auto-merge on but not in the queue, gets `--disable-auto` and the command again.
+then turns auto-merge off with `gh pr merge <n> --disable-auto`, reads the state again, and pushes only when it shows `state` `OPEN`, `isInMergeQueue` false and `autoMergeRequest` null (a fix for a PR that is already merged goes into a new PR); once the merge conditions hold for the new head, it runs the command again with that head. The author follows the PR with the same query until its state is `MERGED`. An open PR whose last event in the query is a removal by `github-merge-queue` with a reason other than `merged` was dropped by the queue (above); one put back since shows `AddedToMergeQueueEvent` last, or `AutoMergeEnabledEvent` while its checks still run; an open PR whose checks have passed, with auto-merge on but not in the queue, gets `--disable-auto` and the command again.
 
 A PR that contains anything on the list "Always ask the maintainer first" is merged only with the maintainer's consent, which the author quotes in the PR with its date (the sessions and the maintainer post from the same account, so a quote from the chat is what records it). After each merge the author sends the maintainer a short report; the maintainer runs the "How to check by hand" steps when they choose.
 
@@ -376,8 +377,9 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   pdftoppm renders the subset exactly as the whole font and the shapes, colours and clips where the page puts them;
   the example images' page: pdfimages lists every JPEG and PNG as passed through or decoded with a soft mask, pdftoppm
   shows their colours and transparency, a PNG with every filter type renders the same decoded by officewright as
-  unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example embed_report counts a font the
-  subsetter does not support apart from a damaged one (Linux, macOS)
+  unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example synthetic's page: qpdf --check,
+  pdftotext reads every line, pdftoppm shows synthetic italic slanted by a third and synthetic bold bolder; the example
+  embed_report counts a font the subsetter does not support apart from a damaged one (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), every document rendered with the fonts of tests/fonts and, first,
   tests/fonts-word/noto-truetype (the TrueType Noto Sans, the build Word had for the references that use it) and
   tests/fonts-word/test-symbol (the symbol font),

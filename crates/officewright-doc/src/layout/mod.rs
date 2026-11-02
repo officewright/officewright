@@ -102,8 +102,8 @@ impl Document {
     ///
     /// Not translated yet, and listed: the table properties of a table style's conditional
     /// formats and a row's table property exceptions, drawings that show no picture
-    /// (shapes, charts, groups), VML drawings
-    /// (`w:pict`) and other objects, equations, and indents and spacing given in
+    /// (shapes, charts, text boxes, groups, in DrawingML or VML) and other objects,
+    /// equations, and indents and spacing given in
     /// character or line units, which keep their value in points.
     ///
     /// Also listed is what the IR has no place for yet: a row's own alignment and cell
@@ -230,7 +230,7 @@ struct Translator<'a> {
     /// The empty image of pictures whose image the package does not have.
     missing_image: Option<ir::ImageId>,
     /// What has been reported once for the document, a bit per [`Once`].
-    reported: u32,
+    reported: u64,
     /// The last paragraph translated, while its mark is deleted as a tracked change and
     /// that has not been listed yet: listed once a block follows it.
     deleted_mark: Option<PendingMark>,
@@ -258,6 +258,7 @@ const DELETED_MARK: &str = "a paragraph mark deleted or moved away as a tracked 
 /// section (a mail merge writes a section per letter), so that the report's 1,000
 /// entries are not spent on one feature.
 #[derive(Clone, Copy, Debug)]
+#[repr(u64)]
 enum Once {
     Emboss = 1,
     Imprint = 1 << 1,
@@ -288,6 +289,11 @@ enum Once {
     NumberForm = 1 << 26,
     NumberSpacing = 1 << 27,
     StylisticSets = 1 << 28,
+    VmlPictureOutline = 1 << 29,
+    VmlPictureColor = 1 << 30,
+    VmlPictureText = 1 << 31,
+    VmlPictureShadow = 1 << 32,
+    VmlPictureBorder = 1 << 33,
 }
 
 impl<'a> Translator<'a> {
@@ -500,13 +506,13 @@ impl<'a> Translator<'a> {
 
     /// Whether `once` has been listed.
     fn reported(&self, once: Once) -> bool {
-        self.reported & once as u32 != 0
+        self.reported & once as u64 != 0
     }
 
     /// Lists `message` at the place `at`, unless `once` has been listed.
     fn report_once_at(&mut self, once: Once, at: Location, message: &'static str) {
         if !self.reported(once) {
-            self.reported |= once as u32;
+            self.reported |= once as u64;
             if self.room() {
                 self.left_out.push(ReportEntry::new(
                     ReportKind::FeatureUnsupported,

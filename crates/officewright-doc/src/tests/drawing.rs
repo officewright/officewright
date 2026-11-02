@@ -93,7 +93,7 @@ pub(super) fn with_images(body: &str) -> Document {
 }
 
 /// The package [`with_images`] opens.
-fn images_package(body: &str) -> Vec<u8> {
+pub(super) fn images_package(body: &str) -> Vec<u8> {
     let header = format!(
         r#"<w:hdr xmlns:w="{W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p>{}</w:p></w:hdr>"#,
         inline_picture("rId1")

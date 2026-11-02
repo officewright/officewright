@@ -1,204 +1,204 @@
 {
- "format": 1,
- "document": "word-rules/E-section-next-column.docx",
- "pdf_sha256": "e425a669a8d9b0e4898820475dd3ea4780a4c7965803210731f0eda056eb2c6f",
- "made_with": "pdftotext 24.02.0 -bbox-layout",
- "units": "points, origin at the top left of the page, y downwards",
- "page_count": 2,
- "fonts_not_embedded": [],
- "fonts_rasterized_with": [],
- "compat_flags_dropped": [],
- "compat_flags_added": [
-  "useWord2013TrackBottomHyphenation=1"
- ],
- "page_breaks": [
-  {
-   "paragraph": 1,
-   "offset": 0,
-   "text_before": "",
-   "text_after": "Section 2: a next column start"
-  }
- ],
- "pages": [
-  {
-   "number": 1,
-   "width": 595.32,
-   "height": 841.92,
-   "lines": [
-    {
-     "text": "Section 1: one column",
-     "box": [
-      72.024,
-      73.32,
-      171.472,
-      84.36
-     ],
-     "words": [
-      {
-       "text": "Section",
-       "box": [
-        72.024,
-        73.32,
-        105.166,
-        84.36
-       ]
-      },
-      {
-       "text": "1:",
-       "box": [
-        107.507,
-        73.32,
-        116.007,
-        84.36
-       ]
-      },
-      {
-       "text": "one",
-       "box": [
-        118.536,
-        73.32,
-        135.57,
-        84.36
-       ]
-      },
-      {
-       "text": "column",
-       "box": [
-        138.098,
-        73.32,
-        171.472,
-        84.36
-       ]
-      }
-     ]
-    }
-   ]
-  },
-  {
-   "number": 2,
-   "width": 595.32,
-   "height": 841.92,
-   "lines": [
-    {
-     "text": "Section 2: a next column start in a section of one column",
-     "box": [
-      72.024,
-      73.32,
-      325.26,
-      84.36
-     ],
-     "words": [
-      {
-       "text": "Section",
-       "box": [
-        72.024,
-        73.32,
-        105.166,
-        84.36
-       ]
-      },
-      {
-       "text": "2:",
-       "box": [
-        107.507,
-        73.32,
-        116.007,
-        84.36
-       ]
-      },
-      {
-       "text": "a",
-       "box": [
-        118.536,
-        73.32,
-        123.824,
-        84.36
-       ]
-      },
-      {
-       "text": "next",
-       "box": [
-        126.352,
-        73.32,
-        145.992,
-        84.36
-       ]
-      },
-      {
-       "text": "column",
-       "box": [
-        148.52,
-        73.32,
-        181.795,
-        84.36
-       ]
-      },
-      {
-       "text": "start",
-       "box": [
-        184.257,
-        73.32,
-        205.045,
-        84.36
-       ]
-      },
-      {
-       "text": "in",
-       "box": [
-        207.54,
-        73.32,
-        215.875,
-        84.36
-       ]
-      },
-      {
-       "text": "a",
-       "box": [
-        218.37,
-        73.32,
-        223.658,
-        84.36
-       ]
-      },
-      {
-       "text": "section",
-       "box": [
-        226.153,
-        73.32,
-        258.346,
-        84.36
-       ]
-      },
-      {
-       "text": "of",
-       "box": [
-        260.709,
-        73.32,
-        269.949,
-        84.36
-       ]
-      },
-      {
-       "text": "one",
-       "box": [
-        272.345,
-        73.32,
-        289.479,
-        84.36
-       ]
-      },
-      {
-       "text": "column",
-       "box": [
-        292.007,
-        73.32,
-        325.26,
-        84.36
-       ]
-      }
-     ]
-    }
-   ]
-  }
- ]
+"format": 1,
+"document": "word-rules/E-section-next-column.docx",
+"pdf_sha256": "e425a669a8d9b0e4898820475dd3ea4780a4c7965803210731f0eda056eb2c6f",
+"made_with": "pdftotext 24.02.0 -bbox-layout",
+"units": "points, origin at the top left of the page, y downwards",
+"page_count": 2,
+"fonts_not_embedded": [],
+"fonts_rasterized_with": [],
+"compat_flags_dropped": [],
+"compat_flags_added": [
+"useWord2013TrackBottomHyphenation=1"
+],
+"page_breaks": [
+{
+"paragraph": 1,
+"offset": 0,
+"text_before": "",
+"text_after": "Section 2: a next column start"
+}
+],
+"pages": [
+{
+"number": 1,
+"width": 595.32,
+"height": 841.92,
+"lines": [
+{
+"text": "Section 1: one column",
+"box": [
+72.024,
+73.32,
+171.472,
+84.36
+],
+"words": [
+{
+"text": "Section",
+"box": [
+72.024,
+73.32,
+105.166,
+84.36
+]
+},
+{
+"text": "1:",
+"box": [
+107.507,
+73.32,
+116.007,
+84.36
+]
+},
+{
+"text": "one",
+"box": [
+118.536,
+73.32,
+135.57,
+84.36
+]
+},
+{
+"text": "column",
+"box": [
+138.098,
+73.32,
+171.472,
+84.36
+]
+}
+]
+}
+]
+},
+{
+"number": 2,
+"width": 595.32,
+"height": 841.92,
+"lines": [
+{
+"text": "Section 2: a next column start in a section of one column",
+"box": [
+72.024,
+73.32,
+325.26,
+84.36
+],
+"words": [
+{
+"text": "Section",
+"box": [
+72.024,
+73.32,
+105.166,
+84.36
+]
+},
+{
+"text": "2:",
+"box": [
+107.507,
+73.32,
+116.007,
+84.36
+]
+},
+{
+"text": "a",
+"box": [
+118.536,
+73.32,
+123.824,
+84.36
+]
+},
+{
+"text": "next",
+"box": [
+126.352,
+73.32,
+145.992,
+84.36
+]
+},
+{
+"text": "column",
+"box": [
+148.52,
+73.32,
+181.795,
+84.36
+]
+},
+{
+"text": "start",
+"box": [
+184.257,
+73.32,
+205.045,
+84.36
+]
+},
+{
+"text": "in",
+"box": [
+207.54,
+73.32,
+215.875,
+84.36
+]
+},
+{
+"text": "a",
+"box": [
+218.37,
+73.32,
+223.658,
+84.36
+]
+},
+{
+"text": "section",
+"box": [
+226.153,
+73.32,
+258.346,
+84.36
+]
+},
+{
+"text": "of",
+"box": [
+260.709,
+73.32,
+269.949,
+84.36
+]
+},
+{
+"text": "one",
+"box": [
+272.345,
+73.32,
+289.479,
+84.36
+]
+},
+{
+"text": "column",
+"box": [
+292.007,
+73.32,
+325.26,
+84.36
+]
+}
+]
+}
+]
+}
+]
 }

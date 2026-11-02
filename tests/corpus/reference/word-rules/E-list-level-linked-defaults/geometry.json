@@ -1,436 +1,436 @@
 {
- "format": 1,
- "document": "word-rules/E-list-level-linked-defaults.docx",
- "pdf_sha256": "218806093017a492740ec77f830bb9597ce5948afb55d3ca619075c408298597",
- "made_with": "pdftotext 24.02.0 -bbox-layout",
- "units": "points, origin at the top left of the page, y downwards",
- "page_count": 1,
- "fonts_not_embedded": [
-  "ArialMT"
- ],
- "fonts_rasterized_with": [
-  {
-   "font": "ArialMT",
-   "full_name": "Arial",
-   "version": "Version 7.06",
-   "sha256": "b3658eadae55e682b5f69eb64c439c1ecc8f196c0bb8d4756d145d13bc86476a"
-  }
- ],
- "compat_flags_dropped": [],
- "compat_flags_added": [
-  "useWord2013TrackBottomHyphenation=1"
- ],
- "styles_changed": [
-  "- docDefaults: pPrDefault/pPr/spacing after=0",
-  "- docDefaults: pPrDefault/pPr/spacing line=240",
-  "- docDefaults: pPrDefault/pPr/spacing lineRule=auto",
-  "- docDefaults: pPrDefault/pPr/widowControl"
- ],
- "numbering_changed": [
-  "+ abstractNum 0 level 1: pStyle val=LinkedDefaults"
- ],
- "paragraph_styles_changed": [],
- "page_breaks": [],
- "pages": [
-  {
-   "number": 1,
-   "width": 595.32,
-   "height": 841.92,
-   "lines": [
-    {
-     "text": "(a) Case 01: the style LinkedDefaults gives instance 1 and no level, the document",
-     "box": [
-      126.02,
-      74.16,
-      489.406,
-      85.2
-     ],
-     "words": [
-      {
-       "text": "(a)",
-       "box": [
-        126.02,
-        74.16,
-        137.998,
-        85.2
-       ]
-      },
-      {
-       "text": "Case",
-       "box": [
-        144.02,
-        74.16,
-        165.007,
-        85.2
-       ]
-      },
-      {
-       "text": "01:",
-       "box": [
-        167.425,
-        74.16,
-        181.534,
-        85.2
-       ]
-      },
-      {
-       "text": "the",
-       "box": [
-        184.062,
-        74.16,
-        199.054,
-        85.2
-       ]
-      },
-      {
-       "text": "style",
-       "box": [
-        201.45,
-        74.16,
-        222.47,
-        85.2
-       ]
-      },
-      {
-       "text": "LinkedDefaults",
-       "box": [
-        224.877,
-        74.16,
-        291.205,
-        85.2
-       ]
-      },
-      {
-       "text": "gives",
-       "box": [
-        293.7,
-        74.16,
-        316.167,
-        85.2
-       ]
-      },
-      {
-       "text": "instance",
-       "box": [
-        318.662,
-        74.16,
-        356.109,
-        85.2
-       ]
-      },
-      {
-       "text": "1",
-       "box": [
-        358.638,
-        74.16,
-        364.235,
-        85.2
-       ]
-      },
-      {
-       "text": "and",
-       "box": [
-        366.653,
-        74.16,
-        383.533,
-        85.2
-       ]
-      },
-      {
-       "text": "no",
-       "box": [
-        385.873,
-        74.16,
-        397.454,
-        85.2
-       ]
-      },
-      {
-       "text": "level,",
-       "box": [
-        400.004,
-        74.16,
-        423.785,
-        85.2
-       ]
-      },
-      {
-       "text": "the",
-       "box": [
-        426.191,
-        74.16,
-        441.184,
-        85.2
-       ]
-      },
-      {
-       "text": "document",
-       "box": [
-        443.679,
-        74.16,
-        489.406,
-        85.2
-       ]
-      }
-     ]
-    },
-    {
-     "text": "defaults give level 1; level 2 names the style",
-     "box": [
-      144.02,
-      87.62,
-      339.803,
-      98.66
-     ],
-     "words": [
-      {
-       "text": "defaults",
-       "box": [
-        144.02,
-        87.62,
-        180.242,
-        98.66
-       ]
-      },
-      {
-       "text": "give",
-       "box": [
-        182.781,
-        87.62,
-        200.876,
-        98.66
-       ]
-      },
-      {
-       "text": "level",
-       "box": [
-        203.404,
-        87.62,
-        224.391,
-        98.66
-       ]
-      },
-      {
-       "text": "1;",
-       "box": [
-        226.798,
-        87.62,
-        235.387,
-        98.66
-       ]
-      },
-      {
-       "text": "level",
-       "box": [
-        237.805,
-        87.62,
-        258.825,
-        98.66
-       ]
-      },
-      {
-       "text": "2",
-       "box": [
-        261.232,
-        87.62,
-        266.829,
-        98.66
-       ]
-      },
-      {
-       "text": "names",
-       "box": [
-        269.247,
-        87.62,
-        299.0,
-        98.66
-       ]
-      },
-      {
-       "text": "the",
-       "box": [
-        301.395,
-        87.62,
-        316.388,
-        98.66
-       ]
-      },
-      {
-       "text": "style",
-       "box": [
-        318.783,
-        87.62,
-        339.803,
-        98.66
-       ]
-      }
-     ]
-    },
-    {
-     "text": "Case 02: a paragraph in Normal, which has level 1 from the document defaults but no list",
-     "box": [
-      72.024,
-      101.06,
-      469.365,
-      112.1
-     ],
-     "words": [
-      {
-       "text": "Case",
-       "box": [
-        72.024,
-        101.06,
-        93.011,
-        112.1
-       ]
-      },
-      {
-       "text": "02:",
-       "box": [
-        95.429,
-        101.06,
-        109.538,
-        112.1
-       ]
-      },
-      {
-       "text": "a",
-       "box": [
-        112.066,
-        101.06,
-        117.354,
-        112.1
-       ]
-      },
-      {
-       "text": "paragraph",
-       "box": [
-        119.882,
-        101.06,
-        165.886,
-        112.1
-       ]
-      },
-      {
-       "text": "in",
-       "box": [
-        168.348,
-        101.06,
-        176.683,
-        112.1
-       ]
-      },
-      {
-       "text": "Normal,",
-       "box": [
-        179.178,
-        101.06,
-        215.191,
-        112.1
-       ]
-      },
-      {
-       "text": "which",
-       "box": [
-        217.564,
-        101.06,
-        244.259,
-        112.1
-       ]
-      },
-      {
-       "text": "has",
-       "box": [
-        246.699,
-        101.06,
-        262.1,
-        112.1
-       ]
-      },
-      {
-       "text": "level",
-       "box": [
-        264.595,
-        101.06,
-        285.482,
-        112.1
-       ]
-      },
-      {
-       "text": "1",
-       "box": [
-        287.977,
-        101.06,
-        293.575,
-        112.1
-       ]
-      },
-      {
-       "text": "from",
-       "box": [
-        296.026,
-        101.06,
-        317.83,
-        112.1
-       ]
-      },
-      {
-       "text": "the",
-       "box": [
-        320.369,
-        101.06,
-        335.24,
-        112.1
-       ]
-      },
-      {
-       "text": "document",
-       "box": [
-        337.768,
-        101.06,
-        383.484,
-        112.1
-       ]
-      },
-      {
-       "text": "defaults",
-       "box": [
-        385.98,
-        101.06,
-        422.124,
-        112.1
-       ]
-      },
-      {
-       "text": "but",
-       "box": [
-        424.62,
-        101.06,
-        439.744,
-        112.1
-       ]
-      },
-      {
-       "text": "no",
-       "box": [
-        442.272,
-        101.06,
-        453.853,
-        112.1
-       ]
-      },
-      {
-       "text": "list",
-       "box": [
-        456.404,
-        101.06,
-        469.365,
-        112.1
-       ]
-      }
-     ]
-    }
-   ]
-  }
- ]
+"format": 1,
+"document": "word-rules/E-list-level-linked-defaults.docx",
+"pdf_sha256": "218806093017a492740ec77f830bb9597ce5948afb55d3ca619075c408298597",
+"made_with": "pdftotext 24.02.0 -bbox-layout",
+"units": "points, origin at the top left of the page, y downwards",
+"page_count": 1,
+"fonts_not_embedded": [
+"ArialMT"
+],
+"fonts_rasterized_with": [
+{
+"font": "ArialMT",
+"full_name": "Arial",
+"version": "Version 7.06",
+"sha256": "b3658eadae55e682b5f69eb64c439c1ecc8f196c0bb8d4756d145d13bc86476a"
+}
+],
+"compat_flags_dropped": [],
+"compat_flags_added": [
+"useWord2013TrackBottomHyphenation=1"
+],
+"styles_changed": [
+"- docDefaults: pPrDefault/pPr/spacing after=0",
+"- docDefaults: pPrDefault/pPr/spacing line=240",
+"- docDefaults: pPrDefault/pPr/spacing lineRule=auto",
+"- docDefaults: pPrDefault/pPr/widowControl"
+],
+"numbering_changed": [
+"+ abstractNum 0 level 1: pStyle val=LinkedDefaults"
+],
+"paragraph_styles_changed": [],
+"page_breaks": [],
+"pages": [
+{
+"number": 1,
+"width": 595.32,
+"height": 841.92,
+"lines": [
+{
+"text": "(a) Case 01: the style LinkedDefaults gives instance 1 and no level, the document",
+"box": [
+126.02,
+74.16,
+489.406,
+85.2
+],
+"words": [
+{
+"text": "(a)",
+"box": [
+126.02,
+74.16,
+137.998,
+85.2
+]
+},
+{
+"text": "Case",
+"box": [
+144.02,
+74.16,
+165.007,
+85.2
+]
+},
+{
+"text": "01:",
+"box": [
+167.425,
+74.16,
+181.534,
+85.2
+]
+},
+{
+"text": "the",
+"box": [
+184.062,
+74.16,
+199.054,
+85.2
+]
+},
+{
+"text": "style",
+"box": [
+201.45,
+74.16,
+222.47,
+85.2
+]
+},
+{
+"text": "LinkedDefaults",
+"box": [
+224.877,
+74.16,
+291.205,
+85.2
+]
+},
+{
+"text": "gives",
+"box": [
+293.7,
+74.16,
+316.167,
+85.2
+]
+},
+{
+"text": "instance",
+"box": [
+318.662,
+74.16,
+356.109,
+85.2
+]
+},
+{
+"text": "1",
+"box": [
+358.638,
+74.16,
+364.235,
+85.2
+]
+},
+{
+"text": "and",
+"box": [
+366.653,
+74.16,
+383.533,
+85.2
+]
+},
+{
+"text": "no",
+"box": [
+385.873,
+74.16,
+397.454,
+85.2
+]
+},
+{
+"text": "level,",
+"box": [
+400.004,
+74.16,
+423.785,
+85.2
+]
+},
+{
+"text": "the",
+"box": [
+426.191,
+74.16,
+441.184,
+85.2
+]
+},
+{
+"text": "document",
+"box": [
+443.679,
+74.16,
+489.406,
+85.2
+]
+}
+]
+},
+{
+"text": "defaults give level 1; level 2 names the style",
+"box": [
+144.02,
+87.62,
+339.803,
+98.66
+],
+"words": [
+{
+"text": "defaults",
+"box": [
+144.02,
+87.62,
+180.242,
+98.66
+]
+},
+{
+"text": "give",
+"box": [
+182.781,
+87.62,
+200.876,
+98.66
+]
+},
+{
+"text": "level",
+"box": [
+203.404,
+87.62,
+224.391,
+98.66
+]
+},
+{
+"text": "1;",
+"box": [
+226.798,
+87.62,
+235.387,
+98.66
+]
+},
+{
+"text": "level",
+"box": [
+237.805,
+87.62,
+258.825,
+98.66
+]
+},
+{
+"text": "2",
+"box": [
+261.232,
+87.62,
+266.829,
+98.66
+]
+},
+{
+"text": "names",
+"box": [
+269.247,
+87.62,
+299.0,
+98.66
+]
+},
+{
+"text": "the",
+"box": [
+301.395,
+87.62,
+316.388,
+98.66
+]
+},
+{
+"text": "style",
+"box": [
+318.783,
+87.62,
+339.803,
+98.66
+]
+}
+]
+},
+{
+"text": "Case 02: a paragraph in Normal, which has level 1 from the document defaults but no list",
+"box": [
+72.024,
+101.06,
+469.365,
+112.1
+],
+"words": [
+{
+"text": "Case",
+"box": [
+72.024,
+101.06,
+93.011,
+112.1
+]
+},
+{
+"text": "02:",
+"box": [
+95.429,
+101.06,
+109.538,
+112.1
+]
+},
+{
+"text": "a",
+"box": [
+112.066,
+101.06,
+117.354,
+112.1
+]
+},
+{
+"text": "paragraph",
+"box": [
+119.882,
+101.06,
+165.886,
+112.1
+]
+},
+{
+"text": "in",
+"box": [
+168.348,
+101.06,
+176.683,
+112.1
+]
+},
+{
+"text": "Normal,",
+"box": [
+179.178,
+101.06,
+215.191,
+112.1
+]
+},
+{
+"text": "which",
+"box": [
+217.564,
+101.06,
+244.259,
+112.1
+]
+},
+{
+"text": "has",
+"box": [
+246.699,
+101.06,
+262.1,
+112.1
+]
+},
+{
+"text": "level",
+"box": [
+264.595,
+101.06,
+285.482,
+112.1
+]
+},
+{
+"text": "1",
+"box": [
+287.977,
+101.06,
+293.575,
+112.1
+]
+},
+{
+"text": "from",
+"box": [
+296.026,
+101.06,
+317.83,
+112.1
+]
+},
+{
+"text": "the",
+"box": [
+320.369,
+101.06,
+335.24,
+112.1
+]
+},
+{
+"text": "document",
+"box": [
+337.768,
+101.06,
+383.484,
+112.1
+]
+},
+{
+"text": "defaults",
+"box": [
+385.98,
+101.06,
+422.124,
+112.1
+]
+},
+{
+"text": "but",
+"box": [
+424.62,
+101.06,
+439.744,
+112.1
+]
+},
+{
+"text": "no",
+"box": [
+442.272,
+101.06,
+453.853,
+112.1
+]
+},
+{
+"text": "list",
+"box": [
+456.404,
+101.06,
+469.365,
+112.1
+]
+}
+]
+}
+]
+}
+]
 }

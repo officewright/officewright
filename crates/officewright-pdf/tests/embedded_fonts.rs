@@ -1278,6 +1278,52 @@ fn test_fonts() -> TestResult<FontBook> {
 }
 
 #[test]
+fn draws_the_styles_a_resolved_face_lacks() -> TestResult {
+    let book = test_fonts()?;
+    let mut resolver = FontResolver::new(&book);
+    let request =
+        |bold: bool, italic: bool| FontRequest::new("Noto Sans").bold(bold).italic(italic);
+    // Noto Sans has only a regular face in tests/fonts: every style is drawn on top of it.
+    let mut doc = Document::new();
+    let page = doc.add_page(PageSize::A4)?;
+    for (y, (bold, italic)) in [
+        (700.0, (false, false)),
+        (680.0, (true, true)),
+        (660.0, (false, true)),
+        (640.0, (true, false)),
+    ] {
+        let font = Font::resolve(&mut resolver, &request(bold, italic))?;
+        page.add_text(Pt(72.0), Pt(y), &font, Pt(12.0), "Noto")?;
+    }
+    // Liberation Sans has an italic face, which is drawn as it is.
+    let liberation = Font::resolve(
+        &mut resolver,
+        &FontRequest::new("Liberation Sans").italic(true),
+    )?;
+    page.add_text(Pt(72.0), Pt(620.0), &liberation, Pt(12.0), "Sans")?;
+    // The stroke grows with the size: 0.8 pt at 24 pt.
+    let bold = Font::resolve(&mut resolver, &request(true, false))?;
+    page.add_text(Pt(72.0), Pt(590.0), &bold, Pt(24.0), "Noto")?;
+    let pdf = pdf_text(&doc)?;
+    // A stroke a thirtieth of 12 pt wide, filled and stroked; a slant of a third about the
+    // baseline, inside `q` … `Q`.
+    for part in [
+        "BT\n/F1 12 Tf\n72 700 Td\n",
+        "q\n0.4 w\nBT\n/F1 12 Tf\n2 Tr\n1 0 0.3333 1 72 680 Tm\n",
+        "q\nBT\n/F1 12 Tf\n1 0 0.3333 1 72 660 Tm\n",
+        "q\n0.4 w\nBT\n/F1 12 Tf\n2 Tr\n72 640 Td\n",
+        "BT\n/F2 12 Tf\n72 620 Td\n",
+        "q\n0.8 w\nBT\n/F1 24 Tf\n2 Tr\n72 590 Td\n",
+    ] {
+        assert!(pdf.contains(part), "no {part:?} in {pdf}");
+    }
+    assert_eq!(pdf.matches("Tj\nET\nQ\n").count(), 4, "{pdf}");
+    // The five lines in Noto Sans share one font resource, and the file embeds it once.
+    assert_eq!(pdf.matches("/Subtype /Type0").count(), 2, "{pdf}");
+    Ok(())
+}
+
+#[test]
 fn resolves_families_and_reports_the_substitutions() -> TestResult {
     let book = test_fonts()?;
     let mut resolver = FontResolver::new(&book);

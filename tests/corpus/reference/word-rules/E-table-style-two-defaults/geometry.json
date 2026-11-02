@@ -1,383 +1,383 @@
 {
- "format": 1,
- "document": "word-rules/E-table-style-two-defaults.docx",
- "pdf_sha256": "9855ecae1cea52531fdb53044c6369d1f3e5f233c354e60c08ac93a6b43d0002",
- "made_with": "pdftotext 24.02.0 -bbox-layout",
- "units": "points, origin at the top left of the page, y downwards",
- "page_count": 1,
- "fonts_not_embedded": [],
- "fonts_rasterized_with": [],
- "compat_flags_dropped": [],
- "compat_flags_added": [
-  "useWord2013TrackBottomHyphenation=1"
- ],
- "styles_changed": [
-  "- FirstDefault: default",
-  "- SecondDefault: default",
-  "- docDefaults: pPrDefault/pPr/spacing after=0",
-  "- docDefaults: pPrDefault/pPr/spacing line=240",
-  "- docDefaults: pPrDefault/pPr/spacing lineRule=auto",
-  "- docDefaults: pPrDefault/pPr/widowControl"
- ],
- "numbering_changed": [],
- "paragraph_styles_changed": [],
- "page_breaks": [],
- "pages": [
-  {
-   "number": 1,
-   "width": 595.32,
-   "height": 841.92,
-   "lines": [
-    {
-     "text": "Case 01: a table without w:tblStyle; Normal Table, FirstDefault (red text, light grey) and",
-     "box": [
-      72.024,
-      74.16,
-      460.709,
-      85.2
-     ],
-     "words": [
-      {
-       "text": "Case",
-       "box": [
-        72.024,
-        74.16,
-        93.011,
-        85.2
-       ]
-      },
-      {
-       "text": "01:",
-       "box": [
-        95.429,
-        74.16,
-        109.538,
-        85.2
-       ]
-      },
-      {
-       "text": "a",
-       "box": [
-        112.066,
-        74.16,
-        117.354,
-        85.2
-       ]
-      },
-      {
-       "text": "table",
-       "box": [
-        119.882,
-        74.16,
-        142.559,
-        85.2
-       ]
-      },
-      {
-       "text": "without",
-       "box": [
-        144.965,
-        74.16,
-        180.216,
-        85.2
-       ]
-      },
-      {
-       "text": "w:tblStyle;",
-       "box": [
-        182.612,
-        74.16,
-        229.984,
-        85.2
-       ]
-      },
-      {
-       "text": "Normal",
-       "box": [
-        232.512,
-        74.16,
-        265.897,
-        85.2
-       ]
-      },
-      {
-       "text": "Table,",
-       "box": [
-        268.271,
-        74.16,
-        295.485,
-        85.2
-       ]
-      },
-      {
-       "text": "FirstDefault",
-       "box": [
-        298.013,
-        74.16,
-        350.309,
-        85.2
-       ]
-      },
-      {
-       "text": "(red",
-       "box": [
-        352.705,
-        74.16,
-        371.23,
-        85.2
-       ]
-      },
-      {
-       "text": "text,",
-       "box": [
-        373.604,
-        74.16,
-        393.972,
-        85.2
-       ]
-      },
-      {
-       "text": "light",
-       "box": [
-        396.501,
-        74.16,
-        416.163,
-        85.2
-       ]
-      },
-      {
-       "text": "grey)",
-       "box": [
-        418.691,
-        74.16,
-        441.345,
-        85.2
-       ]
-      },
-      {
-       "text": "and",
-       "box": [
-        443.873,
-        74.16,
-        460.709,
-        85.2
-       ]
-      }
-     ]
-    },
-    {
-     "text": "SecondDefault (blue text, dark grey) are all marked w:default",
-     "box": [
-      72.024,
-      87.62,
-      344.933,
-      98.66
-     ],
-     "words": [
-      {
-       "text": "SecondDefault",
-       "box": [
-        72.024,
-        87.62,
-        137.524,
-        98.66
-       ]
-      },
-      {
-       "text": "(blue",
-       "box": [
-        140.052,
-        87.62,
-        162.828,
-        98.66
-       ]
-      },
-      {
-       "text": "text,",
-       "box": [
-        165.356,
-        87.62,
-        185.747,
-        98.66
-       ]
-      },
-      {
-       "text": "dark",
-       "box": [
-        188.242,
-        87.62,
-        208.07,
-        98.66
-       ]
-      },
-      {
-       "text": "grey)",
-       "box": [
-        210.565,
-        87.62,
-        233.363,
-        98.66
-       ]
-      },
-      {
-       "text": "are",
-       "box": [
-        235.891,
-        87.62,
-        250.386,
-        98.66
-       ]
-      },
-      {
-       "text": "all",
-       "box": [
-        252.914,
-        87.62,
-        263.281,
-        98.66
-       ]
-      },
-      {
-       "text": "marked",
-       "box": [
-        265.632,
-        87.62,
-        299.834,
-        98.66
-       ]
-      },
-      {
-       "text": "w:default",
-       "box": [
-        302.329,
-        87.62,
-        344.933,
-        98.66
-       ]
-      }
-     ]
-    },
-    {
-     "text": "r1c1",
-     "box": [
-      77.664,
-      101.54,
-      97.415,
-      112.58
-     ],
-     "words": [
-      {
-       "text": "r1c1",
-       "box": [
-        77.664,
-        101.54,
-        97.415,
-        112.58
-       ]
-      }
-     ]
-    },
-    {
-     "text": "r1c2",
-     "box": [
-      228.05,
-      101.54,
-      247.801,
-      112.58
-     ],
-     "words": [
-      {
-       "text": "r1c2",
-       "box": [
-        228.05,
-        101.54,
-        247.801,
-        112.58
-       ]
-      }
-     ]
-    },
-    {
-     "text": "r1c3",
-     "box": [
-      378.55,
-      101.54,
-      398.301,
-      112.58
-     ],
-     "words": [
-      {
-       "text": "r1c3",
-       "box": [
-        378.55,
-        101.54,
-        398.301,
-        112.58
-       ]
-      }
-     ]
-    },
-    {
-     "text": "r2c1",
-     "box": [
-      77.664,
-      115.46,
-      97.415,
-      126.5
-     ],
-     "words": [
-      {
-       "text": "r2c1",
-       "box": [
-        77.664,
-        115.46,
-        97.415,
-        126.5
-       ]
-      }
-     ]
-    },
-    {
-     "text": "r2c2",
-     "box": [
-      228.05,
-      115.46,
-      247.801,
-      126.5
-     ],
-     "words": [
-      {
-       "text": "r2c2",
-       "box": [
-        228.05,
-        115.46,
-        247.801,
-        126.5
-       ]
-      }
-     ]
-    },
-    {
-     "text": "r2c3",
-     "box": [
-      378.55,
-      115.46,
-      398.301,
-      126.5
-     ],
-     "words": [
-      {
-       "text": "r2c3",
-       "box": [
-        378.55,
-        115.46,
-        398.301,
-        126.5
-       ]
-      }
-     ]
-    }
-   ]
-  }
- ]
+"format": 1,
+"document": "word-rules/E-table-style-two-defaults.docx",
+"pdf_sha256": "9855ecae1cea52531fdb53044c6369d1f3e5f233c354e60c08ac93a6b43d0002",
+"made_with": "pdftotext 24.02.0 -bbox-layout",
+"units": "points, origin at the top left of the page, y downwards",
+"page_count": 1,
+"fonts_not_embedded": [],
+"fonts_rasterized_with": [],
+"compat_flags_dropped": [],
+"compat_flags_added": [
+"useWord2013TrackBottomHyphenation=1"
+],
+"styles_changed": [
+"- FirstDefault: default",
+"- SecondDefault: default",
+"- docDefaults: pPrDefault/pPr/spacing after=0",
+"- docDefaults: pPrDefault/pPr/spacing line=240",
+"- docDefaults: pPrDefault/pPr/spacing lineRule=auto",
+"- docDefaults: pPrDefault/pPr/widowControl"
+],
+"numbering_changed": [],
+"paragraph_styles_changed": [],
+"page_breaks": [],
+"pages": [
+{
+"number": 1,
+"width": 595.32,
+"height": 841.92,
+"lines": [
+{
+"text": "Case 01: a table without w:tblStyle; Normal Table, FirstDefault (red text, light grey) and",
+"box": [
+72.024,
+74.16,
+460.709,
+85.2
+],
+"words": [
+{
+"text": "Case",
+"box": [
+72.024,
+74.16,
+93.011,
+85.2
+]
+},
+{
+"text": "01:",
+"box": [
+95.429,
+74.16,
+109.538,
+85.2
+]
+},
+{
+"text": "a",
+"box": [
+112.066,
+74.16,
+117.354,
+85.2
+]
+},
+{
+"text": "table",
+"box": [
+119.882,
+74.16,
+142.559,
+85.2
+]
+},
+{
+"text": "without",
+"box": [
+144.965,
+74.16,
+180.216,
+85.2
+]
+},
+{
+"text": "w:tblStyle;",
+"box": [
+182.612,
+74.16,
+229.984,
+85.2
+]
+},
+{
+"text": "Normal",
+"box": [
+232.512,
+74.16,
+265.897,
+85.2
+]
+},
+{
+"text": "Table,",
+"box": [
+268.271,
+74.16,
+295.485,
+85.2
+]
+},
+{
+"text": "FirstDefault",
+"box": [
+298.013,
+74.16,
+350.309,
+85.2
+]
+},
+{
+"text": "(red",
+"box": [
+352.705,
+74.16,
+371.23,
+85.2
+]
+},
+{
+"text": "text,",
+"box": [
+373.604,
+74.16,
+393.972,
+85.2
+]
+},
+{
+"text": "light",
+"box": [
+396.501,
+74.16,
+416.163,
+85.2
+]
+},
+{
+"text": "grey)",
+"box": [
+418.691,
+74.16,
+441.345,
+85.2
+]
+},
+{
+"text": "and",
+"box": [
+443.873,
+74.16,
+460.709,
+85.2
+]
+}
+]
+},
+{
+"text": "SecondDefault (blue text, dark grey) are all marked w:default",
+"box": [
+72.024,
+87.62,
+344.933,
+98.66
+],
+"words": [
+{
+"text": "SecondDefault",
+"box": [
+72.024,
+87.62,
+137.524,
+98.66
+]
+},
+{
+"text": "(blue",
+"box": [
+140.052,
+87.62,
+162.828,
+98.66
+]
+},
+{
+"text": "text,",
+"box": [
+165.356,
+87.62,
+185.747,
+98.66
+]
+},
+{
+"text": "dark",
+"box": [
+188.242,
+87.62,
+208.07,
+98.66
+]
+},
+{
+"text": "grey)",
+"box": [
+210.565,
+87.62,
+233.363,
+98.66
+]
+},
+{
+"text": "are",
+"box": [
+235.891,
+87.62,
+250.386,
+98.66
+]
+},
+{
+"text": "all",
+"box": [
+252.914,
+87.62,
+263.281,
+98.66
+]
+},
+{
+"text": "marked",
+"box": [
+265.632,
+87.62,
+299.834,
+98.66
+]
+},
+{
+"text": "w:default",
+"box": [
+302.329,
+87.62,
+344.933,
+98.66
+]
+}
+]
+},
+{
+"text": "r1c1",
+"box": [
+77.664,
+101.54,
+97.415,
+112.58
+],
+"words": [
+{
+"text": "r1c1",
+"box": [
+77.664,
+101.54,
+97.415,
+112.58
+]
+}
+]
+},
+{
+"text": "r1c2",
+"box": [
+228.05,
+101.54,
+247.801,
+112.58
+],
+"words": [
+{
+"text": "r1c2",
+"box": [
+228.05,
+101.54,
+247.801,
+112.58
+]
+}
+]
+},
+{
+"text": "r1c3",
+"box": [
+378.55,
+101.54,
+398.301,
+112.58
+],
+"words": [
+{
+"text": "r1c3",
+"box": [
+378.55,
+101.54,
+398.301,
+112.58
+]
+}
+]
+},
+{
+"text": "r2c1",
+"box": [
+77.664,
+115.46,
+97.415,
+126.5
+],
+"words": [
+{
+"text": "r2c1",
+"box": [
+77.664,
+115.46,
+97.415,
+126.5
+]
+}
+]
+},
+{
+"text": "r2c2",
+"box": [
+228.05,
+115.46,
+247.801,
+126.5
+],
+"words": [
+{
+"text": "r2c2",
+"box": [
+228.05,
+115.46,
+247.801,
+126.5
+]
+}
+]
+},
+{
+"text": "r2c3",
+"box": [
+378.55,
+115.46,
+398.301,
+126.5
+],
+"words": [
+{
+"text": "r2c3",
+"box": [
+378.55,
+115.46,
+398.301,
+126.5
+]
+}
+]
+}
+]
+}
+]
 }

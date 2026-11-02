@@ -1,424 +1,424 @@
 {
- "format": 1,
- "document": "word-rules/E-table-style-defaults-size-14.docx",
- "pdf_sha256": "d769792b83662a222985e3af8b2eac1070b1cfe934a9021dca5f4dc7729bb4f5",
- "made_with": "pdftotext 24.02.0 -bbox-layout",
- "units": "points, origin at the top left of the page, y downwards",
- "page_count": 1,
- "fonts_not_embedded": [],
- "fonts_rasterized_with": [],
- "compat_flags_dropped": [],
- "compat_flags_added": [
-  "useWord2013TrackBottomHyphenation=1"
- ],
- "styles_changed": [
-  "- docDefaults: pPrDefault/pPr/spacing after=0",
-  "- docDefaults: pPrDefault/pPr/spacing line=240",
-  "- docDefaults: pPrDefault/pPr/spacing lineRule=auto",
-  "- docDefaults: pPrDefault/pPr/widowControl"
- ],
- "numbering_changed": [],
- "paragraph_styles_changed": [],
- "page_breaks": [],
- "pages": [
-  {
-   "number": 1,
-   "width": 595.32,
-   "height": 841.92,
-   "lines": [
-    {
-     "text": "Case 01: a table in the style Big (14 pt, centred); document defaults 12 pt and right-aligned, Normal",
-     "box": [
-      72.024,
-      74.16,
-      515.384,
-      85.2
-     ],
-     "words": [
-      {
-       "text": "Case",
-       "box": [
-        72.024,
-        74.16,
-        93.011,
-        85.2
-       ]
-      },
-      {
-       "text": "01:",
-       "box": [
-        95.429,
-        74.16,
-        109.538,
-        85.2
-       ]
-      },
-      {
-       "text": "a",
-       "box": [
-        112.066,
-        74.16,
-        117.354,
-        85.2
-       ]
-      },
-      {
-       "text": "table",
-       "box": [
-        119.882,
-        74.16,
-        142.559,
-        85.2
-       ]
-      },
-      {
-       "text": "in",
-       "box": [
-        145.054,
-        74.16,
-        153.389,
-        85.2
-       ]
-      },
-      {
-       "text": "the",
-       "box": [
-        155.884,
-        74.16,
-        170.744,
-        85.2
-       ]
-      },
-      {
-       "text": "style",
-       "box": [
-        173.272,
-        74.16,
-        194.259,
-        85.2
-       ]
-      },
-      {
-       "text": "Big",
-       "box": [
-        196.632,
-        74.16,
-        210.377,
-        85.2
-       ]
-      },
-      {
-       "text": "(14",
-       "box": [
-        212.828,
-        74.16,
-        227.324,
-        85.2
-       ]
-      },
-      {
-       "text": "pt,",
-       "box": [
-        229.852,
-        74.16,
-        242.106,
-        85.2
-       ]
-      },
-      {
-       "text": "centred);",
-       "box": [
-        244.491,
-        74.16,
-        285.504,
-        85.2
-       ]
-      },
-      {
-       "text": "document",
-       "box": [
-        287.922,
-        74.16,
-        333.76,
-        85.2
-       ]
-      },
-      {
-       "text": "defaults",
-       "box": [
-        336.145,
-        74.16,
-        372.4,
-        85.2
-       ]
-      },
-      {
-       "text": "12",
-       "box": [
-        374.807,
-        74.16,
-        386.035,
-        85.2
-       ]
-      },
-      {
-       "text": "pt",
-       "box": [
-        388.452,
-        74.16,
-        397.947,
-        85.2
-       ]
-      },
-      {
-       "text": "and",
-       "box": [
-        400.464,
-        74.16,
-        417.3,
-        85.2
-       ]
-      },
-      {
-       "text": "right-aligned,",
-       "box": [
-        419.762,
-        74.16,
-        479.515,
-        85.2
-       ]
-      },
-      {
-       "text": "Normal",
-       "box": [
-        482.01,
-        74.16,
-        515.384,
-        85.2
-       ]
-      }
-     ]
-    },
-    {
-     "text": "11 pt and left-aligned",
-     "box": [
-      72.024,
-      87.62,
-      168.035,
-      98.66
-     ],
-     "words": [
-      {
-       "text": "11",
-       "box": [
-        72.024,
-        87.62,
-        83.252,
-        98.66
-       ]
-      },
-      {
-       "text": "pt",
-       "box": [
-        85.78,
-        87.62,
-        95.274,
-        98.66
-       ]
-      },
-      {
-       "text": "and",
-       "box": [
-        97.659,
-        87.62,
-        114.539,
-        98.66
-       ]
-      },
-      {
-       "text": "left-aligned",
-       "box": [
-        116.979,
-        87.62,
-        168.035,
-        98.66
-       ]
-      }
-     ]
-    },
-    {
-     "text": "r1c1",
-     "box": [
-      169.58,
-      101.54,
-      189.331,
-      112.58
-     ],
-     "words": [
-      {
-       "text": "r1c1",
-       "box": [
-        169.58,
-        101.54,
-        189.331,
-        112.58
-       ]
-      }
-     ]
-    },
-    {
-     "text": "r1c2",
-     "box": [
-      395.23,
-      101.54,
-      414.981,
-      112.58
-     ],
-     "words": [
-      {
-       "text": "r1c2",
-       "box": [
-        395.23,
-        101.54,
-        414.981,
-        112.58
-       ]
-      }
-     ]
-    },
-    {
-     "text": "r2c1",
-     "box": [
-      169.58,
-      115.46,
-      189.331,
-      126.5
-     ],
-     "words": [
-      {
-       "text": "r2c1",
-       "box": [
-        169.58,
-        115.46,
-        189.331,
-        126.5
-       ]
-      }
-     ]
-    },
-    {
-     "text": "r2c2",
-     "box": [
-      395.23,
-      115.46,
-      414.981,
-      126.5
-     ],
-     "words": [
-      {
-       "text": "r2c2",
-       "box": [
-        395.23,
-        115.46,
-        414.981,
-        126.5
-       ]
-      }
-     ]
-    },
-    {
-     "text": "Case 02: a paragraph after the table, in Normal",
-     "box": [
-      72.024,
-      142.82,
-      281.994,
-      153.86
-     ],
-     "words": [
-      {
-       "text": "Case",
-       "box": [
-        72.024,
-        142.82,
-        93.011,
-        153.86
-       ]
-      },
-      {
-       "text": "02:",
-       "box": [
-        95.429,
-        142.82,
-        109.538,
-        153.86
-       ]
-      },
-      {
-       "text": "a",
-       "box": [
-        112.066,
-        142.82,
-        117.354,
-        153.86
-       ]
-      },
-      {
-       "text": "paragraph",
-       "box": [
-        119.882,
-        142.82,
-        165.886,
-        153.86
-       ]
-      },
-      {
-       "text": "after",
-       "box": [
-        168.348,
-        142.82,
-        189.975,
-        153.86
-       ]
-      },
-      {
-       "text": "the",
-       "box": [
-        192.36,
-        142.82,
-        207.352,
-        153.86
-       ]
-      },
-      {
-       "text": "table,",
-       "box": [
-        209.847,
-        142.82,
-        235.427,
-        153.86
-       ]
-      },
-      {
-       "text": "in",
-       "box": [
-        237.801,
-        142.82,
-        246.136,
-        153.86
-       ]
-      },
-      {
-       "text": "Normal",
-       "box": [
-        248.631,
-        142.82,
-        281.994,
-        153.86
-       ]
-      }
-     ]
-    }
-   ]
-  }
- ]
+"format": 1,
+"document": "word-rules/E-table-style-defaults-size-14.docx",
+"pdf_sha256": "d769792b83662a222985e3af8b2eac1070b1cfe934a9021dca5f4dc7729bb4f5",
+"made_with": "pdftotext 24.02.0 -bbox-layout",
+"units": "points, origin at the top left of the page, y downwards",
+"page_count": 1,
+"fonts_not_embedded": [],
+"fonts_rasterized_with": [],
+"compat_flags_dropped": [],
+"compat_flags_added": [
+"useWord2013TrackBottomHyphenation=1"
+],
+"styles_changed": [
+"- docDefaults: pPrDefault/pPr/spacing after=0",
+"- docDefaults: pPrDefault/pPr/spacing line=240",
+"- docDefaults: pPrDefault/pPr/spacing lineRule=auto",
+"- docDefaults: pPrDefault/pPr/widowControl"
+],
+"numbering_changed": [],
+"paragraph_styles_changed": [],
+"page_breaks": [],
+"pages": [
+{
+"number": 1,
+"width": 595.32,
+"height": 841.92,
+"lines": [
+{
+"text": "Case 01: a table in the style Big (14 pt, centred); document defaults 12 pt and right-aligned, Normal",
+"box": [
+72.024,
+74.16,
+515.384,
+85.2
+],
+"words": [
+{
+"text": "Case",
+"box": [
+72.024,
+74.16,
+93.011,
+85.2
+]
+},
+{
+"text": "01:",
+"box": [
+95.429,
+74.16,
+109.538,
+85.2
+]
+},
+{
+"text": "a",
+"box": [
+112.066,
+74.16,
+117.354,
+85.2
+]
+},
+{
+"text": "table",
+"box": [
+119.882,
+74.16,
+142.559,
+85.2
+]
+},
+{
+"text": "in",
+"box": [
+145.054,
+74.16,
+153.389,
+85.2
+]
+},
+{
+"text": "the",
+"box": [
+155.884,
+74.16,
+170.744,
+85.2
+]
+},
+{
+"text": "style",
+"box": [
+173.272,
+74.16,
+194.259,
+85.2
+]
+},
+{
+"text": "Big",
+"box": [
+196.632,
+74.16,
+210.377,
+85.2
+]
+},
+{
+"text": "(14",
+"box": [
+212.828,
+74.16,
+227.324,
+85.2
+]
+},
+{
+"text": "pt,",
+"box": [
+229.852,
+74.16,
+242.106,
+85.2
+]
+},
+{
+"text": "centred);",
+"box": [
+244.491,
+74.16,
+285.504,
+85.2
+]
+},
+{
+"text": "document",
+"box": [
+287.922,
+74.16,
+333.76,
+85.2
+]
+},
+{
+"text": "defaults",
+"box": [
+336.145,
+74.16,
+372.4,
+85.2
+]
+},
+{
+"text": "12",
+"box": [
+374.807,
+74.16,
+386.035,
+85.2
+]
+},
+{
+"text": "pt",
+"box": [
+388.452,
+74.16,
+397.947,
+85.2
+]
+},
+{
+"text": "and",
+"box": [
+400.464,
+74.16,
+417.3,
+85.2
+]
+},
+{
+"text": "right-aligned,",
+"box": [
+419.762,
+74.16,
+479.515,
+85.2
+]
+},
+{
+"text": "Normal",
+"box": [
+482.01,
+74.16,
+515.384,
+85.2
+]
+}
+]
+},
+{
+"text": "11 pt and left-aligned",
+"box": [
+72.024,
+87.62,
+168.035,
+98.66
+],
+"words": [
+{
+"text": "11",
+"box": [
+72.024,
+87.62,
+83.252,
+98.66
+]
+},
+{
+"text": "pt",
+"box": [
+85.78,
+87.62,
+95.274,
+98.66
+]
+},
+{
+"text": "and",
+"box": [
+97.659,
+87.62,
+114.539,
+98.66
+]
+},
+{
+"text": "left-aligned",
+"box": [
+116.979,
+87.62,
+168.035,
+98.66
+]
+}
+]
+},
+{
+"text": "r1c1",
+"box": [
+169.58,
+101.54,
+189.331,
+112.58
+],
+"words": [
+{
+"text": "r1c1",
+"box": [
+169.58,
+101.54,
+189.331,
+112.58
+]
+}
+]
+},
+{
+"text": "r1c2",
+"box": [
+395.23,
+101.54,
+414.981,
+112.58
+],
+"words": [
+{
+"text": "r1c2",
+"box": [
+395.23,
+101.54,
+414.981,
+112.58
+]
+}
+]
+},
+{
+"text": "r2c1",
+"box": [
+169.58,
+115.46,
+189.331,
+126.5
+],
+"words": [
+{
+"text": "r2c1",
+"box": [
+169.58,
+115.46,
+189.331,
+126.5
+]
+}
+]
+},
+{
+"text": "r2c2",
+"box": [
+395.23,
+115.46,
+414.981,
+126.5
+],
+"words": [
+{
+"text": "r2c2",
+"box": [
+395.23,
+115.46,
+414.981,
+126.5
+]
+}
+]
+},
+{
+"text": "Case 02: a paragraph after the table, in Normal",
+"box": [
+72.024,
+142.82,
+281.994,
+153.86
+],
+"words": [
+{
+"text": "Case",
+"box": [
+72.024,
+142.82,
+93.011,
+153.86
+]
+},
+{
+"text": "02:",
+"box": [
+95.429,
+142.82,
+109.538,
+153.86
+]
+},
+{
+"text": "a",
+"box": [
+112.066,
+142.82,
+117.354,
+153.86
+]
+},
+{
+"text": "paragraph",
+"box": [
+119.882,
+142.82,
+165.886,
+153.86
+]
+},
+{
+"text": "after",
+"box": [
+168.348,
+142.82,
+189.975,
+153.86
+]
+},
+{
+"text": "the",
+"box": [
+192.36,
+142.82,
+207.352,
+153.86
+]
+},
+{
+"text": "table,",
+"box": [
+209.847,
+142.82,
+235.427,
+153.86
+]
+},
+{
+"text": "in",
+"box": [
+237.801,
+142.82,
+246.136,
+153.86
+]
+},
+{
+"text": "Normal",
+"box": [
+248.631,
+142.82,
+281.994,
+153.86
+]
+}
+]
+}
+]
+}
+]
 }

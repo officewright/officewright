@@ -378,10 +378,11 @@ class Import(unittest.TestCase):
             (third, b"<w:lastRenderedPageBreak/>" + third),
         ]})
         self.run_import()
-        geometry = json.loads(
-            (self.corpus / "reference" / "word-rules" / doc.name / "geometry.json")
-            .read_text(encoding="utf-8")
+        text = (self.corpus / "reference" / "word-rules" / doc.name / "geometry.json").read_text(
+            encoding="utf-8"
         )
+        geometry = json.loads(text)
+        self.assertEqual(text, importer.geometry_text(geometry))
         self.assertEqual(geometry["page_count"], 3)
         self.assertEqual(geometry["document"], f"word-rules/{doc.name}.docx")
         self.assertEqual(geometry["fonts_not_embedded"], ["Garamond"])
@@ -943,6 +944,44 @@ class Import(unittest.TestCase):
             with self.subTest(path=path):
                 self.add_result(rules.documents()[0], file=path)
                 self.assertIn("file must be the name of a .docx file", self.refused())
+
+
+class GeometryText(unittest.TestCase):
+    GEOMETRY = {
+        "format": 1,
+        "document": "word-rules/E-x.docx",
+        "fonts_not_embedded": [],
+        "pages": [
+            {"number": 1, "width": 595.3, "height": 841.9, "lines": [
+                {"text": "Привіт, «world»", "box": [72.0, 72.5, 140.5, 85.4],
+                 "words": [{"text": "Привіт,", "box": [72.0, 72.5, 110.0, 85.4]},
+                           {"text": "«world»", "box": [112.0, 72.5, 140.5, 85.4]}]},
+            ]},
+            {"number": 2, "width": 595.3, "height": 841.9, "lines": []},
+        ],
+        "page_count": 2,
+    }
+
+    def test_reads_back_as_written_without_indentation(self):
+        text = importer.geometry_text(self.GEOMETRY)
+        self.assertEqual(json.loads(text), self.GEOMETRY)
+        self.assertEqual(list(json.loads(text)), list(self.GEOMETRY))
+        self.assertTrue(text.endswith("}\n"))
+        self.assertIn("Привіт", text)
+        self.assertFalse([row for row in text.split("\n") if row.startswith((" ", "\t"))])
+
+    def test_each_text_starts_a_line_and_its_box_follows_one_number_a_line(self):
+        # officewright-layout's tests (display.rs, fonts.rs) read geometry.json line by line:
+        # a line that starts with "text": " holds a text, the next one opens its box, and the
+        # four after that are its left, top, right and bottom edges.
+        rows = importer.geometry_text(self.GEOMETRY).split("\n")
+        texts = [n for n, row in enumerate(rows) if row.startswith('"text": "')]
+        self.assertEqual([rows[n] for n in texts],
+                         ['"text": "Привіт, «world»",', '"text": "Привіт,",', '"text": "«world»",'])
+        for n, box in zip(texts, ([72.0, 72.5, 140.5, 85.4], [72.0, 72.5, 110.0, 85.4],
+                                  [112.0, 72.5, 140.5, 85.4])):
+            self.assertEqual(rows[n + 1], '"box": [')
+            self.assertEqual([float(row.rstrip(",")) for row in rows[n + 2:n + 6]], box)
 
 
 class Changes(unittest.TestCase):

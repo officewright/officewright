@@ -14,6 +14,7 @@ pub(crate) mod table_properties;
 mod text;
 pub(crate) mod theme;
 mod views;
+pub(crate) mod vml;
 pub(crate) mod xml;
 
 use std::collections::HashMap;
@@ -66,6 +67,7 @@ pub use views::{
     Inline, Note, Opaque, Paragraph, Revision, RevisionKind, Run, RunContent, Section, SimpleField,
     Table, TableCell, TableRow,
 };
+pub use vml::{VmlDrawing, VmlPicture};
 use xml::{Element, Span, Strings, Token};
 
 use crate::Diagnostic;
@@ -152,6 +154,12 @@ pub(crate) struct Names {
     pub(crate) wp: [Option<xml::Sym>; 2],
     /// DrawingML pictures (`pic:pic`).
     pub(crate) pic: [Option<xml::Sym>; 2],
+    /// VML (`v:shape`, `v:imagedata`), which Strict does not have.
+    pub(crate) v: [Option<xml::Sym>; 1],
+    /// VML's Office extensions (`o:allowincell`).
+    pub(crate) o: [Option<xml::Sym>; 1],
+    /// VML's Word extensions (`w10:wrap`).
+    pub(crate) w10: [Option<xml::Sym>; 1],
     pub(crate) mc: Option<xml::Sym>,
     /// Word 2010's extensions, such as `w14:ligatures`.
     pub(crate) w14: Option<xml::Sym>,
@@ -579,6 +587,12 @@ pub(crate) enum RunItem {
     /// A `w:drawing` kept whole, and the image its picture shows, read when the part
     /// that holds it was.
     Drawing {
+        element: Span,
+        image: Option<u32>,
+    },
+    /// A `w:pict` kept whole, and the image its VML picture shows, read when the part
+    /// that holds it was.
+    VmlDrawing {
         element: Span,
         image: Option<u32>,
     },

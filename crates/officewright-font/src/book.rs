@@ -334,7 +334,7 @@ impl fmt::Display for SkippedFont {
 #[derive(Clone, Debug, Default)]
 pub struct FontBook {
     faces: Vec<FaceInfo>,
-    skipped: Vec<SkippedFont>,
+    skipped: SkippedList,
     /// Canonical paths of the files already added, so a font reachable through
     /// several directories or links is indexed once.
     files: HashSet<PathBuf>,
@@ -344,7 +344,123 @@ pub struct FontBook {
     failed: HashMap<PathBuf, Failure>,
     /// The canonical directory behind each location in `failed` of a directory that could
     /// not be read, so that reading that directory by any path drops them all.
-    unreadable_dirs: HashMap<PathBuf, PathBuf>,
+    unreadable_dirs: UnreadableDirs,
+}
+
+/// The canonical directory behind each listed location of a directory that could not be
+/// read, kept both ways, so that reading a directory finds the locations behind it without
+/// going over the others.
+#[derive(Clone, Debug, Default)]
+struct UnreadableDirs {
+    /// The directory behind each location.
+    targets: HashMap<PathBuf, PathBuf>,
+    /// The locations behind each directory.
+    behind: HashMap<PathBuf, HashSet<PathBuf>>,
+}
+
+impl UnreadableDirs {
+    fn contains(&self, listed: &Path) -> bool {
+        self.targets.contains_key(listed)
+    }
+
+    /// Remembers `target` as the directory behind `listed`, in place of any other.
+    fn insert(&mut self, listed: PathBuf, target: PathBuf) {
+        self.remove(&listed);
+        self.behind
+            .entry(target.clone())
+            .or_default()
+            .insert(listed.clone());
+        self.targets.insert(listed, target);
+    }
+
+    fn remove(&mut self, listed: &Path) {
+        let Some(target) = self.targets.remove(listed) else {
+            return;
+        };
+        if let Some(behind) = self.behind.get_mut(&target) {
+            behind.remove(listed);
+            if behind.is_empty() {
+                self.behind.remove(&target);
+            }
+        }
+    }
+
+    /// Forgets the locations behind `target`, and returns them.
+    fn take_behind(&mut self, target: &Path) -> HashSet<PathBuf> {
+        let behind = self.behind.remove(target).unwrap_or_default();
+        for listed in &behind {
+            self.targets.remove(listed);
+        }
+        behind
+    }
+}
+
+/// The skipped paths in the order they were listed, with the place of each entry listed
+/// under a key, so that a scan replaces and drops entries without searching the list. Each
+/// entry has a number, increasing in the order of the list, and a key leads to its entry's
+/// number, so that removing entries moves no key. An entry dropped is only marked;
+/// [`compact`](Self::compact), which every public method of [`FontBook`] that drops entries
+/// calls before it returns, removes the marked ones at once.
+#[derive(Clone, Debug, Default)]
+struct SkippedList {
+    entries: Vec<SkippedFont>,
+    /// The number of each entry, in the order of `entries`.
+    numbers: Vec<u64>,
+    /// The number the next entry takes.
+    next: u64,
+    /// The number of each keyed entry still listed.
+    places: HashMap<PathBuf, u64>,
+    /// The numbers of the entries marked as dropped.
+    dropped: Vec<u64>,
+}
+
+impl SkippedList {
+    fn push(&mut self, entry: SkippedFont) {
+        if let Some(key) = &entry.key {
+            self.places.insert(key.clone(), self.next);
+        }
+        self.entries.push(entry);
+        self.numbers.push(self.next);
+        self.next += 1;
+    }
+
+    /// The entry listed under `key`.
+    fn get_mut(&mut self, key: &Path) -> Option<&mut SkippedFont> {
+        let number = self.places.get(key)?;
+        let place = self.numbers.binary_search(number).ok()?;
+        self.entries.get_mut(place)
+    }
+
+    /// Marks the entry listed under `key` as dropped.
+    fn drop_key(&mut self, key: &Path) {
+        if let Some(number) = self.places.remove(key) {
+            self.dropped.push(number);
+        }
+    }
+
+    /// Removes the entries marked as dropped, keeping the order of the others.
+    fn compact(&mut self) {
+        if self.dropped.is_empty() {
+            return;
+        }
+        let mut dropped = std::mem::take(&mut self.dropped);
+        dropped.sort_unstable();
+        let mut dropped = dropped.into_iter().peekable();
+        let mut kept = 0;
+        for place in 0..self.entries.len() {
+            let number = self.numbers.get(place).copied();
+            if number.is_some() && dropped.peek().copied() == number {
+                dropped.next();
+                continue;
+            }
+            // Only dropped entries lie between `kept` and `place`.
+            self.entries.swap(kept, place);
+            self.numbers.swap(kept, place);
+            kept += 1;
+        }
+        self.entries.truncate(kept);
+        self.numbers.truncate(kept);
+    }
 }
 
 /// How a path that a directory scan could not add looked, so the next scan tries it
@@ -609,7 +725,7 @@ impl FontBook {
     /// The directories, files and faces that could not be read or indexed, each path
     /// with the error of its latest attempt.
     pub fn skipped(&self) -> &[SkippedFont] {
-        &self.skipped
+        &self.skipped.entries
     }
 
     /// Reads a face. A face added from a file reads the whole file again; keep the
@@ -651,6 +767,7 @@ impl FontBook {
                 self.forget_failure(&location);
             }
         }
+        self.skipped.compact();
         result
     }
 
@@ -689,11 +806,7 @@ impl FontBook {
         // A directory behind the path is remembered again by the caller if it is one.
         self.unreadable_dirs.remove(&key);
         if failure == Failure::Unreachable && self.failed.get(&key) == Some(&failure) {
-            let listed = self
-                .skipped
-                .iter_mut()
-                .find(|skipped| skipped.key.as_ref() == Some(&key));
-            if let Some(listed) = listed {
+            if let Some(listed) = self.skipped.get_mut(&key) {
                 // The message names the path, so it keeps the listed one too.
                 if let (Error::Read { path, .. }, Some(first)) = (&mut error, &listed.path) {
                     path.clone_from(first);
@@ -715,8 +828,7 @@ impl FontBook {
     fn forget_failure(&mut self, key: &Path) {
         self.unreadable_dirs.remove(key);
         if self.failed.remove(key).is_some() {
-            self.skipped
-                .retain(|skipped| skipped.key.as_deref() != Some(key));
+            self.skipped.drop_key(key);
         }
     }
 
@@ -777,12 +889,13 @@ impl FontBook {
             }
             return Ok(0);
         }
-        self.skipped
-            .extend(errors.into_iter().map(|error| SkippedFont {
+        for error in errors {
+            self.skipped.push(SkippedFont {
                 path: path.clone(),
                 error: Arc::new(error),
                 key: None,
-            }));
+            });
+        }
         Ok(added)
     }
 
@@ -808,7 +921,7 @@ impl FontBook {
             if let Some(&read) = visited.get(&canonical_dir) {
                 if read {
                     self.forget_failure(&dir_location);
-                } else if self.unreadable_dirs.contains_key(&dir_location) {
+                } else if self.unreadable_dirs.contains(&dir_location) {
                     self.unreadable_dirs.insert(dir_location, canonical_dir);
                 }
                 continue;
@@ -820,12 +933,7 @@ impl FontBook {
                 Ok(entries) => {
                     visited.insert(canonical_dir.clone(), true);
                     self.forget_failure(&dir_location);
-                    let behind: Vec<PathBuf> = self
-                        .unreadable_dirs
-                        .iter()
-                        .filter(|(_, target)| **target == canonical_dir)
-                        .map(|(listed, _)| listed.clone())
-                        .collect();
+                    let behind = self.unreadable_dirs.take_behind(&canonical_dir);
                     // An entry leads where it leads now, not where it led when it was
                     // listed: one repointed since to another directory that cannot be read
                     // stays listed, behind that directory. One that leads here, to a
@@ -918,6 +1026,7 @@ impl FontBook {
             }
             stack.extend(subdirs.into_iter().rev());
         }
+        self.skipped.compact();
         added
     }
 }
@@ -1640,6 +1749,269 @@ mod tests {
 
         assert_eq!(book.add_dir(&dir.0).unwrap(), 1);
         assert!(book.skipped().is_empty(), "{:?}", book.skipped());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_rescan_updates_each_entry_after_one_left_the_list() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let set_mode =
+            |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+        let dir = TempDir::new("updated-entries");
+        let fonts = dir.0.join("fonts");
+        let locked = fonts.join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        // Listed in this order: the files of the folder, then its subfolder.
+        symlink(dir.0.join("a-target.ttf"), fonts.join("a.ttf")).unwrap();
+        symlink(dir.0.join("z-target.ttf"), fonts.join("z.ttf")).unwrap();
+        set_mode(&locked, 0o000).unwrap();
+        let readable = fs::read_dir(&locked).is_ok();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        let before = book.skipped().len();
+        // The first leaves the list, and the scan after it updates the other two.
+        fs::write(dir.0.join("a-target.ttf"), b"not a font").unwrap();
+        book.add_dir(&fonts).unwrap();
+        book.add_dir(&fonts).unwrap();
+        let listed: Vec<(PathBuf, io::ErrorKind)> = book
+            .skipped()
+            .iter()
+            .filter_map(|skipped| match skipped.error() {
+                Error::Read { source, .. } => Some((skipped.path()?.to_owned(), source.kind())),
+                _ => None,
+            })
+            .collect();
+        set_mode(&locked, 0o755).unwrap();
+        // Root reads every directory, so this has to run as an ordinary user.
+        assert!(
+            !readable,
+            "run the tests as a user who cannot read mode 000"
+        );
+        assert_eq!(before, 3);
+        assert_eq!(
+            listed,
+            [
+                (fonts.join("z.ttf"), io::ErrorKind::NotFound),
+                (locked.clone(), io::ErrorKind::PermissionDenied),
+            ]
+        );
+    }
+
+    /// Fails unless `time(n)`, the time some work on `n` entries takes, is in proportion
+    /// to `n`: at most 24 times what `n / 8` entries take, where linear work takes about 8
+    /// times and work that grows with the square of `n` about 64 times. Each size is timed
+    /// as the shortest of several runs, since load on the machine only ever adds time, and
+    /// a test fails only when a second measurement agrees; a floor of 50 ms keeps the
+    /// timer's resolution out of it.
+    fn in_linear_time(time: impl Fn(usize) -> std::time::Duration, n: usize) {
+        use std::time::Duration;
+        let mut measured = Vec::new();
+        for _ in 0..2 {
+            let small = (0..3)
+                .map(|_| time(n / 8))
+                .min()
+                .unwrap_or_default()
+                .max(Duration::from_millis(50));
+            let full = (0..2).map(|_| time(n)).min().unwrap_or(Duration::MAX);
+            if full < small * 24 {
+                return;
+            }
+            measured.push((full, small));
+        }
+        panic!("{measured:?}: the shortest times for {n} and for {}", n / 8);
+    }
+
+    #[cfg(unix)]
+    /// Fails unless scanning takes time in proportion to `n`, as [`in_linear_time`]
+    /// measures it: `setup(n)` makes a book and the folders to scan with `add_dir`, one
+    /// after another, in a folder of its own.
+    fn rescans_in_linear_time(
+        setup: impl Fn(usize) -> (FontBook, Vec<PathBuf>, TempDir),
+        n: usize,
+    ) {
+        in_linear_time(
+            |count| {
+                let (mut book, roots, _dir) = setup(count);
+                let start = std::time::Instant::now();
+                for root in &roots {
+                    book.add_dir(root).unwrap();
+                }
+                start.elapsed()
+            },
+            n,
+        );
+    }
+
+    #[test]
+    fn drops_skipped_entries_in_linear_time() {
+        // Dropping entries from the front moves each entry kept once, when the list is
+        // compacted.
+        let key = |i: usize| PathBuf::from(format!("fonts/bad{i:06}.ttf"));
+        in_linear_time(
+            |n| {
+                let mut list = listed(n, key);
+                let start = std::time::Instant::now();
+                for i in 0..n {
+                    list.drop_key(&key(i));
+                }
+                list.compact();
+                assert!(list.entries.is_empty());
+                start.elapsed()
+            },
+            100_000,
+        );
+    }
+
+    /// A list of `n` entries, each under the key `key(i)`.
+    fn listed(n: usize, key: impl Fn(usize) -> PathBuf) -> SkippedList {
+        let mut list = SkippedList::default();
+        for i in 0..n {
+            list.push(SkippedFont {
+                path: None,
+                error: Arc::new(Error::Read {
+                    path: key(i),
+                    source: io::ErrorKind::NotFound.into(),
+                }),
+                key: Some(key(i)),
+            });
+        }
+        list
+    }
+
+    #[test]
+    fn finds_skipped_entries_in_linear_time() {
+        // A rescan looks up the entry of every path still unreachable.
+        let key = |i: usize| PathBuf::from(format!("fonts/bad{i:06}.ttf"));
+        in_linear_time(
+            |n| {
+                let mut list = listed(n, key);
+                let start = std::time::Instant::now();
+                for i in 0..n {
+                    assert!(list.get_mut(&key(i)).is_some());
+                }
+                start.elapsed()
+            },
+            40_000,
+        );
+    }
+
+    #[test]
+    fn compacts_a_list_with_nothing_dropped_in_linear_time() {
+        // Every scan compacts the list before it returns, most of them with nothing
+        // dropped.
+        let key = |i: usize| PathBuf::from(format!("fonts/bad{i:06}.ttf"));
+        in_linear_time(
+            |n| {
+                let mut list = listed(n, key);
+                let start = std::time::Instant::now();
+                for _ in 0..n {
+                    list.compact();
+                }
+                start.elapsed()
+            },
+            40_000,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_scan_through_another_path_updates_the_entries_after_one_that_left() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new("updated-through-alias");
+        let (fonts, targets) = (dir.0.join("fonts"), dir.0.join("t"));
+        fs::create_dir(&fonts).unwrap();
+        fs::create_dir(&targets).unwrap();
+        for name in ["a.ttf", "b.ttf", "c.ttf"] {
+            symlink(targets.join(name), fonts.join(name)).unwrap();
+        }
+        symlink(&fonts, dir.0.join("alias")).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        assert_eq!(book.skipped().len(), 3);
+        // The first leaves the list; the others keep the path they were listed under,
+        // whichever path reaches them next.
+        fs::write(targets.join("a.ttf"), TestFont::new("Test Sans").build()).unwrap();
+        assert_eq!(book.add_dir(&fonts).unwrap(), 1);
+        book.add_dir(dir.0.join("alias")).unwrap();
+        let listed: Vec<Option<&Path>> = book.skipped().iter().map(SkippedFont::path).collect();
+        assert_eq!(
+            listed,
+            [
+                Some(fonts.join("b.ttf").as_path()),
+                Some(fonts.join("c.ttf").as_path())
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_one_unreadable_directory_behind_each_location() {
+        let mut dirs = UnreadableDirs::default();
+        let (listed, first, second) = (Path::new("a/sub"), Path::new("b"), Path::new("c"));
+        dirs.insert(listed.to_owned(), first.to_owned());
+        // Repointed: only the directory it leads to now has it behind.
+        dirs.insert(listed.to_owned(), second.to_owned());
+        assert!(dirs.take_behind(first).is_empty());
+        assert!(dirs.contains(listed));
+        assert_eq!(dirs.take_behind(second), HashSet::from([listed.to_owned()]));
+        assert!(!dirs.contains(listed));
+        // Removed: no directory has it behind.
+        dirs.insert(listed.to_owned(), first.to_owned());
+        dirs.remove(listed);
+        assert!(dirs.take_behind(first).is_empty());
+        assert!(dirs.behind.is_empty() && dirs.targets.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rescans_unresolvable_font_files_in_linear_time() {
+        rescans_in_linear_time(
+            |n| {
+                let dir = TempDir::new(&format!("linear-dangling-{n}"));
+                let fonts = dir.0.join("fonts");
+                fs::create_dir(&fonts).unwrap();
+                for i in 0..n {
+                    let link = fonts.join(format!("dead{i:06}.ttf"));
+                    std::os::unix::fs::symlink(dir.0.join("missing.ttf"), link).unwrap();
+                }
+                let mut book = FontBook::new();
+                book.add_dir(&fonts).unwrap();
+                assert_eq!(book.skipped().len(), n);
+                (book, vec![fonts], dir)
+            },
+            8_000,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rescans_readable_and_unreadable_folders_in_linear_time() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Each folder read looks up the unreadable ones behind it, not all of them.
+        rescans_in_linear_time(
+            |n| {
+                let dir = TempDir::new(&format!("linear-unreadable-{n}"));
+                for i in 0..n / 2 {
+                    fs::create_dir(dir.0.join(format!("open{i:06}"))).unwrap();
+                    let locked = dir.0.join(format!("shut{i:06}"));
+                    fs::create_dir(&locked).unwrap();
+                    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+                }
+                let mut book = FontBook::new();
+                book.add_dir(&dir.0).unwrap();
+                // Root reads every directory, so this has to run as an ordinary user.
+                assert_eq!(
+                    book.skipped().len(),
+                    n / 2,
+                    "run the tests as a user who cannot read mode 000"
+                );
+                let root = dir.0.clone();
+                (book, vec![root], dir)
+            },
+            12_000,
+        );
     }
 
     #[test]
