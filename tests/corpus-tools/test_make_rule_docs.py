@@ -182,6 +182,58 @@ class Check(unittest.TestCase):
         )
 
 
+    def sources_row(self, name: str) -> str:
+        return next(line for line in self.sources.read_text(encoding="utf-8").splitlines()
+                    if line.startswith(f"| word-rules/{name} |"))
+
+    def test_a_stale_sources_row_is_reported(self):
+        # The description of a document changed in the script, its row in SOURCES.md did not.
+        text = self.sources.read_text(encoding="utf-8")
+        row = self.sources_row("E-line-exact.docx")
+        self.assertTrue(row.endswith(" |"))
+        stale = row[:-2] + " (an older description) |"
+        self.sources.write_text(text.replace(row, stale), "utf-8")
+        self.assertEqual(
+            rules.check(self.docs),
+            ["the row of word-rules/E-line-exact.docx in tests/corpus/SOURCES.md is not the one "
+             "--list prints"],
+        )
+
+    def test_a_document_listed_twice_is_reported(self):
+        # As a merge that keeps both sides of SOURCES.md can leave it, also with the row
+        # repeated exactly.
+        text = self.sources.read_text(encoding="utf-8")
+        row = self.sources_row("E-line-exact.docx")
+        self.sources.write_text(text.replace(row, row + "\n" + row), "utf-8")
+        self.assertEqual(
+            rules.check(self.docs),
+            ["tests/corpus/SOURCES.md has 2 rows for word-rules/E-line-exact.docx"],
+        )
+
+    def test_a_stale_copy_beside_the_right_row_is_reported(self):
+        text = self.sources.read_text(encoding="utf-8")
+        row = self.sources_row("E-line-exact.docx")
+        stale = row[:-2] + " (an older description) |"
+        self.sources.write_text(text.replace(row, stale + "\n" + row), "utf-8")
+        self.assertEqual(
+            rules.check(self.docs),
+            ["the row of word-rules/E-line-exact.docx in tests/corpus/SOURCES.md is not the one "
+             "--list prints",
+             "tests/corpus/SOURCES.md has 2 rows for word-rules/E-line-exact.docx"],
+        )
+
+    def test_a_row_for_no_document_is_reported(self):
+        text = self.sources.read_text(encoding="utf-8")
+        row = self.sources_row("E-line-exact.docx")
+        gone = row.replace("E-line-exact.docx", "E-gone.docx")
+        self.sources.write_text(text.replace(row, row + "\n" + gone), "utf-8")
+        self.assertEqual(
+            rules.check(self.docs),
+            ["tests/corpus/SOURCES.md has a row for word-rules/E-gone.docx, which this script "
+             "does not write"],
+        )
+
+
 class Packages(unittest.TestCase):
     def setUp(self):
         self.docs = rules.documents()

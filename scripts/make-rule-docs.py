@@ -7,7 +7,8 @@ Word does. The markup is written from ECMA-376 Part 1 and [MS-DOCX]; nothing is 
 from documents made by other software.
 
     make-rule-docs.py           write every document
-    make-rule-docs.py --check   fail if a committed document is missing, stale or unknown
+    make-rule-docs.py --check   fail if a committed document is missing, stale or unknown, or
+                                its SOURCES.md row is not the one --list prints
     make-rule-docs.py --list    print the SOURCES.md row of every document
 
 A rule that depends on a document-wide setting (the compatibility mode, a w:compat flag)
@@ -4809,6 +4810,11 @@ def check(docs: list[Doc]) -> list[str]:
         problems.append(f"tests/corpus/word-rules/{name} is not written by this script")
     lines = SOURCES.read_text(encoding="utf-8").splitlines()
     rows = [number for number, line in enumerate(lines) if line.startswith("| word-rules/")]
+    # The rows of each document name, as the first cell of a row names it.
+    named: dict[str, list[str]] = {}
+    for number in rows:
+        name = lines[number].removeprefix("| word-rules/").split(" |", 1)[0]
+        named.setdefault(name, []).append(lines[number])
     # The rows are table rows: one block of table lines, right under the table's header.
     if rows and not all(
         line.startswith("|") for line in lines[rows[0] - 1 : rows[-1] + 1]
@@ -4827,8 +4833,21 @@ def check(docs: list[Doc]) -> list[str]:
                 problems.append(f"{committed} differs from what this script writes")
             else:
                 problems.append(f"{committed} has the parts this script writes in other ZIP bytes")
-        if not any(lines[number].startswith(f"| word-rules/{name} |") for number in rows):
+        if name not in named:
             problems.append(f"tests/corpus/SOURCES.md has no row for word-rules/{name}")
+        elif any(row != sources_row(doc) for row in named[name]):
+            problems.append(
+                f"the row of word-rules/{name} in tests/corpus/SOURCES.md is not the one --list "
+                "prints"
+            )
+    for name, found in named.items():
+        if len(found) > 1:
+            problems.append(f"tests/corpus/SOURCES.md has {len(found)} rows for word-rules/{name}")
+        if name not in expected:
+            problems.append(
+                f"tests/corpus/SOURCES.md has a row for word-rules/{name}, which this script "
+                "does not write"
+            )
     return problems
 
 
