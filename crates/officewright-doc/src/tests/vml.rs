@@ -695,7 +695,7 @@ fn reports_the_values_after_one_that_decides_what_a_vml_picture_has() {
         r#"<v:stroke on="t"/><v:shadow on="t"/><v:shadow on="x"/><w10:wrap anchorx="x" anchory="x"/>"#,
     );
     let typed = pict(
-        r##"<v:shapetype id="t1" stroked="maybe"/><v:shape type="#t1" style="width:1pt;height:1pt"><v:imagedata r:id="rIdPng"/></v:shape>"##,
+        r##"<v:shapetype id="t1" stroked="maybe"/><v:shape type="#t1" stroked="f" style="width:1pt;height:1pt"><v:imagedata r:id="rIdPng"/></v:shape>"##,
     );
     let document = with_images(&format!("<w:p>{picture}{typed}</w:p>"));
     assert_eq!(

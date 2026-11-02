@@ -662,6 +662,27 @@ fn reports_the_values_after_one_that_decides_what_a_picture_has() {
 }
 
 #[test]
+fn shortens_a_long_refused_value_in_its_message() {
+    // From the re-check of #435: a message shows a refused value only as far as its first
+    // 64 characters, as every diagnostic does, and so far is it kept.
+    let long = "x".repeat(100);
+    let vml = super::vml::vml_picture("rIdPng", &format!("width:{long};height:1pt"), "", "", "");
+    let document = with_images(&format!(
+        "<w:p>{}{vml}</w:p>",
+        inline_picture("rIdPng").replacen(r#"cx="1828800""#, &format!(r#"cx="{long}""#), 1),
+    ));
+    let kept = "x".repeat(64);
+    let declaration = format!("width:{}", "x".repeat(58));
+    assert_eq!(
+        reported(&document),
+        [
+            format!(r#"wp:extent cx="{kept}…" is not valid; it is ignored"#),
+            format!(r#"v:shape style="{declaration}…" is not valid; it is ignored"#),
+        ]
+    );
+}
+
+#[test]
 fn reports_no_value_of_a_picture_that_its_readers_take() {
     // Every value written as Word writes it, in either form where there are two; the
     // distances of a frame in the line are not read, so not reported either (from the

@@ -870,6 +870,8 @@ mod tests {
         assert_eq!(style.get("height").and_then(length), Some(Pt(5.0)));
         assert_eq!(style.get("rotation"), None);
         assert_eq!(Style::new("width:-1pt").get("width").and_then(size), None);
+        // Names and values lose the whitespace around them (from the re-check of #435).
+        assert_eq!(Style::new(" HEIGHT : 5pt ;").get("height"), Some("5pt"));
     }
 
     #[test]
