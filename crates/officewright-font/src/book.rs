@@ -312,15 +312,19 @@ impl fmt::Display for SkippedFont {
 ///
 /// A book can scan the same directories again, for example after fonts were installed:
 /// [`add_dir`](Self::add_dir) and [`add_system_fonts`](Self::add_system_fonts) add the
-/// fonts that appeared since. A file that was added is not read again, even if it
-/// changed. A file that was skipped is read again once its size or modification time
-/// changes, so a font that was still being copied during one scan is found by the next.
-/// Links, font files that could not be resolved and directories that could not be read
-/// are tried on every scan. Each skipped path is listed once, with the error of its
-/// latest attempt, and leaves the list when it is read. A path whose folder, or one above
-/// it, is replaced by a link to where it went is still the same path: a scan that reaches
-/// it lists it once, under where it is now. A path a scan does not reach, such as one that
-/// was removed, stays listed; a process that wants a fresh list starts a new book.
+/// fonts that appeared since. A file is known by its canonical path: one that was added is
+/// not read again by that path, even if it changed. Reached by another canonical path, as
+/// a file whose folder was moved and replaced by a link to where it went, or a second hard
+/// link, it is read again, and its faces are in the book once more; so is a damaged face of
+/// a collection in [`skipped`](Self::skipped). A file that was skipped is read again once
+/// its size or modification time changes, so a font that was still being copied during one
+/// scan is found by the next. Links, font files that could not be resolved and directories
+/// that could not be read are tried on every scan. Each other skipped path is listed once,
+/// with the error of its latest attempt, and leaves the list when it is read. A path whose
+/// folder, or one above it, is replaced by a link to where it went is still the same path:
+/// a scan that reaches it lists it once, under where it is now. A path a scan does not
+/// reach, such as one that was removed, stays listed; a process that wants a fresh list
+/// starts a new book.
 ///
 /// ```
 /// use officewright_font::{FontBook, FontRequest, FontResolver};
@@ -2647,6 +2651,35 @@ mod tests {
         write_with_time(&path, &font, modified);
         assert_eq!(book.add_dir(&fonts).unwrap(), 0);
         assert_eq!(book.skipped().len(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_directory_behind_a_repointed_link_is_listed_once() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        // `fonts` leads to `d1`, then to `d2`, each with an unreadable `sub` (#419).
+        let lock = |path: &Path| fs::set_permissions(path, fs::Permissions::from_mode(0o000));
+        let dir = TempDir::new("repointed-unreadable");
+        let (d1, d2, fonts) = (dir.0.join("d1"), dir.0.join("d2"), dir.0.join("fonts"));
+        fs::create_dir_all(d1.join("sub")).unwrap();
+        fs::create_dir_all(d2.join("sub")).unwrap();
+        lock(&d1.join("sub")).unwrap();
+        lock(&d2.join("sub")).unwrap();
+        let readable = fs::read_dir(d1.join("sub")).is_ok();
+        symlink(&d1, &fonts).unwrap();
+        let mut book = FontBook::new();
+        book.add_dir(&fonts).unwrap();
+        fs::remove_file(&fonts).unwrap();
+        symlink(&d2, &fonts).unwrap();
+        book.add_dir(&fonts).unwrap();
+        let listed = listed_under(&book, &dir.0);
+        // Root reads every directory, so this has to run as an ordinary user.
+        assert!(
+            !readable,
+            "run the tests as a user who cannot read mode 000"
+        );
+        assert_eq!(listed, ["fonts/sub"]);
     }
 
     #[test]
