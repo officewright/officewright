@@ -5276,6 +5276,33 @@ def row_break_numbers() -> Doc:
     )
 
 
+# Whether Word reads a font's DMAP table before cmap (#458): the DMAP font of
+# tests/fonts-word/test-dmap maps A to the glyph of B, B to that of A and U+E000, which its
+# cmap lacks, to that of Z; its cmap is Noto Sans's.
+DMAP_FONT = "Officewright Test DMAP"
+DMAP_SAMPLE = "AB\ue000Z"
+
+
+def dmap_font() -> Doc:
+    cases = [
+        ("A, B, U+E000 and Z in Officewright Test DMAP, 24 pt, in all four slots",
+         run(DMAP_SAMPLE, font=DMAP_FONT, size=24)),
+        ("the same characters in Noto Sans, 24 pt (to compare)",
+         run(DMAP_SAMPLE, font="Noto Sans", size=24)),
+        ("A and B alone in Officewright Test DMAP, 24 pt, in all four slots",
+         run("AB", font=DMAP_FONT, size=24)),
+    ]
+    body = "".join(para(run(f"Case {n:02d}: {label}"), space=spacing(before=12))
+                   + para(sample) for n, (label, sample) in enumerate(cases, 1))
+    return Doc(
+        "E-dmap-font",
+        "Whether Word reads a font's DMAP table (ISO/IEC 14496-22:2026) before cmap: A, B, "
+        "U+E000 and Z in Officewright Test DMAP, whose DMAP swaps A and B and gives U+E000 "
+        "the glyph of Z, beside the same text in Noto Sans",
+        body + para(run("End of the document.")),
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -5430,6 +5457,7 @@ def documents() -> list[Doc]:
         row_break_hidden(),
         row_break_revisions(),
         row_break_numbers(),
+        dmap_font(),
     ]
 
 

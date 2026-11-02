@@ -14,7 +14,7 @@ exclude = ["tests/metric_compatible.rs", "tests/third_party_fonts.rs"]
 
 [dependencies]
 officewright-core.workspace = true
-skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
+skrifa = { version = "0.49.0", default-features = false, features = ["std"] }
 # Without `variable-fonts`: that feature pulls an older skrifa, a second copy of the
 # parser that `cargo deny` rejects.
 subsetter = { version = "0.2.6", default-features = false }

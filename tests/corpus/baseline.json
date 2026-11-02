@@ -311,6 +311,7 @@
     "tests/corpus/word-rules/E-default-paragraph-style-after-normal.docx": "opened",
     "tests/corpus/word-rules/E-default-paragraph-style.docx": "opened",
     "tests/corpus/word-rules/E-defaults-empty.docx": "opened",
+    "tests/corpus/word-rules/E-dmap-font.docx": "opened",
     "tests/corpus/word-rules/E-footer-tall-bottom.docx": "opened",
     "tests/corpus/word-rules/E-header-cut.docx": "opened",
     "tests/corpus/word-rules/E-header-negative-margin.docx": "opened",

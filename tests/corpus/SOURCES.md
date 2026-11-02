@@ -175,6 +175,7 @@ writes.
 | word-rules/E-row-break-hidden.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | The page-break marks Word writes in a table row that crosses a page when text hidden through a character or paragraph style starts a later cell of the row and the next row |
 | word-rules/E-row-break-revisions.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | The page-break marks Word writes in a table row that crosses a page when deleted, moved-away or inserted text starts a later cell of the row and the next row, and in a paragraph that crosses a page after deleted, moved-away and hidden words |
 | word-rules/E-row-break-numbers.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | The page-break marks Word writes when the row after one that crosses a page starts with a cell of its number alone, below a header of the page number alone or a repeated header row with a # column, and when two cells of the row cross the page |
+| word-rules/E-dmap-font.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Whether Word reads a font's DMAP table (ISO/IEC 14496-22:2026) before cmap: A, B, U+E000 and Z in Officewright Test DMAP, whose DMAP swaps A and B and gives U+E000 the glyph of Z, beside the same text in Noto Sans |
 
 ## Apache POI test documents (`poi/`)
 

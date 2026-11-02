@@ -18,6 +18,16 @@ case $host in
 *) fail "unsupported host $host" ;;
 esac
 
+# CORPUS_JOBS, if set, is how many documents the corpus runner lays out at once; else as
+# many as the cores it may use. A machine busy with other work sets fewer, so that no
+# document passes the runner's time-out for want of a core. The digits are spelled out,
+# since a range such as 0-9 can match other digits in some locales.
+if [ -n "${CORPUS_JOBS:-}" ]; then
+	[[ $CORPUS_JOBS =~ ^[123456789][0123456789]{0,3}$ ]] ||
+		fail "CORPUS_JOBS must be a whole number from 1 to 9999, not '$CORPUS_JOBS'"
+	echo "check.sh: the corpus runner lays out documents $CORPUS_JOBS at a time (CORPUS_JOBS)"
+fi
+
 # Every tool is checked up front, so a fresh machine sees the whole list at once.
 missing=
 need() { # command, install hint
@@ -158,24 +168,32 @@ fi
 
 step "corpus runner over tests/corpus (against tests/corpus/baseline.json)"
 # Every committed Word document opens and is rendered into PDF in a child process, with the
-# fonts of tests/fonts-word/noto-truetype, tests/fonts-word/test-symbol and tests/fonts and
-# none of the system's; a panic, hang, memory blow-up, a document that opens but cannot be
-# rendered, or any change of a file's status from the baseline fails. On Linux each
-# document with a Word reference is also scored, and a score that moves by more than 0.01
-# fails; macOS and Windows compare the statuses only, since rasterizing differs between
-# poppler builds and Windows has no official one. An improvement is accepted by running
-# this on Linux with --update-baseline and committing the baseline.
+# fonts of tests/fonts-word/noto-truetype, tests/fonts-word/test-symbol, tests/fonts and
+# tests/fonts-word/test-dmap and none of the system's; a panic, hang, memory blow-up, a
+# document that opens but cannot be rendered, or any change of a file's status from the
+# baseline fails. On Linux each document with a Word reference is also scored, and a score
+# that moves by more than 0.01 fails; macOS and Windows compare the statuses only, since
+# rasterizing differs between poppler builds and Windows has no official one. An
+# improvement is accepted by running this on Linux with --update-baseline and committing
+# the baseline.
 # The TrueType Noto Sans comes first: of two faces of one family and style, the font book
 # takes the one added first, and the references that use Noto Sans were rendered by Word
 # with that build, but for E-line-fonts (THIRD-PARTY-NOTICES.md). The symbol font of
-# tests/fonts-word/test-symbol is the one installed when Word renders E-symbol-font.
+# tests/fonts-word/test-symbol is the one installed when Word renders E-symbol-font, and the
+# DMAP font of tests/fonts-word/test-dmap the one installed when it renders E-dmap-font; it
+# comes last, so that the layout falls back to it only where no other face has a character,
+# or for a family that shares its first word (Officewright Test Symbol).
 rm -rf target/corpus-pdf
 corpus_options=(--render target/corpus-pdf --font-dir tests/fonts-word/noto-truetype
-	--font-dir tests/fonts-word/test-symbol --font-dir tests/fonts)
+	--font-dir tests/fonts-word/test-symbol --font-dir tests/fonts
+	--font-dir tests/fonts-word/test-dmap)
 if [ "$os" = linux ]; then
 	corpus_options+=(--references tests/corpus/reference)
 else
 	corpus_options+=(--statuses-only)
+fi
+if [ -n "${CORPUS_JOBS:-}" ]; then
+	corpus_options+=(--jobs "$CORPUS_JOBS")
 fi
 cargo run --quiet -p corpus-runner -- run --baseline tests/corpus/baseline.json \
 	--expected tools/corpus-runner/expected-errors.tsv "${corpus_options[@]}" tests/corpus
