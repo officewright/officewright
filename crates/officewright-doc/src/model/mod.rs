@@ -1,6 +1,7 @@
 //! The document model: what a document contains, independent of the file format it was
 //! read from.
 
+pub(crate) mod color;
 pub(crate) mod drawing;
 pub(crate) mod fonts;
 pub(crate) mod format;
@@ -61,7 +62,10 @@ pub use table_properties::{
     TableOverlap, TablePosition, TableProperties, TableRowProperties, TableWidth, TextDirection,
     VerticalAlignment, VerticalJustification,
 };
-pub use text_box::{TextBox, TextBoxAnchor, TextBoxDirection};
+pub use text_box::{
+    CompoundLine, FillKind, LineDash, ShapeFill, ShapeOutline, TextBox, TextBoxAnchor,
+    TextBoxDirection,
+};
 pub use theme::{ColorScheme, FontCollection, FontScheme, SchemeColor, SystemColor, Theme};
 pub(crate) use views::kind_index;
 pub use views::{

@@ -754,7 +754,7 @@ pub(super) fn resolve_color(document: &Document, color: &Color) -> ColorValue {
 }
 
 /// The RGB value of a theme colour, through the document's colour mapping.
-fn theme_color(document: &Document, theme: ThemeColor) -> Option<(u8, u8, u8)> {
+pub(crate) fn theme_color(document: &Document, theme: ThemeColor) -> Option<(u8, u8, u8)> {
     use ColorSchemeIndex as Index;
     let mapping = document.settings.color_scheme_mapping();
     let map = |pick: fn(&ColorSchemeMapping) -> Option<Index>| mapping.and_then(pick);

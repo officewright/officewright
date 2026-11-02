@@ -288,4 +288,5 @@ fn read_text_box(text_box: TextBox<'_>) {
         text_box.columns(),
         text_box.is_linked(),
     );
+    let _ = (text_box.fill(), text_box.outline());
 }

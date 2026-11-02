@@ -790,7 +790,7 @@ impl<'a, const N: usize> Style<'a, N> {
 
 /// A length that is not negative, as Word requires of sizes and wrap distances
 /// (MS-OI29500, Part 4, §19.1.2.1(mm)).
-fn size(value: &str) -> Option<Pt> {
+pub(super) fn size(value: &str) -> Option<Pt> {
     length(value).filter(|length| length.0 >= 0.0)
 }
 
@@ -848,7 +848,7 @@ fn css_number(value: &str) -> Option<f64> {
 /// A share of VML (ST_Fraction, MS-OI29500 §3.9.1, which Office takes for
 /// `v:imagedata`'s crop attributes, Part 4, §19.1.2.11(h, i, m, n)): a decimal in
 /// [-32768, 32767], or a count of 1/65,536 with `f`.
-fn fraction(value: &str) -> Option<f64> {
+pub(super) fn fraction(value: &str) -> Option<f64> {
     if let Some(count) = value.strip_suffix('f') {
         return fixed(count);
     }

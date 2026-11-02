@@ -956,7 +956,7 @@ fn measure_number(value: &str) -> Option<f64> {
 
 /// A share of DrawingML (ST_Percentage): thousandths of a percent, or in Strict a number
 /// of percent with `%`; 0.5 for a half.
-fn percentage(value: &str) -> Option<f64> {
+pub(super) fn percentage(value: &str) -> Option<f64> {
     if let Some(percent) = value.strip_suffix('%') {
         return measure_number(percent).map(|percent| percent / 100.0);
     }

@@ -126,8 +126,14 @@ fn theme_elements(
     report: Report<'_>,
     notes: &mut Notes,
 ) {
-    for (local, child) in once(element, names, &["clrScheme", "fontScheme"], notes) {
+    for (local, child) in once(
+        element,
+        names,
+        &["clrScheme", "fontScheme", "fmtScheme"],
+        notes,
+    ) {
         match local {
+            "fmtScheme" => theme.format_scheme = Some(child.span()),
             "clrScheme" => theme.colors = Some(color_scheme(child, names, report, notes)),
             "fontScheme" => {
                 let mut scheme = FontScheme {

@@ -33,6 +33,9 @@ pub struct Theme {
     pub(crate) name: Option<Box<str>>,
     pub(crate) colors: Option<ColorScheme>,
     pub(crate) fonts: Option<FontScheme>,
+    /// Its fills, lines and effects (`a:fmtScheme`), kept with the document's tokens, which
+    /// the styles of shapes refer to by number (`a:fillRef`, `a:lnRef`).
+    pub(crate) format_scheme: Option<super::xml::Span>,
 }
 
 impl Theme {
