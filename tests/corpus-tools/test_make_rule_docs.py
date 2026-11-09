@@ -3508,6 +3508,12 @@ class Packages(unittest.TestCase):
         # digit of the GS1 example.
         self.assertEqual(rules.CODE128[0], "212222")
         self.assertEqual(rules.CODE128[33], "111323")
+        # The barcode of the documents, module by module, as zxing-cpp 2.3 decodes the PNG
+        # picture drawn from it back to OW-2026-0001 (checked once, not a dependency).
+        self.assertEqual("".join("1" if d else "0" for d in rules.code128_modules("OW-2026-0001")),
+                         "0000000000110100100001000111011011101000110100110111001100111001010011"
+                         "1011001100111001011001110100100110111001001110110010011101100100111011"
+                         "00100111001101110111101011000111010110000000000")
         self.assertEqual(rules.ean13_check("590123412345"), "5901234123457")
         with self.assertRaises(ValueError):
             rules.code128_modules("é")
@@ -3546,31 +3552,57 @@ class Packages(unittest.TestCase):
     def test_barcode_pictures_are_pngs_emfs_and_wmfs_of_the_codes(self):
         parts = self.doc_parts("E-barcode-pictures")
         bars, qr = rules.barcode_rows(), rules.qr_rows()
-        for name, rows, scale in (("image1.png", bars, 2), ("image2.png", qr, 4)):
+        # The codes the pictures draw: the barcode of 167 modules and its quiet zones of 10,
+        # 40 modules tall; the QR code of 21 modules and its quiet zone of 4.
+        self.assertEqual((len(bars[0]), len(bars)), (187, 40))
+        self.assertEqual(bars[0], rules.code128_modules("OW-2026-0001"))
+        self.assertEqual(qr[4:-4], [[False] * 4 + row + [False] * 4
+                                    for row in rules.qr_version1_m("INV-2026-0001")])
+        self.assertEqual(qr[:4] + qr[-4:], [[False] * 29] * 8)
+        # Every pixel of the PNG pictures is its module's: black or white.
+        for name, rows, size in (("image1.png", bars, (374, 80)), ("image2.png", qr, (116, 116))):
             data = parts[f"word/media/{name}"]
-            self.assertEqual(struct.unpack(">II", data[16:24]),
-                             (len(rows[0]) * scale, len(rows) * scale))
+            width, height = struct.unpack(">II", data[16:24])
+            self.assertEqual((width, height), size, name)
+            scale = width // len(rows[0])
             pixels = zlib.decompress(data[data.index(b"IDAT") + 4:data.index(b"IEND") - 8])
-            stride = len(rows[0]) * scale + 1
-            first = pixels[1:stride]
-            self.assertEqual([b == 0 for b in first[::scale]], rows[0])
-        for name, rows, module in (("image3.emf", bars, 20), ("image4.emf", qr, 20)):
+            grid = [pixels[y * (width + 1) + 1:(y + 1) * (width + 1)] for y in range(height)]
+            self.assertEqual(grid, [bytes(0 if d else 255 for d in row for _ in range(scale))
+                                    for row in rows for _ in range(scale)], name)
+
+        def painted(width: int, height: int, rects, unit: int) -> list[list[bool]]:
+            """The modules a picture covers, from its filled rectangles in its units."""
+            grid = [[False] * width for _ in range(height)]
+            for left, top, right, bottom in rects:
+                for y in range(top // unit, -(-(bottom - 1) // unit)):
+                    for x in range(left // unit, -(-(right - 1) // unit)):
+                        grid[y][x] = True
+            return grid
+
+        for name, rows, unit in (("image3.emf", bars, 20), ("image4.emf", qr, 20)):
             data = parts[f"word/media/{name}"]
-            kind, size = struct.unpack("<II", data[:8])
-            self.assertEqual((kind, size), (1, 88))
-            self.assertEqual(data[40:44], b" EMF")
+            self.assertEqual((struct.unpack("<II", data[:8]), data[40:44]), ((1, 88), b" EMF"))
             self.assertEqual(struct.unpack("<I", data[48:52])[0], len(data))
-            bounds = struct.unpack("<4i", data[8:24])
-            self.assertEqual(bounds, (0, 0, len(rows[0]) * module - 1, len(rows) * module - 1))
-            rectangles = 0
-            offset, records = 88, 1
+            self.assertEqual(struct.unpack("<4i", data[8:24]),
+                             (0, 0, len(rows[0]) * unit - 1, len(rows) * unit - 1))
+            offset, records, brushes, selected, rects = 88, 1, {}, [], []
             while offset < len(data):
                 kind, size = struct.unpack("<II", data[offset:offset + 8])
-                rectangles += kind == 43
+                payload = data[offset + 8:offset + size]
+                if kind == 39:  # EMR_CREATEBRUSHINDIRECT: index, style, colour
+                    index, style, colour, _ = struct.unpack("<IIII", payload)
+                    brushes[index] = (style, colour)
+                elif kind == 37:  # EMR_SELECTOBJECT
+                    selected.append(struct.unpack("<I", payload)[0])
+                elif kind == 43:  # EMR_RECTANGLE, one past its last pixel without a pen
+                    self.assertEqual(selected, [1, 0x80000008], name)
+                    left, top, right, bottom = struct.unpack("<4i", payload)
+                    rects.append((left, top, right - 1, bottom - 1))
                 offset, records = offset + size, records + 1
-            self.assertEqual(rectangles, len(rules.dark_rectangles(rows)))
+            self.assertEqual(brushes, {1: (0, 0x000000)}, name)  # solid, black
             self.assertEqual(struct.unpack("<I", data[52:56])[0], records)
-        for name, rows, module in (("image5.wmf", bars, 30), ("image6.wmf", qr, 60)):
+            self.assertEqual(painted(len(rows[0]), len(rows), rects, unit), rows, name)
+        for name, rows, unit in (("image5.wmf", bars, 30), ("image6.wmf", qr, 60)):
             data = parts[f"word/media/{name}"]
             self.assertEqual(struct.unpack("<I", data[:4])[0], 0x9AC6CDD7)
             checksum = 0
@@ -3578,8 +3610,26 @@ class Packages(unittest.TestCase):
                 checksum ^= word
             self.assertEqual(struct.unpack("<H", data[20:22])[0], checksum)
             self.assertEqual(struct.unpack("<hhhhH", data[6:16]),
-                             (0, 0, len(rows[0]) * module, len(rows) * module, 1440))
+                             (0, 0, len(rows[0]) * unit, len(rows) * unit, 1440))
             self.assertEqual(struct.unpack("<I", data[28:32])[0] * 2, len(data) - 22)
+            offset, objects, selected, rects = 40, [], [], []
+            while offset < len(data):
+                size, function = struct.unpack("<IH", data[offset:offset + 6])
+                words = struct.unpack(f"<{size - 3}h", data[offset + 6:offset + size * 2])
+                if function == 0x02FC:  # META_CREATEBRUSHINDIRECT: style, colour, hatch
+                    objects.append(("brush", words[0], words[1] | words[2] << 16))
+                elif function == 0x02FA:  # META_CREATEPENINDIRECT: style ...
+                    objects.append(("pen", words[0]))
+                elif function == 0x012D:  # META_SELECTOBJECT
+                    selected.append(objects[words[0]])
+                elif function == 0x041B:  # META_RECTANGLE: bottom, right, top, left
+                    bottom, right, top, left = words
+                    rects.append((left, top, right - 1, bottom - 1))
+                elif function == 0x020C:  # META_SETWINDOWEXT: height, width
+                    self.assertEqual(words, (len(rows) * unit, len(rows[0]) * unit))
+                offset += size * 2
+            self.assertEqual(selected, [("brush", 0, 0x000000), ("pen", 5)], name)  # PS_NULL
+            self.assertEqual(painted(len(rows[0]), len(rows), rects, unit), rows, name)
         content_types = parts["[Content_Types].xml"]
         for ext, kind in (("png", "image/png"), ("emf", "image/x-emf"), ("wmf", "image/x-wmf")):
             self.assertIn(f'<Default Extension="{ext}" ContentType="{kind}"/>'.encode(),
@@ -3617,8 +3667,8 @@ class Packages(unittest.TestCase):
             ("bottom", "single", "6", "1", "auto"), ("bottom", "double", "6", "1", "auto"),
         ])
         texts = ["".join(t.text or "" for t in p.iter(f"{W}t")) for p in body.findall(f"{W}p")]
-        self.assertIn("- " * 60, texts)
-        self.assertIn("✂ " + "- " * 55, texts)
+        self.assertIn("- " * 76, texts)
+        self.assertIn("✂ " + "- " * 73, texts)
         self.assertIn("_" * 80, texts)
         leaders = [(t.get(f"{W}val"), t.get(f"{W}pos"), t.get(f"{W}leader"))
                    for t in body.iter(f"{W}tab") if t.get(f"{W}val")]

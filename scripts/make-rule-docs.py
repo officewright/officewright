@@ -6202,7 +6202,7 @@ def break_cells(case: int) -> list[str]:
         line = f"Case {case:02d} cell {n}"
         brk = f"<w:r>{rpr(size=size)}<w:br/></w:r>"
         cells.append(para(
-            nine(f"{line} line 1") + brk + nine(f"{line} line 2, after a {size} pt break")
+            nine(f"{line} line 1") + brk + nine(f"{line} line 2, {size} pt break")
             + brk + nine(f"{line} line 3"), mark=sized(9)))
     return cells
 
@@ -6741,9 +6741,9 @@ def cut_lines_text() -> Doc:
          "=== (double, 0.75 pt, 1 pt from the text, automatic colour)",
          para(borders=bottom_border("double", 6, color="auto"))),
         ("a line of hyphens and spaces typed across the column",
-         para(run("- " * 60))),
-        ("a pair of scissors (U+2702) and a line of hyphens and spaces",
-         para(run("✂ " + "- " * 55))),
+         para(run("- " * 76))),
+        ("a pair of scissors (U+2702) and a line of hyphens and spaces across the column",
+         para(run("✂ " + "- " * 73))),
         ("a line of underscores typed across the column", para(run("_" * 80))),
     ] + [
         (f"a right tab at the right margin with the leader {leader}, after the words Cut here",
@@ -6761,8 +6761,8 @@ def cut_lines_text() -> Doc:
     )
 
 
-# The horizontal line of Word's Insert menu: a VML rectangle that is a rule (o:hr), as Word
-# writes it.
+# The horizontal line Word inserts from Borders, Horizontal Line: a VML rectangle that is a
+# rule (o:hr), as Word writes it.
 def vml_rule(shape_id: str, style: str, extra: str = "") -> str:
     return (f'<w:r><w:pict><v:rect id="{shape_id}" style="{style}"{extra} o:hralign="center" '
             'o:hrstd="t" o:hr="t" fillcolor="#a0a0a0" stroked="f"/></w:pict></w:r>')
@@ -6799,8 +6799,9 @@ def cut_lines_shapes() -> Doc:
                                           across=("margin", 0), down=("paragraph", 6)))
 
     cases = [
-        ("the horizontal line of Word's Insert menu: a VML rectangle with o:hr, the column's "
-         "width, 1.5 pt tall, grey", para(vml_rule("_x0000_i1025", "width:0;height:1.5pt"))),
+        ("the horizontal line Word inserts from Borders, Horizontal Line: a VML rectangle with "
+         "o:hr, the column's width, 1.5 pt tall, grey",
+         para(vml_rule("_x0000_i1025", "width:0;height:1.5pt"))),
         ("the same horizontal line at half the column's width (o:hrpct 500), centred",
          para(vml_rule("_x0000_i1026", "width:225.65pt;height:1.5pt", ' o:hrpct="500"'))),
         ("an inline DrawingML line of 432 pt, 1 pt, solid", para(inline_line(1, False))),
@@ -6820,7 +6821,7 @@ def cut_lines_shapes() -> Doc:
     return Doc(
         "E-cut-lines-shapes",
         "How Word draws cut lines between the parts of a receipt made of shapes: the "
-        "horizontal line of its Insert menu (VML o:hr) at full and half width, DrawingML "
+        "horizontal line it inserts from Borders (VML o:hr) at full and half width, DrawingML "
         "lines inline and floating, solid and dashed, and VML lines (v:line) inline and "
         "floating, solid and dashed",
         "".join(cut_line_case(n, label, line) for n, (label, line) in enumerate(cases, 1))
