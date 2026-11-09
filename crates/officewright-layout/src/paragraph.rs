@@ -557,7 +557,10 @@ mod tests {
     #[test]
     fn a_large_mark_makes_the_last_line_taller_only_in_a_table_cell() {
         use crate::fonts::Fonts;
-        use crate::ir::{BreakClear, Inline, RunFonts, RunStyle};
+        use crate::ir::{
+            BreakClear, ImageData, ImageFormat, Inline, InlineObject, ObjectContent, Picture,
+            RunFonts, RunStyle, Size,
+        };
         use crate::testing::{book, minimal};
         // The test font: a line of 1.15 em. 10 pt text with a 20 pt mark and a 20 pt
         // break: out of a cell, each line of text is as tall as its text; in a cell, the
@@ -574,12 +577,18 @@ mod tests {
             document.add_run_style(style(10.0)),
             document.add_run_style(style(20.0)),
         );
-        let paragraph = Paragraph::new(big).with_inlines([
+        let text = Paragraph::new(big).with_inlines([
             Inline::text("A", small),
             Inline::line_break(BreakClear::None, big),
             Inline::text("A", small),
         ]);
-        let heights = |cell: bool| -> Vec<f64> {
+        // A line of an inline picture 30 pt high is as tall as the picture out of a cell.
+        let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+        let picture = Paragraph::new(big).with_inlines([Inline::Object(InlineObject::new(
+            ObjectContent::Picture(Picture::new(image)),
+            Size::new(Pt(40.0), Pt(30.0)),
+        ))]);
+        let heights = |paragraph: &Paragraph, cell: bool| -> Vec<f64> {
             let mut fonts = Fonts::new(&book);
             let mut shaper = Shaper::new();
             let tools = (&mut fonts, &mut shaper);
@@ -587,7 +596,7 @@ mod tests {
             let layout = if cell {
                 lay_out_in_cell(
                     &document,
-                    (&paragraph, None),
+                    (paragraph, None),
                     Pt(200.0),
                     tools,
                     &location,
@@ -596,7 +605,7 @@ mod tests {
             } else {
                 lay_out_with(
                     &document,
-                    (&paragraph, None),
+                    (paragraph, None),
                     Pt(200.0),
                     tools,
                     &location,
@@ -610,14 +619,24 @@ mod tests {
             a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6)
         };
         assert!(
-            close(&heights(false), &[line(10.0), line(10.0)]),
+            close(&heights(&text, false), &[line(10.0), line(10.0)]),
             "{:?}",
-            heights(false)
+            heights(&text, false)
         );
         assert!(
-            close(&heights(true), &[line(20.0), line(20.0)]),
+            close(&heights(&text, true), &[line(20.0), line(20.0)]),
             "{:?}",
-            heights(true)
+            heights(&text, true)
+        );
+        assert!(
+            close(&heights(&picture, false), &[30.0]),
+            "{:?}",
+            heights(&picture, false)
+        );
+        assert!(
+            heights(&picture, true).iter().all(|height| *height > 30.0),
+            "{:?}",
+            heights(&picture, true)
         );
     }
 

@@ -1446,6 +1446,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 }
                 PieceKind::Object { item, height } => {
                     if let Some(height) = height {
+                        text = true;
                         extent.ascent = extent.ascent.max(height.0);
                         extent.empty = false;
                     } else if let Some(style) = item_style(self.itemized, *item) {
@@ -1455,16 +1456,17 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 }
             }
         }
-        // A line of text is as tall as its text: Word gives neither the paragraph mark
-        // nor the run of a break that ends the line a height of their own there, however
-        // large they are (E-smallcaps-15's reference: a Calibri 11 pt break and mark next
-        // to 9 pt text; contract-usds-statement-of-objectives: a 12 pt title with a 20 pt
-        // mark). A line without text has the height of its break, and the last line of a
-        // paragraph that of the mark too: an empty line, or one of an inline picture, whose
-        // descent they put below it. In a table cell the break and the last line's mark
-        // still count: Word's rows of the letterheads of generated/invoice-en-standard
-        // and letter-uk are taller than their text. Hypothesis until a rule document
-        // settles cells.
+        // A line of text, or of an inline picture or text box, is as tall as what it
+        // holds: Word gives neither the paragraph mark nor the run of a break that ends
+        // the line a height of their own there, however large they are (E-smallcaps-15's
+        // reference: a Calibri 11 pt break and mark next to 9 pt text;
+        // contract-usds-statement-of-objectives: a 12 pt title with a 20 pt mark, under a
+        // picture whose line ends where Word's does; E-textbox-spacing: lines of inline
+        // text boxes). A line with none of them has the height of its break, and the last
+        // line of a paragraph that of the mark too, such as an empty line. In a table cell
+        // the break and the last line's mark still count: Word's rows of the letterheads
+        // of generated/invoice-en-standard and letter-uk are taller than their text.
+        // Hypothesis until a rule document settles cells (#537).
         if !text || self.cell {
             for metrics in breaks {
                 extent.add(metrics, Pt(0.0));
