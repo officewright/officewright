@@ -1919,3 +1919,36 @@ fn reports_the_values_of_transforms_not_applied() {
         "{messages:?}"
     );
 }
+
+#[test]
+fn takes_the_line_values_of_a_shape_type() {
+    // From the re-check of #471: a shape type's `stroked` and `strokeweight` are read as it
+    // is registered, as its colours are; a width without a unit is in EMUs (MS-OI29500
+    // 2.1.1810(f)).
+    let typed = |id: &str, values: &str| {
+        format!(
+            r##"<v:shapetype id="{id}" {values}/><v:shape type="#{id}" style="width:1pt;height:1pt"><v:textbox/></v:shape>"##
+        )
+    };
+    let body = format!(
+        "<w:p><w:r>{}</w:r></w:p>",
+        pict(
+            &[
+                typed("off", r#"stroked="f""#),
+                typed("points", r#"strokeweight="2pt""#),
+                typed("emus", r#"strokeweight="25400""#),
+            ]
+            .concat()
+        )
+    );
+    let document = open(&body);
+    let boxes = vml_text_boxes(&document);
+    assert!(boxes[0].outline().is_none());
+    assert_eq!(boxes[1].outline().unwrap().width(), Pt(2.0));
+    assert_eq!(boxes[2].outline().unwrap().width(), Pt(2.0));
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+}
