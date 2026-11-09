@@ -9,13 +9,15 @@ use crate::model::NoteType;
 
 impl Translator<'_> {
     /// The IR note a reference to the note `id` names, added the first time; none,
-    /// listed each time, for a reference inside a note, which the IR does not hold, and
-    /// for a note that does not exist or is not a normal note.
+    /// listed each time, for a reference inside a note, which the IR does not hold, or
+    /// inside a text box, which Word ignores (MS-OI29500 2.1.302 b, 2.1.305 a), and for a
+    /// note that does not exist or is not a normal note.
     pub(super) fn note_reference(&mut self, endnote: bool, id: i64) -> Option<ir::NoteId> {
         let name = if endnote { "endnote" } else { "footnote" };
-        if self.in_note {
+        if self.in_note || self.in_text_box {
+            let inside = if self.in_note { "a note" } else { "a text box" };
             self.leave_out(ReportKind::FeatureUnsupported, || {
-                format!("a reference to a {name} inside a note is left out")
+                format!("a reference to a {name} inside {inside} is left out")
             });
             return None;
         }

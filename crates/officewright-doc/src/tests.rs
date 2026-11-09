@@ -4374,6 +4374,8 @@ mod paragraph_format;
 mod render;
 mod table_styles;
 mod text_box;
+#[cfg(feature = "pdf")]
+mod text_box_layout;
 mod vml;
 
 /// The text of the paragraphs of some blocks, one line each.

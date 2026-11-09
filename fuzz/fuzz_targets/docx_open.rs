@@ -289,4 +289,6 @@ fn read_text_box(text_box: TextBox<'_>) {
         text_box.is_linked(),
     );
     let _ = (text_box.fill(), text_box.outline());
+    let _ = (text_box.width(), text_box.height(), text_box.anchor());
+    let _ = (text_box.is_in_group(), text_box.is_hidden());
 }
