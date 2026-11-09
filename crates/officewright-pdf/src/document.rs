@@ -12,7 +12,7 @@ use crate::embed::{Codes, EXTRA_OBJECTS, Prepared, show};
 use crate::font::{SYNTHETIC_BOLD_STROKE, SYNTHETIC_ITALIC_SKEW, Synthetic, check_font_size};
 use crate::glyphs::MAX_STRING_BYTES;
 use crate::image::draw_operators;
-use crate::link::{Destination, Destinations, Link};
+use crate::link::{Destination, Destinations, Link, MAX_LINKS};
 use crate::path::check_range;
 use crate::stream::stream_object;
 use crate::{Compression, Error, Font, GlyphRun, GraphicsPath, Image, LinkTarget, Result, Stroke};
@@ -905,12 +905,13 @@ impl Page {
     ///
     /// # Errors
     ///
-    /// [`Error::OutOfRange`] if the width or height is outside 0.01 to 32767 pt, or the
-    /// URI or name is empty or longer than 32767 bytes as written ([`LinkTarget`],
-    /// [`add_destination`](Self::add_destination)); [`Error::InvalidPosition`] if a corner
-    /// of the rectangle is outside -32767 to 32767 pt. A link to a name that no page adds
-    /// makes [`Document::write_to`] fail with [`Error::UnknownDestination`]. On error the
-    /// page is unchanged.
+    /// [`Error::OutOfRange`] if the width or height is outside 0.01 to 32767 pt, the URI or
+    /// name is empty or longer than 32767 bytes as written ([`LinkTarget`],
+    /// [`add_destination`](Self::add_destination)), or the page has 8191 links already,
+    /// the most elements an array may have in PDF 1.4; [`Error::InvalidPosition`] if a
+    /// corner of the rectangle is outside -32767 to 32767 pt. A link to a name that no page
+    /// adds makes [`Document::write_to`] fail with [`Error::UnknownDestination`]. On error
+    /// the page is unchanged.
     pub fn add_link(
         &mut self,
         x: Pt,
@@ -919,7 +920,16 @@ impl Page {
         height: Pt,
         target: &LinkTarget,
     ) -> Result<()> {
-        self.links.push(Link::new(x, y, width, height, target)?);
+        let link = Link::new(x, y, width, height, target)?;
+        if self.links.len() >= MAX_LINKS {
+            return Err(Error::OutOfRange {
+                what: "number of links on the page",
+                value: (self.links.len() + 1) as f64,
+                min: 0.0,
+                max: MAX_LINKS as f64,
+            });
+        }
+        self.links.push(link);
         Ok(())
     }
 
@@ -2095,6 +2105,27 @@ mod tests {
         for (link, key) in (5..12).zip(["Zeta", "R%C3%A9sum%C3%A9", "_Toc123", "%C3%89clair"]) {
             assert!(object(&pdf, link).ends_with(&format!("/Dest ({key}) >>\n")));
         }
+    }
+
+    #[test]
+    fn a_page_has_at_most_max_links_links() {
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        let site = LinkTarget::Uri("https://example.com/".to_owned());
+        for _ in 0..MAX_LINKS {
+            page.add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &site)
+                .unwrap();
+        }
+        let err = page
+            .add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &site)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "number of links on the page 8192 is outside the 0 to 8191 range"
+        );
+        assert_eq!(page.links.len(), 8191);
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        assert_eq!(pdf.matches("/Subtype /Link").count(), 8191);
     }
 
     #[test]

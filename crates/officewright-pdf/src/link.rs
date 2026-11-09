@@ -15,6 +15,10 @@ use crate::{Error, Result};
 /// file stores.
 const MIN_LINK_SIDE: f64 = 0.01;
 
+/// The most links a page may have: the most elements its `/Annots` array may have in PDF
+/// 1.4 (PDF Reference 1.4, Appendix C).
+pub(crate) const MAX_LINKS: usize = 8191;
+
 /// The most names a leaf of the `/Dests` name tree holds, and the most kids a node above
 /// the leaves has, so that a reader finds a name without reading them all.
 const TREE_NODE: usize = 64;
