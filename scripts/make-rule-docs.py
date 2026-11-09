@@ -244,17 +244,19 @@ def section(
     sides: tuple[int, int] = (MARGIN, MARGIN),
     header_distance: int = 708,
     grid: str = '<w:docGrid w:linePitch="360"/>',
+    notes: str = "",
 ) -> str:
     """A section's properties: A4 portrait as sect_pr(), with a start type (w:type), header
     and footer references as (headerReference or footerReference, w:type, part name), a
     first page number and the top and bottom margins (negative for a fixed body edge); the
     format of its page numbers (w:pgNumType w:fmt) and a title page (w:titlePg); another
     page size, left and right margins and distance of the header from the edge, in twips;
-    another document grid (w:docGrid)."""
+    another document grid (w:docGrid); the section's w:footnotePr and w:endnotePr
+    (section_notes())."""
     references = "".join(
         f'<w:{element} w:type="{ref_type}" r:id="{part_id(name)}"/>'
         for element, ref_type, name in refs
-    )
+    ) + notes
     start = f'<w:type w:val="{kind}"/>' if kind else ""
     numbers = f'<w:pgNumType w:start="{page_start}"/>' if page_start is not None else ""
     if page_format is not None:
@@ -456,6 +458,18 @@ class Doc:
     # Pictures under word/media/, as (file name, PNG bytes); the body names each by the
     # relationship id media_id() gives it.
     media: tuple[tuple[str, bytes], ...] = ()
+    # The contents of the footnotes and the endnotes (note()), each kind numbered from id 1
+    # in this order; a document with notes of either kind gets both parts, as Word writes
+    # them (notes_xml()).
+    footnotes: tuple[str, ...] = ()
+    endnotes: tuple[str, ...] = ()
+    # The children of settings.xml's w:footnotePr and w:endnotePr before the entries of the
+    # separators (note_props()): the properties of the whole document.
+    footnote_props: str = ""
+    endnote_props: str = ""
+    # The paragraphs of the footnote continuation notice, which takes the id after the last
+    # footnote.
+    continuation_notice: str = ""
 
 
 def line_fonts_body(fonts: list[str]) -> str:
@@ -5303,6 +5317,452 @@ def dmap_font() -> Doc:
     )
 
 
+# Footnotes and endnotes (ECMA-376 §17.11), written as Word writes a document's notes: a
+# footnotes and an endnotes part, each with its separator (id -1) and continuation separator
+# (id 0), which the document-wide w:footnotePr and w:endnotePr of settings.xml name. Word
+# takes the placement of footnotes from the sections and ignores the document's (MS-OI29500
+# 2.1.309 a); the rule documents show what it does with the rest.
+NOTE_KINDS = ("footnote", "endnote")
+
+
+def has_notes(doc: Doc) -> bool:
+    return bool(doc.footnotes or doc.endnotes)
+
+
+def note_props(pos: str | None = None, fmt: str | None = None, start: int | None = None,
+               restart: str | None = None) -> str:
+    """The note properties of footnotes and endnotes (ECMA-376 Part 1 §17.11.11 and
+    §17.11.5) in their order: the placement (w:pos), the number format, the first number and
+    where the numbers restart."""
+    values = (("pos", pos), ("numFmt", fmt), ("numStart", start), ("numRestart", restart))
+    return "".join(f'<w:{name} w:val="{value}"/>' for name, value in values if value is not None)
+
+
+def section_notes(footnotes: str = "", endnotes: str = "") -> str:
+    """A section's w:footnotePr and w:endnotePr, of note_props() each, for section()."""
+    return ((f"<w:footnotePr>{footnotes}</w:footnotePr>" if footnotes else "")
+            + (f"<w:endnotePr>{endnotes}</w:endnotePr>" if endnotes else ""))
+
+
+def note_settings(doc: Doc) -> str:
+    """settings.xml's w:footnotePr and w:endnotePr: the document's properties, then the
+    separators and the continuation notice the notes parts hold."""
+    if not has_notes(doc):
+        if doc.footnote_props or doc.endnote_props or doc.continuation_notice:
+            raise ValueError(f"{doc.name}: note properties without notes")
+        return ""
+    notice = (f'<w:footnote w:id="{len(doc.footnotes) + 1}"/>'
+              if doc.continuation_notice else "")
+    return (f'<w:footnotePr>{doc.footnote_props}<w:footnote w:id="-1"/><w:footnote w:id="0"/>'
+            f"{notice}</w:footnotePr>"
+            f'<w:endnotePr>{doc.endnote_props}<w:endnote w:id="-1"/><w:endnote w:id="0"/>'
+            "</w:endnotePr>")
+
+
+def notes_xml(doc: Doc, kind: str) -> str:
+    """The footnotes or endnotes part: the separator, the continuation separator, the notes
+    and, for footnotes, the continuation notice."""
+    single = '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'
+    entries = [
+        f'<w:{kind} w:type="separator" w:id="-1"><w:p>{single}<w:r><w:separator/></w:r>'
+        f"</w:p></w:{kind}>",
+        f'<w:{kind} w:type="continuationSeparator" w:id="0"><w:p>{single}'
+        f"<w:r><w:continuationSeparator/></w:r></w:p></w:{kind}>",
+    ]
+    notes = doc.footnotes if kind == "footnote" else doc.endnotes
+    entries += [f'<w:{kind} w:id="{n}">{content}</w:{kind}>' for n, content in enumerate(notes, 1)]
+    if kind == "footnote" and doc.continuation_notice:
+        entries.append(f'<w:footnote w:type="continuationNotice" w:id="{len(notes) + 1}">'
+                       f"{doc.continuation_notice}</w:footnote>")
+    content = "".join(entries)
+    return f"<w:{kind}s {namespaces(content)}>{content}</w:{kind}s>"
+
+
+def reference_style(kind: str) -> str:
+    return f'<w:rPr><w:rStyle w:val="{kind.capitalize()}Reference"/></w:rPr>'
+
+
+def note_reference(note_id: int, kind: str = "footnote", custom: str | None = None) -> str:
+    """The reference mark of a note in the text, in the reference style: its number, or the
+    custom mark that follows it (w:customMarkFollows)."""
+    style = reference_style(kind)
+    if custom is None:
+        return f'<w:r>{style}<w:{kind}Reference w:id="{note_id}"/></w:r>'
+    return (f'<w:r>{style}<w:{kind}Reference w:customMarkFollows="1" w:id="{note_id}"/></w:r>'
+            f"<w:r>{style}{text(custom)}</w:r>")
+
+
+def note(*paragraphs: str, kind: str = "footnote", custom: str | None = None, **props) -> str:
+    """A note's paragraphs (their runs) in the note text style, the first starting with the
+    note's mark: its number (w:footnoteRef, w:endnoteRef) or the custom mark."""
+    style = reference_style(kind)
+    mark = f"<w:r>{style}{text(custom)}</w:r>" if custom else f"<w:r>{style}<w:{kind}Ref/></w:r>"
+    first, *rest = paragraphs
+    return "".join(para(content, p_style=f"{kind.capitalize()}Text", **props)
+                   for content in [mark + first, *rest])
+
+
+def spacer(points: float) -> str:
+    """An empty paragraph exactly points tall: room taken on the page without text."""
+    return para("", space=spacing(line=("exact", points)))
+
+
+def numbered_with_refs(prefix: str, count: int, refs: dict[int, str], first: int = 1) -> str:
+    """One-line paragraphs <prefix> 01, <prefix> 02 ... up to count, from first; line k
+    ends with the words "holds a reference" and refs[k], so that the reference mark is not
+    read as part of the line's number."""
+    return "".join(
+        page_para(run(f"{prefix} {k:02d}" + (" holds a reference" if k in refs else ""))
+                  + refs.get(k, ""))
+        for k in range(first, count + 1))
+
+
+def note_pages(sections: list[tuple[list[list[str]], str]]) -> str:
+    """Sections of one-line paragraphs, given as (pages, w:sectPr) with each page the
+    paragraphs' contents; a later page of a section starts with w:pageBreakBefore. Each
+    section's properties are in its last paragraph, but the last section's, which are the
+    document's (Doc.last_section)."""
+    body = ""
+    for n, (pages, properties) in enumerate(sections):
+        contents = [(content, k > 0 and i == 0)
+                    for k, page in enumerate(pages) for i, content in enumerate(page)]
+        for i, (content, new_page) in enumerate(contents):
+            last = i == len(contents) - 1 and n < len(sections) - 1
+            body += page_para(content, page_break_before=new_page,
+                              sect=properties if last else None)
+    return body
+
+
+def footnote_separator() -> Doc:
+    body = (page_para(run("Case 01: one footnote of one line under three lines of text"))
+            + page_para(run("Body line 2 holds the reference.") + note_reference(1))
+            + page_para(run("Body line 3, the last line of the text."))
+            + page_para(run("Case 02: a page of 12 pt lines with a reference in Line 10"),
+                        page_break_before=True)
+            + numbered_with_refs("Line", 70, {10: note_reference(2)}))
+    return Doc(
+        "E-footnote-separator",
+        "The default footnote separator: where Word draws it above a footnote at the foot of "
+        "a page of short text, how long and thick it is, where the note's first line starts "
+        "below it, and how many 12 pt lines a separator and a note of one line take from a "
+        "full page",
+        body + page_para(run("End of the document.")),
+        footnotes=(note(run(" Footnote 1, one line.")), note(run(" Footnote 2, one line."))),
+    )
+
+
+NOTE_SPACING = spacing(before=6, after=6)
+
+
+def footnote_two_notes() -> Doc:
+    cases = [
+        ("two notes from lines 1 and 3; the first note has three lines",
+         {1: note_reference(1), 3: note_reference(2)}),
+        ("two notes from the same line", {1: note_reference(3) + note_reference(4)}),
+        ("two notes whose paragraphs have 6 pt before and after",
+         {1: note_reference(5), 2: note_reference(6)}),
+        ("one note of two paragraphs", {1: note_reference(7)}),
+    ]
+    body = "".join(page_para(run(f"Case {n:02d}: {label}"), page_break_before=n > 1)
+                   + numbered_with_refs(f"Case {n:02d} line", 3, refs)
+                   for n, (label, refs) in enumerate(cases, 1))
+    return Doc(
+        "E-footnote-two-notes",
+        "Two footnotes on a page: the space between them when the first has three lines, two "
+        "references in one line, notes whose paragraphs have space before and after, and a "
+        "note of two paragraphs",
+        body + page_para(run("End of the document.")),
+        footnotes=(
+            note(lines([" Footnote 1, line 1", "Footnote 1, line 2", "Footnote 1, line 3"])),
+            note(run(" Footnote 2, one line.")),
+            note(run(" Footnote 3, one line.")),
+            note(run(" Footnote 4, one line.")),
+            note(run(" Footnote 5, 6 pt before and after."), space=NOTE_SPACING),
+            note(run(" Footnote 6, 6 pt before and after."), space=NOTE_SPACING),
+            note(run(" Footnote 7, paragraph 1."), run("Footnote 7, paragraph 2.")),
+        ),
+    )
+
+
+# The body of an A4 page with 1 inch margins is 697.9 pt tall.
+BODY_HEIGHT = (PAGE_H - 2 * MARGIN) / 20
+
+
+# The cases of E-footnote-no-room: (lines of the note, widow control of the note, room left
+# below the reference line in points). Below the reference line, 32 pt hold the separator (a
+# line of the 11 pt default text, about 13.4 pt) and one line of the 10 pt note text (about
+# 12.2 pt) but not two, 45 pt the separator and two lines but not three, and 10 pt neither.
+# Widow control keeps the first and the last two lines of a paragraph together, so it rules
+# out every cut of a three-line note, while a four-line one may be cut in the middle.
+NO_ROOM_CASES = [(3, False, 32), (3, True, 32), (4, True, 45), (3, False, 10), (1, True, 32)]
+
+
+def note_lines(prefix: str, count: int) -> str:
+    """count lines <prefix>, line 1 ... of a note, in one paragraph; the space that follows
+    the note's mark starts the first line only."""
+    values = [f"{prefix}, line {k}" for k in range(1, count + 1)]
+    return lines([" " + values[0], *values[1:]])
+
+
+def footnote_no_room() -> Doc:
+    # The reference is in the last line that fits: the line after it is 48 pt tall.
+    body, footnotes = "", []
+    for n, (count, widow, left) in enumerate(NO_ROOM_CASES, 1):
+        label = f"a {count}-line note, widow control {'on' if widow else 'off'}, {left} pt left"
+        body += (page_para(run(f"Case {n:02d}: {label}"), page_break_before=n > 1)
+                 + spacer(BODY_HEIGHT - 12 - 12 - left)
+                 + page_para(run(f"Case {n:02d}: the line that holds the reference")
+                             + note_reference(n))
+                 + para(run(f"Case {n:02d}: after the reference line, a line 48 pt tall"),
+                        space=spacing(line=("exact", 48))))
+        footnotes.append(note(note_lines(f"Footnote {n}", count),
+                              widow_control=None if widow else False))
+    return Doc(
+        "E-footnote-no-room",
+        "A footnote reference in the last line that fits on a page, with room below it for "
+        "the separator and one line of a three-line note, without and with widow control, "
+        "for two lines of a four-line note with widow control, for neither, and for a note "
+        "of one line: whether the line moves to the next page or the note is cut",
+        body + page_para(run("End of the document.")),
+        footnotes=tuple(footnotes),
+    )
+
+
+# The note of E-footnote-long: 40 lines from Line 30, where 337.9 pt are left below the
+# reference line, room for the separator and 26 of its lines: it cannot fit on that page.
+LONG_NOTE_LINES = 40
+LONG_NOTE_REFERENCE = 30
+
+
+def long_note(name: str, notice: bool) -> Doc:
+    label = f"Line 01: a {LONG_NOTE_LINES}-line footnote from Line {LONG_NOTE_REFERENCE}"
+    label += ", with a continuation notice" if notice else " that cannot fit on this page"
+    body = page_para(run(label)) + numbered_with_refs(
+        "Line", 60, {LONG_NOTE_REFERENCE: note_reference(1)}, 2)
+    footnote = note(note_lines("Footnote 1", LONG_NOTE_LINES))
+    purpose = (f"A footnote of {LONG_NOTE_LINES} lines from Line {LONG_NOTE_REFERENCE}, too tall "
+               "for the room below its reference: what Word leaves on the page of its "
+               "reference, and the continuation separator above the rest")
+    if notice:
+        purpose += ", with a continuation notice under the part that is cut"
+    return Doc(
+        name,
+        purpose,
+        body + page_para(run("End of the document.")),
+        footnotes=(footnote,),
+        continuation_notice=(para(run("Continuation notice: the footnote goes on overleaf."),
+                                  p_style="FootnoteText") if notice else ""),
+    )
+
+
+def note_section_pages(label: str, refs: str, last: str) -> list[str]:
+    """One page of a section: its label, a line ending with refs and a last line."""
+    return [run(label), run("Body line 2 holds the reference.") + refs, run(last)]
+
+
+def footnote_beneath() -> Doc:
+    sections = [
+        ("Section 1: w:pos beneathText in the section", note_props(pos="beneathText")),
+        ("Section 2: w:pos sectEnd in the section", note_props(pos="sectEnd")),
+        ("Section 3: w:pos pageBottom in the section", note_props(pos="pageBottom")),
+        ("Section 4: no w:footnotePr in the section", ""),
+    ]
+    pages = [([note_section_pages(label, note_reference(n), "Body line 3, the last line.")],
+              section(notes=section_notes(props)))
+             for n, (label, props) in enumerate(sections, 1)]
+    return Doc(
+        "E-footnote-beneath",
+        "Footnotes on pages whose text ends high, placed by each section's w:footnotePr: "
+        "beneath the text, at the end of the section (sectEnd), at the foot of the page, "
+        "and with no placement in the section",
+        note_pages(pages),
+        footnotes=tuple(note(run(f" Footnote {n}, one line.")) for n in range(1, 5)),
+        last_section=pages[-1][1],
+    )
+
+
+def footnote_beneath_settings() -> Doc:
+    # One section, whose properties (sect_pr()) have no w:footnotePr.
+    body = "".join(page_para(content) for content in note_section_pages(
+        "Case 01: w:pos beneathText in the settings only", note_reference(1),
+        "Body line 3, the last line."))
+    return Doc(
+        "E-footnote-beneath-settings",
+        "Whether the document-wide w:footnotePr of the settings alone (w:pos beneathText, "
+        "none in the section) places a footnote beneath the text on a page whose text ends "
+        "high, which MS-OI29500 2.1.309 a says Word takes from the section only",
+        body,
+        footnotes=(note(run(" Footnote 1, one line.")),),
+        footnote_props=note_props(pos="beneathText"),
+    )
+
+
+def ref_lines(prefix: str, first: int, count: int) -> list[str]:
+    """count lines, each ending with the reference of the next footnote from id first."""
+    return [run(f"{prefix}, line {k + 1} holds a reference") + note_reference(first + k)
+            for k in range(count)]
+
+
+def footnote_numbering() -> Doc:
+    sections = [
+        # (label, w:footnotePr, references on each page)
+        ("Section 1: upperRoman from 5, numbered on",
+         note_props(fmt="upperRoman", start=5), [2, 1]),
+        ("Section 2: decimal, restart in each section",
+         note_props(fmt="decimal", restart="eachSect"), [2]),
+        ("Section 3: numbered on, no number format",
+         note_props(restart="continuous"), [1]),
+        ("Section 4: chicago, restart on each page",
+         note_props(fmt="chicago", restart="eachPage"), [5, 2]),
+    ]
+    pages, first = [], 1
+    for label, props, counts in sections:
+        section_pages = []
+        for k, count in enumerate(counts, 1):
+            section_pages.append([run(f"{label}, page {k}")]
+                                 + ref_lines(f"Page {k}", first, count))
+            first += count
+        pages.append((section_pages, section(notes=section_notes(props))))
+    # Section 5: a custom mark between two numbered notes.
+    custom = [run("Section 5: decimal, restart in each section; a custom mark between notes"),
+              run("Line 1 holds a reference") + note_reference(first),
+              run("Line 2 holds the custom mark") + note_reference(first + 1, custom="\u2020"),
+              run("Line 3 holds a reference") + note_reference(first + 2)]
+    pages.append(([custom], section(notes=section_notes(
+        note_props(fmt="decimal", restart="eachSect")))))
+    footnotes = [note(run(f" Footnote {n}, one line.")) for n in range(1, first)]
+    footnotes += [note(run(" Footnote before the custom mark.")),
+                  note(run(" Footnote with the custom mark."), custom="\u2020"),
+                  note(run(" Footnote after the custom mark."))]
+    return Doc(
+        "E-footnote-numbering",
+        "Footnote numbers set by each section's w:footnotePr: upper Roman from 5 over two "
+        "pages, decimal restarting in each section, a section numbered on without a format, "
+        "Chicago marks restarting on each page, and a custom mark (w:customMarkFollows) "
+        "between two numbered notes",
+        note_pages(pages),
+        footnotes=tuple(footnotes),
+        last_section=pages[-1][1],
+    )
+
+
+def footnote_numbering_settings() -> Doc:
+    pages = [
+        ([[run("Section 1: no w:footnotePr in the section, page 1")] + ref_lines("Page 1", 1, 2),
+          [run("Section 1, page 2")] + ref_lines("Page 2", 3, 1)], section()),
+        ([[run("Section 2: upperLetter in the section, page 1")] + ref_lines("Page 1", 4, 1),
+          [run("Section 2, page 2")] + ref_lines("Page 2", 5, 1)],
+         section(notes=section_notes(note_props(fmt="upperLetter")))),
+    ]
+    return Doc(
+        "E-footnote-numbering-settings",
+        "Footnote numbers set by the document-wide w:footnotePr of the settings (lower-case "
+        "letters from 3, restarting on each page): in a section without w:footnotePr, and in "
+        "one whose w:footnotePr gives upper-case letters only",
+        note_pages(pages),
+        footnotes=tuple(note(run(f" Footnote {n}, one line.")) for n in range(1, 6)),
+        footnote_props=note_props(fmt="lowerLetter", start=3, restart="eachPage"),
+        last_section=pages[-1][1],
+    )
+
+
+HALF_GRID = [TEXT_W // 2] * 2
+
+
+def note_table(first_cell: str, second_cell: str) -> str:
+    return rule_table([[cell(first_cell), cell(second_cell)]], HALF_GRID,
+                      tbl_w=(TEXT_W, "dxa"), fixed=True)
+
+
+def footnote_table() -> Doc:
+    # Cases 02 and 03 as crossing_case(): the row starts after 41 lines of 12 pt. Line 03 of
+    # its first cell fits on page 1 with its note (the separator and one line), which leaves
+    # less room there for the row; without a note on page 1, the page holds 17 of the row's
+    # lines, so line 18 is on page 2.
+    simple = note_table(page_para(run("First cell")),
+                        page_para(run("Second cell holds the reference.") + note_reference(1)))
+    cases = [(2, 3), (3, 18)]
+    body = page_para(run("Case 01: a reference in a cell of a table of one row")) + simple
+    body += page_para(run("After case 01."))
+    for n, line in cases:
+        crossing = note_table(numbered_with_refs("First cell", 20, {line: note_reference(n)}),
+                              page_para(run("Second cell")))
+        body += crossing_case(n, f"a reference in line {line:02d} of a row cut across pages",
+                              crossing)
+    return Doc(
+        "E-footnote-table",
+        "Footnote references in table cells: in a table of one row; in line 3 of a row cut "
+        "across two pages, whose note takes room on the first; and in line 18 of such a row, "
+        "past the 17 lines the first page holds",
+        body + page_para(run("End of the document.")),
+        footnotes=tuple(note(run(f" Footnote {n}, one line.")) for n in range(1, 4)),
+    )
+
+
+def endnote_doc_end() -> Doc:
+    pages = [
+        ([[run("Section 1: one endnote"),
+           run("Body line 2 holds a reference") + note_reference(1, "endnote"),
+           run("Body line 3, the last line of section 1.")]], section()),
+        ([[run("Section 2: two endnotes on a short last page"),
+           run("Body line 2 holds two references") + note_reference(2, "endnote")
+           + note_reference(3, "endnote"),
+           run("Body line 3, the last line of the document.")]], section()),
+    ]
+    return Doc(
+        "E-endnote-doc-end",
+        "Endnotes at the end of the document (no placement given) after a short last page: "
+        "their separator, their number format by default, and an endnote of two lines",
+        note_pages(pages),
+        endnotes=(note(run(" Endnote 1, one line."), kind="endnote"),
+                  note(run(" Endnote 2, one line."), kind="endnote"),
+                  note(lines([" Endnote 3, line 1", "Endnote 3, line 2"]), kind="endnote")),
+        last_section=section(),
+    )
+
+
+def endnote_doc_end_full() -> Doc:
+    refs = {1: note_reference(1, "endnote"), LINES_PER_PAGE - 1: note_reference(2, "endnote")}
+    body = page_para(run("Case 01: 58 lines of 12 pt fill page 1; endnotes from lines 01 and 57"))
+    body += numbered_with_refs("Line", LINES_PER_PAGE - 1, refs)
+    return Doc(
+        "E-endnote-doc-end-full",
+        "Endnotes at the end of a document whose last page is full: where they start",
+        body,
+        endnotes=(note(run(" Endnote 1, one line."), kind="endnote"),
+                  note(run(" Endnote 2, one line."), kind="endnote")),
+    )
+
+
+def endnote_section_end(name: str, in_settings: bool) -> Doc:
+    where = "the settings" if in_settings else "each section"
+    props = section_notes(endnotes=note_props(pos="sectEnd")) if not in_settings else ""
+    pages = [
+        ([[run(f"Section 1: w:pos sectEnd for endnotes in {where}"),
+           run("Body line 2 holds a reference") + note_reference(1, "endnote"),
+           run("Body line 3 holds a reference") + note_reference(2, "endnote"),
+           run("Body line 4, the last line of section 1.")]], section(notes=props)),
+        ([[run("Section 2: a continuous section"),
+           run("Body line 2 holds a reference") + note_reference(3, "endnote"),
+           run("Body line 3, the last line of section 2.")]],
+         section(kind="continuous", notes=props)),
+        ([[run("Section 3: a section on the next page"),
+           run("Body line 2 holds a reference") + note_reference(4, "endnote"),
+           run("Body line 3, the last line of the document.")]], section(notes=props)),
+    ]
+    return Doc(
+        name,
+        f"Whether w:pos sectEnd for endnotes in {where} alone puts the endnotes at the end "
+        "of each section: after a section followed by a continuous section and after one "
+        "followed by a section on the next page",
+        note_pages(pages),
+        endnotes=tuple(note(run(f" Endnote {n}, one line."), kind="endnote")
+                       for n in range(1, 5)),
+        endnote_props=note_props(pos="sectEnd") if in_settings else "",
+        last_section=pages[-1][1],
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -5458,6 +5918,20 @@ def documents() -> list[Doc]:
         row_break_revisions(),
         row_break_numbers(),
         dmap_font(),
+        footnote_separator(),
+        footnote_two_notes(),
+        footnote_no_room(),
+        long_note("E-footnote-long", False),
+        long_note("E-footnote-long-notice", True),
+        footnote_beneath(),
+        footnote_beneath_settings(),
+        footnote_numbering(),
+        footnote_numbering_settings(),
+        footnote_table(),
+        endnote_doc_end(),
+        endnote_doc_end_full(),
+        endnote_section_end("E-endnote-section-end", True),
+        endnote_section_end("E-endnote-section-end-section", False),
     ]
 
 
@@ -5504,8 +5978,25 @@ def styles_xml(doc: Doc) -> str:
         "</w:tblCellMar></w:tblPr></w:style>"
         '<w:style w:type="numbering" w:default="1" w:styleId="NoList">'
         f'<w:name w:val="No List"/>{hidden}</w:style>'
+        f"{note_styles() if has_notes(doc) else ''}"
         f"{doc.styles}"
         "</w:styles>"
+    )
+
+
+def note_styles() -> str:
+    """The built-in styles Word adds with a document's first note: the note text, 10 pt in
+    single lines without space after, and the reference mark, superscript."""
+    hidden = '<w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/>'
+    return "".join(
+        f'<w:style w:type="paragraph" w:styleId="{kind.capitalize()}Text">'
+        f'<w:name w:val="{kind} text"/><w:basedOn w:val="Normal"/>{hidden}'
+        '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'
+        '<w:rPr><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style>'
+        f'<w:style w:type="character" w:styleId="{kind.capitalize()}Reference">'
+        f'<w:name w:val="{kind} reference"/><w:basedOn w:val="DefaultParagraphFont"/>{hidden}'
+        '<w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style>'
+        for kind in NOTE_KINDS
     )
 
 
@@ -5610,6 +6101,7 @@ def settings_xml(doc: Doc) -> str:
         '<w:defaultTabStop w:val="720"/>'
         + ("<w:evenAndOddHeaders/>" if doc.even_and_odd_headers else "")
         + '<w:characterSpacingControl w:val="doNotCompress"/>'
+        f"{note_settings(doc)}"
         f"<w:compat>{flags}{settings}</w:compat>"
         # The languages and number format are set, so that a re-saved copy that names the
         # language or locale of the machine Word ran on stands out (corpus-import.py).
@@ -5668,8 +6160,12 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
     numbering = None
     if doc.numbering:
         numbering = f'<w:numbering xmlns:w="{W_NS}">{doc.numbering}</w:numbering>'
+    notes = []
+    if has_notes(doc):
+        notes = [(f"{kind}s.xml", notes_xml(doc, kind)) for kind in NOTE_KINDS]
 
-    used = document + styles_xml(doc) + (numbering or "") + "".join(x for _, x in doc.headers)
+    used = (document + styles_xml(doc) + (numbering or "") + "".join(x for _, x in doc.headers)
+            + "".join(x for _, x in notes))
     # The fonts every w:rFonts names, directly or through a theme attribute.
     fonts = set()
     for attributes in re.findall(r"<w:rFonts ([^>]*)/>", used):
@@ -5704,6 +6200,10 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         overrides.append(
             ("/word/theme/theme1.xml", "application/vnd.openxmlformats-officedocument.theme+xml")
         )
+    for name, _ in notes:
+        kind = name.removesuffix(".xml")
+        word_rels.append((kind, name))
+        overrides.append((f"/word/{name}", f"{CT_W}.{kind}+xml"))
     content_types = (
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
@@ -5734,6 +6234,8 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
     if doc.theme:
         result.append(("word/theme/theme1.xml", xml_part(theme_xml(doc.theme_overrides))))
     for name, root in doc.headers:
+        result.append((f"word/{name}", xml_part(root)))
+    for name, root in notes:
         result.append((f"word/{name}", xml_part(root)))
     result.append(("word/_rels/document.xml.rels", xml_part(relationships(word_rels))))
     xml_parts = list(result)
