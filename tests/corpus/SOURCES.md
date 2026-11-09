@@ -190,6 +190,9 @@ writes.
 | word-rules/E-endnote-doc-end-full.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Endnotes at the end of a document whose last page is full: where they start |
 | word-rules/E-endnote-section-end.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Whether w:pos sectEnd for endnotes in the settings alone puts the endnotes at the end of each section: after a section followed by a continuous section and after one followed by a section on the next page |
 | word-rules/E-endnote-section-end-section.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Whether w:pos sectEnd for endnotes in each section alone puts the endnotes at the end of each section: after a section followed by a continuous section and after one followed by a section on the next page |
+| word-rules/E-footnote-header.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Footnote references in the header and in the footer, on two pages, beside references in the body: whether Word draws their marks, lays their notes out and numbers them |
+| word-rules/E-footnote-hidden.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | A footnote whose reference is hidden text, between two visible ones: whether Word lays its note out and whether it takes a number |
+| word-rules/E-footnote-start-continuous.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | The first footnote number of a continuous section with w:numStart 5 after a section without footnotes, and of a section on the next page with w:numStart 9 after it, both numbered on |
 
 ## Apache POI test documents (`poi/`)
 

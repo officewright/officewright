@@ -4186,10 +4186,13 @@ class Packages(unittest.TestCase):
                     ElementTree.fromstring(parts["word/_rels/document.xml.rels"])
                     .iter(f"{PR}Relationship")}
             body = ElementTree.fromstring(parts["word/document.xml"])
+            # The stories that hold references: the body, the headers and the footers.
+            stories = [body] + [ElementTree.fromstring(data) for name, data in listed
+                                if name.startswith(("word/header", "word/footer"))]
             # The custom marks of the references (w:customMarkFollows): the text of the run
             # after the reference's run.
             custom = {}
-            for p in body.iter(f"{W}p"):
+            for p in (p for story in stories for p in story.iter(f"{W}p")):
                 runs = p.findall(f"{W}r")
                 for k, r in enumerate(runs):
                     for ref in r:
@@ -4215,16 +4218,19 @@ class Packages(unittest.TestCase):
                 named = [e.get(f"{W}id") for e in settings.find(f"{W}{kind}Pr")
                          if e.tag == f"{W}{kind}"]
                 self.assertEqual(named, sorted(special, key=int), doc.name)
-                # Each note is referenced once, from the body, by a run in the reference style.
+                # Each note is referenced once, from the body, a header or a footer, by a run
+                # in the reference style.
                 normal = [i for i in by_id if i not in special]
                 self.assertEqual(normal, [str(n) for n in range(1, len(notes) + 1)], doc.name)
-                references = [r.get(f"{W}id") for r in body.iter(f"{W}{kind}Reference")]
+                references = [r.get(f"{W}id") for story in stories
+                              for r in story.iter(f"{W}{kind}Reference")]
                 self.assertEqual(sorted(references, key=int), normal, doc.name)
                 style = f"{kind.capitalize()}Reference"
-                for r in body.iter(f"{W}r"):
-                    if r.find(f"{W}{kind}Reference") is not None:
-                        self.assertEqual(r.find(f"{W}rPr/{W}rStyle").get(f"{W}val"), style)
-                self.assertIsNone(body.find(f".//{W}{kind}Ref"), doc.name)
+                for story in stories:
+                    for r in story.iter(f"{W}r"):
+                        if r.find(f"{W}{kind}Reference") is not None:
+                            self.assertEqual(r.find(f"{W}rPr/{W}rStyle").get(f"{W}val"), style)
+                    self.assertIsNone(story.find(f".//{W}{kind}Ref"), doc.name)
                 for i in normal:
                     paragraphs = by_id[i].findall(f"{W}p")
                     for p in paragraphs:
@@ -4245,7 +4251,7 @@ class Packages(unittest.TestCase):
                     self.assertRegex(words[0], r"^ \S", f"{doc.name}: {i}")
                     for word in words[1:]:
                         self.assertNotRegex(word, r"^\s", f"{doc.name}: {i}")
-        self.assertEqual(documents_with_notes, 14)
+        self.assertEqual(documents_with_notes, 17)
 
     def test_settings_follow_the_schema_order(self):
         # CT_Settings 17.15.1.78 is a sequence (here the elements the script writes), and so
@@ -4622,6 +4628,53 @@ class Packages(unittest.TestCase):
                               if refs(p, "endnote")], [1, 1, 1, 1])
             where = "the settings" if in_settings else "each section"
             self.assertIn(f"w:pos sectEnd for endnotes in {where}", texts(found[0][0][0]))
+
+        # E-footnote-header: note 1 from the header and note 2 from the footer, which the one
+        # section shows on both its pages, and notes 3 and 4 from the body.
+        body, settings, notes = load("E-footnote-header")
+        parts = dict(rules.parts(by_name["E-footnote-header"]))
+        header = ElementTree.fromstring(parts["word/header1.xml"])
+        footer = ElementTree.fromstring(parts["word/footer1.xml"])
+        self.assertEqual((header.tag, refs(header)), (f"{W}hdr", ["1"]))
+        self.assertEqual((footer.tag, refs(footer)), (f"{W}ftr", ["2"]))
+        ((paragraphs, sect),) = sections(body)
+        self.assertEqual([[r for p in page for r in refs(p)] for page in pages(paragraphs)],
+                         [["3"], ["4"]])
+        self.assertEqual({(r.tag.replace(W, ""), r.get(f"{W}type")) for r in sect
+                          if r.tag in (f"{W}headerReference", f"{W}footerReference")},
+                         {("headerReference", "default"), ("footerReference", "default")})
+        self.assertIn("the header (note 1), the footer (note 2) and the body", texts(paragraphs[0]))
+
+        # E-footnote-hidden: the second of three references is hidden text, and only it.
+        body, settings, notes = load("E-footnote-hidden")
+        self.assertIn("the second of them hidden text (w:vanish)", texts(body.find(f"{W}p")))
+        hidden = {}
+        for r in body.iter(f"{W}r"):
+            ref = r.find(f"{W}footnoteReference")
+            if ref is not None:
+                hidden[ref.get(f"{W}id")] = r.find(f"{W}rPr/{W}vanish") is not None
+            else:
+                self.assertIsNone(r.find(f"{W}rPr/{W}vanish"), texts(r))
+        self.assertEqual(hidden, {"1": False, "2": True, "3": False})
+        # Only the reference is hidden: no run of the notes themselves is.
+        for note_id, element in notes["footnote"].items():
+            self.assertIsNone(element.find(f".//{W}rPr/{W}vanish"), f"footnote {note_id}")
+
+        # E-footnote-start-continuous: no notes and no w:footnotePr in section 1; a continuous
+        # section 2 from 5 and a section 3 on the next page from 9, both numbered on.
+        body, settings, notes = load("E-footnote-start-continuous")
+        self.assertEqual(props(settings), {})
+        found = sections(body)
+        starts = [s.find(f"{W}type") for _, s in found]
+        self.assertEqual([t.get(f"{W}val") if t is not None else None for t in starts],
+                         [None, "continuous", None])
+        self.assertEqual([props(s) for _, s in found], [{}, {"numStart": "5"}, {"numStart": "9"}])
+        self.assertEqual([sum(len(refs(p)) for p in paragraphs) for paragraphs, _ in found],
+                         [0, 2, 1])
+        labels = [texts(paragraphs[0]) for paragraphs, _ in found]
+        self.assertIn("no footnotes", labels[0])
+        self.assertIn("a continuous section, w:numStart 5, numbered on", labels[1])
+        self.assertIn("on the next page, w:numStart 9, numbered on", labels[2])
 
         # A later section starts where its w:type says (the next page by default, continuous
         # in E-endnote-section-end), never with a page break of its own; later pages of one

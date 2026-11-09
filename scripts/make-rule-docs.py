@@ -5382,10 +5382,13 @@ def reference_style(kind: str) -> str:
     return f'<w:rPr><w:rStyle w:val="{kind.capitalize()}Reference"/></w:rPr>'
 
 
-def note_reference(note_id: int, kind: str = "footnote", custom: str | None = None) -> str:
+def note_reference(note_id: int, kind: str = "footnote", custom: str | None = None,
+                   hidden: bool = False) -> str:
     """The reference mark of a note in the text, in the reference style: its number, or the
-    custom mark that follows it (w:customMarkFollows)."""
+    custom mark that follows it (w:customMarkFollows); hidden makes it hidden text."""
     style = reference_style(kind)
+    if hidden:
+        style = style.replace("</w:rPr>", f"{VANISH}</w:rPr>")
     if custom is None:
         return f'<w:r>{style}<w:{kind}Reference w:id="{note_id}"/></w:r>'
     return (f'<w:r>{style}<w:{kind}Reference w:customMarkFollows="1" w:id="{note_id}"/></w:r>'
@@ -5763,6 +5766,68 @@ def endnote_section_end(name: str, in_settings: bool) -> Doc:
     )
 
 
+def footnote_header() -> Doc:
+    # Word's interface puts no footnote into a header or footer; MS-OI29500 2.1.305 a names
+    # only comments and text boxes as stories whose references Word ignores. The header and
+    # footer repeat on page 2, so their references stand on two pages.
+    refs = (("headerReference", "default", "header1.xml"),
+            ("footerReference", "default", "footer1.xml"))
+    pages = [[run("Case 01: references in the header (note 1), the footer (note 2) and the body"),
+              run("Body line 2 holds a reference") + note_reference(3),
+              run("Body line 3, the last line of page 1.")],
+             [run("Page 2: the header and the footer again"),
+              run("Body line 2 holds a reference") + note_reference(4)]]
+    return Doc(
+        "E-footnote-header",
+        "Footnote references in the header and in the footer, on two pages, beside references "
+        "in the body: whether Word draws their marks, lays their notes out and numbers them",
+        note_pages([(pages, section(refs=refs))]) + page_para(run("End of the document.")),
+        headers=(header_part("header1.xml", page_para(
+                     run("Header line holds a reference") + note_reference(1))),
+                 header_part("footer1.xml", page_para(
+                     run("Footer line holds a reference") + note_reference(2)))),
+        footnotes=tuple(note(run(f" Footnote {n}, one line.")) for n in range(1, 5)),
+        last_section=section(refs=refs),
+    )
+
+
+def footnote_hidden() -> Doc:
+    body = (page_para(run("Case 01: three references, the second of them hidden text (w:vanish)"))
+            + page_para(run("Line 1 holds a reference") + note_reference(1))
+            + page_para(run("Line 2 holds a hidden reference") + note_reference(2, hidden=True))
+            + page_para(run("Line 3 holds a reference") + note_reference(3)))
+    return Doc(
+        "E-footnote-hidden",
+        "A footnote whose reference is hidden text, between two visible ones: whether Word "
+        "lays its note out and whether it takes a number",
+        body + page_para(run("End of the document.")),
+        footnotes=tuple(note(run(f" Footnote {n}, one line.")) for n in range(1, 4)),
+    )
+
+
+def footnote_start_continuous() -> Doc:
+    pages = [
+        ([[run("Section 1: no footnotes"), run("Body line 2, the last line of section 1.")]],
+         section()),
+        ([[run("Section 2: a continuous section, w:numStart 5, numbered on"),
+           run("Line 1 holds a reference") + note_reference(1),
+           run("Line 2 holds a reference") + note_reference(2)]],
+         section(kind="continuous", notes=section_notes(note_props(start=5)))),
+        ([[run("Section 3: on the next page, w:numStart 9, numbered on"),
+           run("Line 1 holds a reference") + note_reference(3)]],
+         section(notes=section_notes(note_props(start=9)))),
+    ]
+    return Doc(
+        "E-footnote-start-continuous",
+        "The first footnote number of a continuous section with w:numStart 5 after a section "
+        "without footnotes, and of a section on the next page with w:numStart 9 after it, "
+        "both numbered on",
+        note_pages(pages),
+        footnotes=tuple(note(run(f" Footnote {n}, one line.")) for n in range(1, 4)),
+        last_section=pages[-1][1],
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -5932,6 +5997,9 @@ def documents() -> list[Doc]:
         endnote_doc_end_full(),
         endnote_section_end("E-endnote-section-end", True),
         endnote_section_end("E-endnote-section-end-section", False),
+        footnote_header(),
+        footnote_hidden(),
+        footnote_start_continuous(),
     ]
 
 
