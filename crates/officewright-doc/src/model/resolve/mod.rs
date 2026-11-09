@@ -93,7 +93,7 @@ pub struct Formats<'a> {
     /// style; at most [`MAX_CELL_LEVELS`] at a time.
     cell_levels: HashMap<(u64, usize), Arc<ParagraphLevel>>,
     /// The sizes, and whether the left justification, that the default paragraph style
-    /// gives give way to a table style's ([MS-DOCX] 2.3.x
+    /// gives give way to a table style's ([MS-DOCX] 2.3.1
     /// `overrideTableStyleFontSizeAndJustification`), once worked out.
     table_style_wins: Option<TableStyleWins>,
     /// How much work the caches saved, for tests.
@@ -535,21 +535,26 @@ impl Formats<'_> {
 
     /// Whether, in a cell, the left justification that the default paragraph style gives
     /// gives way to the table style's: when the setting
-    /// `overrideTableStyleFontSizeAndJustification` ([MS-DOCX] 2.3.x) is off, written so or,
+    /// `overrideTableStyleFontSizeAndJustification` ([MS-DOCX] 2.3.1) is off, written so or,
     /// below compatibility mode 15, not written.
     fn table_style_wins(&mut self) -> bool {
         self.table_style_override() != TableStyleWins::Never
     }
 
     /// The sizes that, in a cell, the default paragraph style gives way with to the table
-    /// style's. With the setting `overrideTableStyleFontSizeAndJustification` written off,
-    /// 11 and 12 pt, as [MS-DOCX] 2.3.x says. Not written below compatibility mode 15, only
-    /// 12 pt: Word draws the cells of word-rules/E-table-style-size-12pt-14.docx and
+    /// style's. None with the setting `overrideTableStyleFontSizeAndJustification` on.
+    ///
+    /// Not written below compatibility mode 15, only 12 pt. Word deviates here from
+    /// [MS-DOCX] 2.3.1, which makes off the default and lets 11 or 12 pt give way: Word
+    /// draws the cells of word-rules/E-table-style-size-12pt-14.docx and
     /// E-table-style-defaults-size-13-12-14.docx in the table style's 14 pt over Normal's
     /// 12 pt, and those of E-table-style-defaults-size-14.docx,
     /// E-table-style-defaults-size-10-11-14.docx and
-    /// E-table-style-defaults-size-right-14.docx in Normal's 11 pt (#506). None with the
-    /// setting on.
+    /// E-table-style-defaults-size-right-14.docx in Normal's 11 pt (#506).
+    ///
+    /// Written off, 11 and 12 pt, as [MS-DOCX] 2.3.1 says. That is our choice: no render
+    /// of Word shows the setting written off yet (#532), and the renders without it
+    /// already depart from the specification's 11 pt.
     fn sizes_giving_way(&mut self) -> &'static [Pt] {
         match self.table_style_override() {
             TableStyleWins::Never => &[],
@@ -559,9 +564,10 @@ impl Formats<'_> {
     }
 
     /// What the setting `overrideTableStyleFontSizeAndJustification` gives, once worked
-    /// out. Not written, it is off below compatibility mode 15, and on from mode 15: Word
-    /// writes it on when it saves such a document (E-table-style-size-12pt-none.docx and
-    /// the copy Word saved of it), and draws Normal's 12 pt.
+    /// out: on, off, or not written below compatibility mode 15, a state of its own
+    /// ([`sizes_giving_way`](Self::sizes_giving_way)). Not written from mode 15, it is on:
+    /// Word writes it on when it saves such a document (E-table-style-size-12pt-none.docx
+    /// and the copy Word saved of it), and draws Normal's 12 pt.
     fn table_style_override(&mut self) -> TableStyleWins {
         if let Some(wins) = self.table_style_wins {
             return wins;
@@ -593,7 +599,7 @@ impl Formats<'_> {
 /// `overrideTableStyleFontSizeAndJustification`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TableStyleWins {
-    /// Nothing: the setting is on.
+    /// Nothing: the setting is on, written so or, from compatibility mode 15, not written.
     Never,
     /// The setting is written off.
     Off,

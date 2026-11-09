@@ -1338,11 +1338,13 @@ fn flips_toggles_with_the_table_style_as_one_more_level() {
 #[test]
 fn lets_the_table_style_win_over_the_default_style_s_11_or_12_pt_and_left_when_the_setting_is_off()
 {
-    // [MS-DOCX] overrideTableStyleFontSizeAndJustification: off, a size of 11 or 12 pt
-    // and a left justification of the default paragraph style give way to the table
-    // style's (word-rules/E-table-style-size-12pt-14.docx); not written, it is off below
-    // compatibility mode 15 and on from it (E-table-style-size-12pt-none.docx). The
-    // document defaults give 11 pt, as in those documents.
+    // [MS-DOCX] 2.3.1 overrideTableStyleFontSizeAndJustification: not written below
+    // compatibility mode 15, a size of 12 pt and a left justification of the default
+    // paragraph style give way to the table style's (word-rules/E-table-style-size-12pt-14.docx);
+    // not written from mode 15, it is on (E-table-style-size-12pt-none.docx). The
+    // document defaults give 11 pt, as in those documents, so Normal's 11 pt is not its
+    // own: lets_only_12_pt_give_way_in_mode_14_when_the_setting_is_not_written tests a
+    // Normal of 11 pt that is.
     let case = |normal: &str, mode: u32, setting: &[&str], style: &str| {
         let styles = format!(
             r#"<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>{normal}</w:style><w:style w:type="paragraph" w:styleId="Child"><w:name w:val="Child"/><w:basedOn w:val="Normal"/></w:style><w:style w:type="table" w:styleId="Big"><w:name w:val="Big"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>"#
@@ -1385,7 +1387,8 @@ fn lets_the_table_style_win_over_the_default_style_s_11_or_12_pt_and_left_when_t
     // renders of E-table-style-size-12pt.docx and -13pt.docx, setting on, centre the
     // cells), so the table style's centring shows through.
     let normal_12 = (12.0, 12.0, Justification::Center);
-    // Mode 14, the setting not written: off.
+    // Mode 14, the setting not written: Normal's 12 pt gives way. Its 11 pt equals the
+    // defaults', so the table style's 14 pt shows through.
     assert_eq!(case(left_12, 14, &[], ""), table_wins);
     assert_eq!(case(left_11, 14, &[], "").0, 14.0);
     // The size and the justification each give way on their own.
@@ -1442,7 +1445,7 @@ fn lets_only_12_pt_give_way_in_mode_14_when_the_setting_is_not_written() {
     // that Normal's size is its own; the table style Big gives 14 pt, centred. In mode 14
     // with the setting not written, Normal's 11 pt stays and its 12 pt gives way; its left
     // justification gives way in both. Written off, 11 pt gives way too, as [MS-DOCX]
-    // 2.3.x says.
+    // 2.3.1 says: our choice until a render shows the setting written off (#532).
     let case = |defaults: &str, defaults_jc: &str, normal: &str, mode: u32, setting: &str| {
         let styles = format!(
             r#"<w:docDefaults><w:rPrDefault><w:rPr>{defaults}</w:rPr></w:rPrDefault><w:pPrDefault><w:pPr>{defaults_jc}</w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>{normal}</w:style><w:style w:type="table" w:styleId="Big"><w:name w:val="Big"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>"#
@@ -1510,7 +1513,8 @@ fn lets_only_12_pt_give_way_in_mode_14_when_the_setting_is_not_written() {
         ),
         (11.0, 11.0, Justification::Left)
     );
-    // Written off, in either mode, 11 pt gives way as well.
+    // Written off, in either mode, 11 pt gives way as well: our choice, no render shows it
+    // (#532).
     let off = on.replace(r#"w:val="1""#, r#"w:val="0""#);
     for mode in [14, 15] {
         assert_eq!(
