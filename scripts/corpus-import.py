@@ -865,8 +865,8 @@ def page_geometry(bbox: str) -> list[dict]:
 # make-reference.ps1 exports without markup: properties; markers of ranges (bookmarks such as
 # the _Hlk ones Word writes before a mark, proofing errors, comments and the reference mark
 # Word writes after a comment's range, permissions, moves); the fldChar and instrText of a
-# field's code; and text deleted or moved away, which Word's references show without the
-# markup (word-rules/E-row-break-revisions). leads and paragraph_text also skip hidden runs
+# field's code; and text deleted or moved away, which Word's references do not show: they
+# show the text as it is without the markup (word-rules/E-row-break-revisions). leads and paragraph_text also skip hidden runs
 # (Hiding), which Word prints only with its "Print hidden text" option, off by default.
 # Nothing else is taken for unshown, and a field is read by these names only: a field nested
 # in another field's code counts as shown, and a legacy form field's box, which has no
@@ -1202,16 +1202,24 @@ def follows_on_crossed_page(
     return False
 
 
-def crossing_pieces(cell: ElementTree.Element, hidden: Hiding = OWN_VANISH) -> list[str]:
-    """The text a table cell shows (paragraph_text, its paragraphs joined by line feeds),
-    cut where it crosses a page: at each of its w:lastRenderedPageBreak marks but one that
-    leads its first paragraph, which marks the start of its row or repeats a page (#410). A
-    cell's crossing that row_repeats takes for a repeat still cuts its text. Empty when the
-    cell crosses no page."""
+def crossing_marks(
+    cell: ElementTree.Element, hidden: Hiding = OWN_VANISH
+) -> list[ElementTree.Element]:
+    """The marks where a table cell crosses a page: each of its w:lastRenderedPageBreak marks
+    but one that leads its first paragraph, which marks the start of its row or repeats a
+    page (#410). A cell's crossing that row_repeats takes for a repeat is one still."""
     paragraphs = list(cell.iter(f"{W}p"))
     marks = list(cell.iter(f"{W}lastRenderedPageBreak"))
     if marks and paragraphs and leads(paragraphs[0], marks[0], hidden):
         marks = marks[1:]
+    return marks
+
+
+def crossing_pieces(cell: ElementTree.Element, hidden: Hiding = OWN_VANISH) -> list[str]:
+    """The text a table cell shows (paragraph_text, its paragraphs joined by line feeds),
+    cut at its crossing_marks. Empty when the cell crosses no page."""
+    paragraphs = list(cell.iter(f"{W}p"))
+    marks = crossing_marks(cell, hidden)
     if not marks:
         return []
     crossing_ids = {id(mark) for mark in marks}
@@ -1242,7 +1250,7 @@ def next_row_repeats(
     row goes on on the same page: paragraph 71 of business/contract-hhs-teaming-agreement
     goes on the sixth line of page 4. The marks alone do not tell that repeat from a next row
     that starts a page of its own, so the reference's pages decide, for a row before whose
-    last cell crosses a page (crossing_pieces). The mark repeats the page when, for a cell of
+    last cell crosses a page (crossing_marks). The mark repeats the page when, for a cell of
     that row that crosses a page, the pair of pages its last crossing shows on (a line of
     one page ending with the cell's words before the crossing and a line of the next
     starting with its words after it, follows_on_crossed_page) shows the next row's text
@@ -1251,10 +1259,10 @@ def next_row_repeats(
     not start with the next row's text past the lines that top it, where the next row may
     start instead. Any cell of the row may show it, since pdftotext reads the cells of a page
     as columns, each with what lies below it: the next row's text follows the first cell's
-    lines (word-rules/E-row-break-fields). The next row's text is the text its first cell
-    shows from the mark on, without hidden, deleted and moved-away text
-    (word-rules/E-row-break-hidden, word-rules/E-row-break-revisions). Every other such mark
-    stays.
+    lines (word-rules/E-row-break-fields). The next row's text is the text of the first
+    paragraph of its first cell that shows words, from the mark on, without hidden, deleted
+    and moved-away text (word-rules/E-row-break-hidden, word-rules/E-row-break-revisions).
+    Every other such mark stays.
     """
     parents = {child: parent for parent in root.iter() for child in parent}
 
@@ -1265,34 +1273,40 @@ def next_row_repeats(
                 return element
         return None
 
-    # The cells of the document that cross a page, in document order, with their texts.
-    pieces = {id(cell): crossing_pieces(cell, hidden) for cell in root.iter(f"{W}tc")}
-    keys = [crossing_key(piece) for piece in pieces.values() if piece]
+    # Each cell of the document that crosses a page: its text cut at its crossings, and the
+    # last of them. A crossing in a nested table is also one of the cells around it, so
+    # crossings are counted by their marks, each once.
+    crossings = {}
+    for cell in root.iter(f"{W}tc"):
+        marks = crossing_marks(cell, hidden)
+        if marks:
+            crossings[id(cell)] = (crossing_pieces(cell, hidden), id(marks[-1]))
+    order = {id(mark): n for n, mark in enumerate(root.iter(f"{W}lastRenderedPageBreak"))}
     found: set[int] = set()
     for table in root.iter(f"{W}tbl"):
         rows = [row for row in table.iter(f"{W}tr") if nearest(row, f"{W}tbl") is table]
         for previous, row in zip(rows, rows[1:]):
             cells = [c for c in previous.iter(f"{W}tc") if nearest(c, f"{W}tr") is previous]
             first = next((c for c in row.iter(f"{W}tc") if nearest(c, f"{W}tr") is row), None)
-            if not cells or first is None or not pieces[id(cells[-1])]:
+            if not cells or first is None or id(cells[-1]) not in crossings:
                 continue
             paragraphs = list(first.iter(f"{W}p"))
             marks = [m for m in first.iter(f"{W}lastRenderedPageBreak") if id(m) not in repeats]
             if not paragraphs or not marks or not leads(paragraphs[0], marks[0], hidden):
                 continue
             start_text, start_offsets = paragraph_text(paragraphs[0], hidden)
-            after = "\n".join([start_text[start_offsets[id(marks[0])] :],
-                               *(paragraph_text(p, hidden)[0] for p in paragraphs[1:])])
+            texts = [start_text[start_offsets[id(marks[0])] :],
+                     *(paragraph_text(p, hidden)[0] for p in paragraphs[1:])]
+            after = next((text for text in texts if words(text)), "")
             for cell in cells:
-                piece = pieces[id(cell)]
-                if not piece:
+                if id(cell) not in crossings:
                     continue
+                piece, last = crossings[id(cell)]
                 key = crossing_key(piece)
-                order = list(pieces).index(id(cell))
-                occurrence = sum(1 for other in list(pieces.values())[:order]
-                                 if other and crossing_key(other) == key)
+                same = {mark for other, mark in crossings.values() if crossing_key(other) == key}
+                occurrence = sum(1 for mark in same if order[mark] < order[last])
                 if follows_on_crossed_page(pages, piece[-2], piece[-1], after, occurrence,
-                                           keys.count(key)):
+                                           len(same)):
                     found.add(id(marks[0]))
                     break
     return found
