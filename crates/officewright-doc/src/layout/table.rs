@@ -70,7 +70,11 @@ impl<'a> Translator<'a> {
                     .into()
             });
         }
-        let margins = cell_margins(properties.cell_margins(), &ir::CellMargins::default());
+        let margins = cell_margins(
+            properties.cell_margins(),
+            &ir::CellMargins::default(),
+            false,
+        );
         let borders = properties.borders();
         ir::TableProps::default()
             .with_width(preferred(properties.width()))
@@ -304,7 +308,7 @@ impl<'a> Translator<'a> {
             .with_margins(
                 properties
                     .margins()
-                    .map(|written| cell_margins(Some(written), margins)),
+                    .map(|written| cell_margins(Some(written), margins, true)),
             )
             .with_borders(borders)
             .with_shading(
@@ -467,29 +471,31 @@ fn has_content(cell: TableCell<'_>) -> bool {
     }
 }
 
-/// Cell margins: those written, the others from `below`: the table's for a cell, the
-/// IR's defaults, which are Word's, for a table.
+/// Cell margins: those written, the others from `below`: the table's for a cell
+/// (`of_cell`), the IR's defaults, which are Word's, for a table.
 ///
-/// A margin of the table written as a percentage or automatic is 0: Word reads it so at
-/// the start and end (MS-OI29500 2.1.146 a, 2.1.125 a), as the IR's `CellMargins`
-/// describes, and it is taken so at the top and bottom too. A cell's own margin in
-/// percent or auto is taken as 0 as well, which no note confirms yet. Word ignores a
-/// side of a cell's `w:tcMar` of type `nil` (MS-OI29500 §17.4.2(a), §17.4.10(a),
-/// §17.4.77(a), and the same note for the start), so that side comes from the table.
-/// The notes on the table's top and bottom margins, and the one on every table
-/// measurement, point to the same rule (§17.4.75, §17.4.5, §17.4.87), so a table's
-/// `nil` is taken as not written on every side; at the start and end, whose notes speak
-/// only of percent and auto, a Word render is to confirm it (#172).
+/// A margin of the table written as a percentage, automatic or `nil` is 0: Word reads
+/// percent and auto so at the start and end (MS-OI29500 2.1.146 a, 2.1.125 a), as the
+/// IR's `CellMargins` describes, and its render of `word-rules/E-table-cell-margins-nil`
+/// starts and ends the text at the cell's edge for `nil` too, where the table style's
+/// margins are 10 pt; at the top and bottom, where the IR's defaults are 0 already,
+/// they are taken so as well. A side of a cell's own `w:tcMar` that is not a length
+/// comes from the table: Word ignores `nil` there (MS-OI29500 §17.4.2(a), §17.4.10(a),
+/// §17.4.77(a), and the same note for the start), and its render of
+/// `word-rules/E-table-cell-margins` starts the text of cells whose margins are of type
+/// `pct` and `auto` where it starts that of a cell without margins of its own.
 fn cell_margins(
     written: Option<&crate::model::CellMargins>,
     below: &ir::CellMargins,
+    of_cell: bool,
 ) -> ir::CellMargins {
     let Some(written) = written else {
         return *below;
     };
     let side = |width: Option<TableWidth>, default: Pt| match width {
-        None | Some(TableWidth::Nil) => default,
         Some(TableWidth::Length(length)) => Pt(length.0.max(0.0)),
+        None => default,
+        Some(_) if of_cell => default,
         Some(_) => Pt(0.0),
     };
     ir::CellMargins::default()

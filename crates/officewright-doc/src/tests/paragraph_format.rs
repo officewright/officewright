@@ -402,8 +402,7 @@ fn resolves_the_list_and_lays_its_level_between_the_style_and_direct_formatting(
         // direct formatting over the level's.
         paragraph("Indented", &numbered(0, 1)),
         paragraph("", &format!(r#"{}<w:ind w:left="0"/>"#, numbered(0, 1))),
-        // A style's list without a level: the level whose w:pStyle names the style
-        // (ECMA-376 §17.9.23).
+        // A style's list without a level: level 0, though level 2 names the style.
         paragraph("ListStyle", ""),
         // A style's list with a level: that level (MS-OI29500 §17.3.1.19(a)).
         paragraph("StyleLevel", ""),
@@ -437,7 +436,7 @@ fn resolves_the_list_and_lays_its_level_between_the_style_and_direct_formatting(
             Some((1, Some(10), 1, 4)),
             Some((1, Some(10), 0, 3)),
             Some((1, Some(10), 0, 3)),
-            Some((1, Some(10), 2, 5)),
+            Some((1, Some(10), 0, 3)),
             Some((1, Some(10), 1, 4)),
             None,
             None,
@@ -455,7 +454,7 @@ fn resolves_the_list_and_lays_its_level_between_the_style_and_direct_formatting(
             (72.0, -18.0),
             (36.0, -18.0),
             (0.0, -18.0),
-            (108.0, -18.0),
+            (36.0, -18.0),
             (72.0, -18.0),
             (0.0, 0.0),
             (0.0, 0.0),
@@ -789,9 +788,9 @@ fn reads_only_the_overrides_of_the_levels_paragraphs_use() {
 }
 
 #[test]
-fn works_out_each_list_definition_and_style_match_once() {
-    // 400 list paragraphs of one style, whose level the definition's w:pStyle names: the
-    // definition is parsed once and searched for the style once.
+fn works_out_each_list_definition_once() {
+    // 400 list paragraphs of one style, which a level of the definition names in its
+    // w:pStyle: the definition is parsed once.
     let numbering = [
         definition(10, r#"<w:pStyle w:val="Body"/>"#),
         r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
@@ -816,7 +815,7 @@ fn works_out_each_list_definition_and_style_match_once() {
         .collect();
     // The list level's alignment wins over the style's (MS-OI29500 §17.7.2(a)).
     assert!(results.iter().all(|format| {
-        format.justification() == Justification::Right && format.list().unwrap().level_number() == 2
+        format.justification() == Justification::Right && format.list().unwrap().level_number() == 0
     }));
     // The paragraphs share the style's id rather than copying it: an id may be long.
     let id = results[0].style.clone().unwrap();
@@ -1068,7 +1067,8 @@ fn takes_a_level_beyond_8_the_style_writes_before_the_level_that_names_the_style
     // the style, as Heading 3 of LibreOffice's tdf141966_chapterNumberTortureTest.docx
     // does. The level the style writes comes first, as in case 04 of
     // word-rules/E-list-level-inherit.docx, and a level beyond 8 is no list, as one
-    // written on the paragraph is. No render of Word confirms this case yet (#293).
+    // written on the paragraph is: Word's render of case 03 of
+    // word-rules/E-list-level-linked-no-level.docx draws no label and no indent.
     let numbering = [
         definition(10, r#"<w:pStyle w:val="Linked"/>"#),
         r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
@@ -1097,6 +1097,97 @@ fn takes_a_level_beyond_8_the_style_writes_before_the_level_that_names_the_style
         .map(|format| format.list().map(|list| list.level_number()))
         .collect();
     assert_eq!(lists, [None, None]);
+}
+
+#[test]
+fn takes_level_0_for_a_style_without_a_level_whose_list_names_it() {
+    // The cases of word-rules/E-list-level-linked-no-level.docx, with the list level and
+    // indents of Word's reference (formatting.json): a style that writes a list but no
+    // level, which level 2 of the list names in its w:pStyle, gives level 0 (cases 01 and
+    // 02), not the level that names it, as ECMA-376 §17.9.23 would; a style that writes
+    // level 9 gives no list (case 03); a style based on one that writes level 0 gives
+    // level 0 (case 04).
+    let numbering = [
+        definition(0, r#"<w:pStyle w:val="LinkedNoLevel"/>"#),
+        definition(1, r#"<w:pStyle w:val="LinkedLevel9"/>"#),
+        definition(2, r#"<w:pStyle w:val="LinkedBasedOn"/>"#),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#.to_owned(),
+        r#"<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>"#.to_owned(),
+        r#"<w:num w:numId="3"><w:abstractNumId w:val="2"/></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [
+        defaults(""),
+        style(
+            "paragraph",
+            "LinkedNoLevel",
+            None,
+            r#"<w:numPr><w:numId w:val="1"/></w:numPr>"#,
+        ),
+        style(
+            "paragraph",
+            "LinkedLevel9",
+            None,
+            r#"<w:numPr><w:ilvl w:val="9"/><w:numId w:val="2"/></w:numPr>"#,
+        ),
+        style(
+            "paragraph",
+            "LinkedBase",
+            None,
+            r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="3"/></w:numPr>"#,
+        ),
+        style("paragraph", "LinkedBasedOn", Some("LinkedBase"), ""),
+    ]
+    .concat();
+    let body = [
+        paragraph("LinkedNoLevel", ""),
+        paragraph("LinkedNoLevel", ""),
+        paragraph("LinkedLevel9", ""),
+        paragraph("LinkedBasedOn", ""),
+    ]
+    .concat();
+    let found: Vec<_> = formats(&build(&body, &styles, Some(&numbering)))
+        .iter()
+        .map(|format| {
+            (
+                format
+                    .list()
+                    .map(|list| (list.instance(), list.level_number())),
+                format.start_indent().0,
+                format.first_line_indent().0,
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (Some((1, 0)), 36.0, -18.0),
+            (Some((1, 0)), 36.0, -18.0),
+            (None, 0.0, 0.0),
+            (Some((3, 0)), 36.0, -18.0),
+        ]
+    );
+}
+
+#[test]
+fn takes_level_0_for_a_paragraph_s_own_list_without_a_level_in_a_style_its_list_names() {
+    // The paragraph's own w:numPr gives the list and no level, and level 2 of that list
+    // names the paragraph's style, which gives no list: level 0, as for a style's list
+    // without a level (cases 01 and 02 of word-rules/E-list-level-linked-no-level.docx).
+    let numbering = [
+        definition(10, r#"<w:pStyle w:val="Named"/>"#),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [defaults(""), style("paragraph", "Named", None, "")].concat();
+    let body = paragraph("Named", r#"<w:numPr><w:numId w:val="1"/></w:numPr>"#);
+    let format = &formats(&build(&body, &styles, Some(&numbering)))[0];
+    let list = format.list().unwrap();
+    assert_eq!((list.instance(), list.level_number()), (1, 0));
+    assert_eq!(
+        (format.start_indent().0, format.first_line_indent().0),
+        (36.0, -18.0)
+    );
 }
 
 #[test]
@@ -1285,10 +1376,11 @@ fn an_instance_without_its_definition_has_no_levels_even_with_overrides() {
 }
 
 #[test]
-fn matches_a_level_to_a_style_within_its_own_definition() {
+fn takes_level_0_in_the_style_s_list_and_in_another() {
     // Definition 10's level 2 names style S, definition 20 names no style. A paragraph
-    // of S in instance 2 (definition 20) without a w:ilvl of its own takes S's level,
-    // 0, not the level definition 10 names S at.
+    // of S without a w:ilvl of its own takes level 0 in instance 1 (definition 10), as
+    // in instance 2 (definition 20): Word does not take the level that names S (cases
+    // 01 and 02 of word-rules/E-list-level-linked-no-level.docx).
     let numbering = [
         definition(10, r#"<w:pStyle w:val="S"/>"#),
         definition(20, ""),
@@ -1318,7 +1410,7 @@ fn matches_a_level_to_a_style_within_its_own_definition() {
             (list.instance(), list.level_number())
         })
         .collect();
-    assert_eq!(levels, [(1, 2), (2, 0)]);
+    assert_eq!(levels, [(1, 0), (2, 0)]);
 }
 
 #[test]
@@ -1575,9 +1667,10 @@ fn a_numbering_style_naming_instance_0_leads_nowhere() {
 }
 
 #[test]
-fn takes_the_first_level_that_names_the_style() {
-    // Two levels of one definition name the style in w:pStyle: the lower one is taken,
-    // a choice no source settles (pending a rule document).
+fn takes_level_0_when_several_levels_name_the_style() {
+    // Two levels of one definition name the style in w:pStyle, which writes no level:
+    // neither is taken, as Word takes neither one level that names the style (cases 01
+    // and 02 of word-rules/E-list-level-linked-no-level.docx).
     let numbering = r#"<w:abstractNum w:abstractNumId="10"><w:lvl w:ilvl="1"><w:pStyle w:val="Item"/></w:lvl><w:lvl w:ilvl="4"><w:pStyle w:val="Item"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#;
     let styles = [
         defaults(""),
@@ -1590,7 +1683,7 @@ fn takes_the_first_level_that_names_the_style() {
     ]
     .concat();
     let format = &formats(&build(&paragraph("Item", ""), &styles, Some(numbering)))[0];
-    assert_eq!(format.list().unwrap().level_number(), 1);
+    assert_eq!(format.list().unwrap().level_number(), 0);
 }
 
 #[test]
