@@ -44,7 +44,9 @@ pub(crate) struct Itemized {
     /// The text as it is drawn: capitals where the formatting asks for them, symbol
     /// codes as the characters they stand for.
     pub(crate) text: String,
-    /// The text as the document has it, which the PDF gives for copying and searching.
+    /// The text the PDF gives for copying and searching: the document's, but for the
+    /// lower-case letters drawn as small capitals, which stand for those capitals, as in
+    /// Word's PDF (E-smallcaps-15's reference).
     pub(crate) source: String,
     pub(crate) items: Vec<Item>,
     /// The bytes of the drawn text that each `PAGE` field the layout computes shows.
@@ -442,9 +444,6 @@ impl Builder<'_, '_, '_> {
             .latin()
             .is_some_and(|tag| crate::slot::language_is(tag, &["tr", "az"]));
         for ch in text.chars() {
-            let source_start = self.out.source.len();
-            self.out.source.push(ch);
-            let source = source_start..self.out.source.len();
             let lowercase = ch.is_lowercase();
             let upper = style.caps() || (style.small_caps() && lowercase);
             let drawn: Vec<char> = if upper {
@@ -453,6 +452,13 @@ impl Builder<'_, '_, '_> {
                 vec![ch]
             };
             let small = style.small_caps() && !style.caps() && lowercase;
+            let source_start = self.out.source.len();
+            if small {
+                self.out.source.extend(&drawn);
+            } else {
+                self.out.source.push(ch);
+            }
+            let source = source_start..self.out.source.len();
             // The characters drawn for one character of the source (ŉ in capitals is ʼN)
             // stay together, in the look and script of the first.
             let mut drawn = drawn.into_iter();
@@ -1170,19 +1176,20 @@ mod tests {
     }
 
     #[test]
-    fn draws_capitals_and_small_capitals_with_the_source_text_kept() {
+    fn draws_capitals_and_small_capitals_and_small_capitals_stand_for_capitals() {
         let mut setup = Setup::new(vec![minimal()]);
         let caps = setup.style(plain(TEST).with_caps(true));
         let small = setup.style(plain(TEST).with_small_caps(true));
         let (itemized, _, _) = setup.run(&[Inline::text("\u{E1}a", caps)]);
         assert_eq!(runs(&itemized), [("\u{C1}A", "\u{E1}a", 10.0)]);
-        // Small capitals: capitals stay, lowercase letters become smaller capitals.
+        // Small capitals: capitals stay, lowercase letters become smaller capitals, which
+        // stand for those capitals in the PDF's text.
         let (itemized, _, _) = setup.run(&[Inline::text("Aa\u{E1}A", small)]);
         assert_eq!(
             runs(&itemized),
             [
                 ("A", "A", 10.0),
-                ("A\u{C1}", "a\u{E1}", 8.0),
+                ("A\u{C1}", "A\u{C1}", 8.0),
                 ("A", "A", 10.0)
             ]
         );
@@ -1195,6 +1202,22 @@ mod tests {
         let (itemized, _, _) = setup.run(&[Inline::text("i\u{DF}", turkish)]);
         assert_eq!(itemized.text, "\u{130}SS");
         assert_eq!(itemized.source, "i\u{DF}");
+        // In small capitals they stand for those capitals.
+        let turkish_small = setup.style(
+            plain(TEST)
+                .with_small_caps(true)
+                .with_language(Language::default().with_latin(Some("tr-TR".into()))),
+        );
+        let (itemized, _, _) = setup.run(&[Inline::text("i\u{DF}", turkish_small)]);
+        assert_eq!(itemized.text, "\u{130}SS");
+        assert_eq!(itemized.source, "\u{130}SS");
+        // Lower-case text in a symbol font that is not installed: small capitals draw the
+        // Greek capitals its capitals stand for, and the letters stand for the capitals of
+        // the letters typed, as small capitals make them.
+        let symbol_small = setup.style(plain("Symbol").with_small_caps(true));
+        let (itemized, _, _) = setup.run(&[Inline::text("ab", symbol_small)]);
+        assert_eq!(itemized.text, "\u{391}\u{392}");
+        assert_eq!(itemized.source, "AB");
     }
 
     #[test]

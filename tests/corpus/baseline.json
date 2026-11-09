@@ -568,14 +568,14 @@
       "text_score": 0.9764
     },
     "tests/corpus/business/form-ec-state-aid-notification-bg.docx": {
-      "line_agreement": 0.7156,
+      "line_agreement": 0.7333,
       "page_break_agreement": 0.0,
       "ssim_mean": 0.5573,
       "ssim_min": 0.0,
-      "text_score": 0.2505
+      "text_score": 0.2509
     },
     "tests/corpus/business/form-ec-state-aid-notification-de.docx": {
-      "line_agreement": 0.6556,
+      "line_agreement": 0.6772,
       "page_break_agreement": 0.0,
       "ssim_mean": 0.5242,
       "ssim_min": 0.0,
@@ -586,7 +586,7 @@
       "page_break_agreement": 0.0,
       "ssim_mean": 0.518,
       "ssim_min": 0.0,
-      "text_score": 0.2135
+      "text_score": 0.2131
     },
     "tests/corpus/business/form-gsa-dira-dias-template.docx": {
       "line_agreement": 0.8922,
@@ -758,18 +758,18 @@
       "text_score": 0.9972
     },
     "tests/corpus/generated/cv-en-leaders-open.docx": {
-      "line_agreement": 0.4419,
+      "line_agreement": 0.5814,
       "page_break_agreement": 1.0,
       "ssim_mean": 0.8692,
       "ssim_min": 0.7391,
-      "text_score": 0.404
+      "text_score": 0.4146
     },
     "tests/corpus/generated/cv-en-leaders.docx": {
-      "line_agreement": 0.4419,
+      "line_agreement": 0.5814,
       "page_break_agreement": 1.0,
       "ssim_mean": 0.8671,
       "ssim_min": 0.7358,
-      "text_score": 0.404
+      "text_score": 0.4146
     },
     "tests/corpus/generated/cv-en-sidebar-open.docx": {
       "line_agreement": 1.0,
@@ -1326,25 +1326,25 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-smallcaps-12.docx": {
-      "line_agreement": 0.6667,
+      "line_agreement": 1.0,
       "page_break_agreement": 0.0,
       "ssim_mean": 0.8567,
       "ssim_min": 0.8301,
-      "text_score": 0.6905
+      "text_score": 0.7787
     },
     "tests/corpus/word-rules/E-smallcaps-14.docx": {
-      "line_agreement": 0.6667,
+      "line_agreement": 1.0,
       "page_break_agreement": 0.0,
       "ssim_mean": 0.8567,
       "ssim_min": 0.8301,
-      "text_score": 0.6905
+      "text_score": 0.7787
     },
     "tests/corpus/word-rules/E-smallcaps-15.docx": {
-      "line_agreement": 0.6667,
+      "line_agreement": 1.0,
       "page_break_agreement": 0.0,
       "ssim_mean": 0.8567,
       "ssim_min": 0.8301,
-      "text_score": 0.6905
+      "text_score": 0.7787
     },
     "tests/corpus/word-rules/E-soft-hyphen-font.docx": {
       "line_agreement": 0.6364,
@@ -1916,10 +1916,10 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-underline.docx": {
-      "line_agreement": 0.7879,
+      "line_agreement": 0.8182,
       "ssim_mean": 0.9437,
       "ssim_min": 0.9437,
-      "text_score": 0.9916
+      "text_score": 0.9982
     },
     "tests/corpus/word-rules/E-vml-pictures.docx": {
       "line_agreement": 0.3898,

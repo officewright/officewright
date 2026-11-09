@@ -274,7 +274,8 @@ impl Run {
         &self.text
     }
 
-    /// The text as the document has it.
+    /// The text the PDF gives for the run: the document's, but for lower-case letters drawn
+    /// as small capitals, which stand for those capitals.
     pub fn source(&self) -> &str {
         &self.source
     }
