@@ -405,7 +405,7 @@ pub enum LineDash {
     /// `sysDashDotDot`: a short dash, then two short dots.
     SystemDashDotDot,
     /// Dashes of the lengths the document gives (`a:custDash`, or numbers in VML's
-    /// `dashstyle`).
+    /// `dashstyle` that are no preset's pattern).
     Custom,
 }
 
@@ -444,17 +444,39 @@ impl LineDash {
             "dashdot" => Self::DashDot,
             "longdashdot" => Self::LongDashDot,
             "longdashdotdot" => Self::LongDashDotDot,
-            custom
-                if !custom.trim().is_empty()
-                    && custom
+            custom => {
+                let lengths = || {
+                    custom
                         .split_ascii_whitespace()
-                        .all(|length| length.parse::<f64>().is_ok_and(f64::is_finite)) =>
-            {
-                Self::Custom
+                        .map(|length| length.parse::<f64>().ok().filter(|l| l.is_finite()))
+                };
+                if custom.trim().is_empty() || lengths().any(|length| length.is_none()) {
+                    return None;
+                }
+                // Lengths that are a preset's pattern name that preset, as Word writes
+                // `sysDot` and `sysDash` (`1 1`, `3 1`).
+                Self::PATTERNS
+                    .iter()
+                    .find(|(pattern, _)| lengths().flatten().eq(pattern.iter().copied()))
+                    .map_or(Self::Custom, |&(_, dash)| dash)
             }
-            _ => return None,
         })
     }
+
+    /// The lengths of each preset's dashes and gaps, in widths of the line (ECMA-376 Part 1,
+    /// §20.1.10.48).
+    const PATTERNS: [(&[f64], Self); 10] = [
+        (&[1.0, 3.0], Self::Dot),
+        (&[4.0, 3.0], Self::Dash),
+        (&[8.0, 3.0], Self::LongDash),
+        (&[4.0, 3.0, 1.0, 3.0], Self::DashDot),
+        (&[8.0, 3.0, 1.0, 3.0], Self::LongDashDot),
+        (&[8.0, 3.0, 1.0, 3.0, 1.0, 3.0], Self::LongDashDotDot),
+        (&[3.0, 1.0], Self::SystemDash),
+        (&[1.0, 1.0], Self::SystemDot),
+        (&[3.0, 1.0, 1.0, 1.0], Self::SystemDashDot),
+        (&[3.0, 1.0, 1.0, 1.0, 1.0, 1.0], Self::SystemDashDotDot),
+    ];
 }
 
 xml_enum! {
