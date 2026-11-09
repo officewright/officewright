@@ -46,6 +46,11 @@ MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 V_NS = "urn:schemas-microsoft-com:vml"
 O_NS = "urn:schemas-microsoft-com:office:office"
 W10_NS = "urn:schemas-microsoft-com:office:word"
+# DrawingML in a document (ECMA-376 Part 1, §20.4): its pictures, and the shapes and text
+# boxes of Word 2010 and later ([MS-ODRAWXML] 2.3.4), which Word writes in mc:Choice.
+WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+WPS_NS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+PIC_NS = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 CT_W = "application/vnd.openxmlformats-officedocument.wordprocessingml"
 
@@ -238,12 +243,14 @@ def section(
     size: tuple[int, int] = (PAGE_W, PAGE_H),
     sides: tuple[int, int] = (MARGIN, MARGIN),
     header_distance: int = 708,
+    grid: str = '<w:docGrid w:linePitch="360"/>',
 ) -> str:
     """A section's properties: A4 portrait as sect_pr(), with a start type (w:type), header
     and footer references as (headerReference or footerReference, w:type, part name), a
     first page number and the top and bottom margins (negative for a fixed body edge); the
     format of its page numbers (w:pgNumType w:fmt) and a title page (w:titlePg); another
-    page size, left and right margins and distance of the header from the edge, in twips."""
+    page size, left and right margins and distance of the header from the edge, in twips;
+    another document grid (w:docGrid)."""
     references = "".join(
         f'<w:{element} w:type="{ref_type}" r:id="{part_id(name)}"/>'
         for element, ref_type, name in refs
@@ -261,8 +268,7 @@ def section(
         f'<w:pgSz w:w="{size[0]}" w:h="{size[1]}"/>'
         f'<w:pgMar w:top="{top}" w:right="{right}" w:bottom="{bottom}" w:left="{left}"'
         f' w:header="{header_distance}" w:footer="708" w:gutter="0"/>'
-        f'{numbers}<w:cols w:space="708"/>{title}'
-        '<w:docGrid w:linePitch="360"/>'
+        f'{numbers}<w:cols w:space="708"/>{title}{grid}'
         "</w:sectPr>"
     )
 
@@ -275,7 +281,26 @@ def part_id(name: str) -> str:
 def header_part(name: str, paragraphs: str) -> tuple[str, str]:
     """A header (header*.xml) or footer (footer*.xml) part holding these paragraphs."""
     root = "hdr" if name.startswith("header") else "ftr"
-    return name, f'<w:{root} xmlns:w="{W_NS}" xmlns:r="{R_NS}">{paragraphs}</w:{root}>'
+    return name, f"<w:{root} {namespaces(paragraphs)}>{paragraphs}</w:{root}>"
+
+
+def namespaces(content: str) -> str:
+    """The namespace declarations of a part's root element for the prefixes its content
+    uses: w and r always, the others only when an element of theirs occurs."""
+    declared = f'xmlns:w="{W_NS}" xmlns:r="{R_NS}"'
+    if "<w14:" in content:
+        # Word 2010's run properties, which an application that does not know them ignores
+        # (ECMA-376 Part 3, mc:Ignorable).
+        declared += f' xmlns:w14="{W14_NS}" xmlns:mc="{MC_NS}" mc:Ignorable="w14"'
+    if "<v:" in content:
+        declared += f' xmlns:v="{V_NS}" xmlns:o="{O_NS}" xmlns:w10="{W10_NS}"'
+    if "<wp:" in content:
+        declared += f' xmlns:wp="{WP_NS}"'
+    if "<wps:" in content:
+        declared += f' xmlns:wps="{WPS_NS}"'
+    if "<mc:" in content and "xmlns:mc=" not in declared:
+        declared += f' xmlns:mc="{MC_NS}"'
+    return declared
 
 
 def page_field() -> str:
@@ -411,8 +436,10 @@ class Doc:
     run_default_fonts: str = (
         'w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"'
     )
-    # Whether the document has a theme part (theme_xml) and a colour mapping for it.
+    # Whether the document has a theme part (theme_xml) and a colour mapping for it, and
+    # colours of the theme other than THEME_COLORS', such as (("accent1", "4F81BD"),).
     theme: bool = False
+    theme_overrides: tuple[tuple[str, str], ...] = ()
     # Entries of the colour mapping that differ from the identity, such as
     # (("t2", "accent3"),).
     color_mapping: tuple[tuple[str, str], ...] = ()
@@ -420,8 +447,10 @@ class Doc:
     # (MODE_15_SETTINGS), such as (("enableOpenTypeFeatures", 0),); None leaves one out.
     compat_values: tuple[tuple[str, int | None], ...] = ()
     # Header and footer parts, as (part name under word/, root element), such as
-    # header_part("header1.xml", ...); sections name them through section().
+    # header_part("header1.xml", ...); sections name them through section(). With
+    # even_and_odd_headers, pages of even numbers take the sections' even headers.
     headers: tuple[tuple[str, str], ...] = ()
+    even_and_odd_headers: bool = False
     # The last section's w:sectPr, when it is not sect_pr()'s.
     last_section: str = ""
     # Pictures under word/media/, as (file name, PNG bytes); the body names each by the
@@ -2031,13 +2060,15 @@ PICTURE_FRAME = (
 
 
 def vml_picture(name: str, shape_id: str, style: str, wrap: str | None = None,
-                first: bool = False) -> str:
+                first: bool = False, props: str = "") -> str:
     """A run holding a VML picture (w:pict, v:shape of the picture frame type with
     v:imagedata) of the given CSS style; wrap is the w10:wrap type of a floating one. The
-    first picture of a document defines the shape type (first)."""
+    first picture of a document defines the shape type (first); props are the children of
+    the run's w:rPr."""
     wrap_xml = f'<w10:wrap type="{wrap}"/>' if wrap else ""
     shape_type = PICTURE_FRAME if first else ""
-    return (f'<w:r><w:pict>{shape_type}<v:shape id="{shape_id}" type="#_x0000_t75" '
+    r_pr = f"<w:rPr>{props}</w:rPr>" if props else ""
+    return (f'<w:r>{r_pr}<w:pict>{shape_type}<v:shape id="{shape_id}" type="#_x0000_t75" '
             f'style="{style}"><v:imagedata r:id="{media_id(name)}" o:title=""/>{wrap_xml}'
             "</v:shape></w:pict></w:r>")
 
@@ -4354,6 +4385,897 @@ def underline_trailspace_indent() -> Doc:
     )
 
 
+# Text boxes and shapes (#465, #468): DrawingML shapes of Word 2010 and later (wps:wsp,
+# [MS-ODRAWXML] 2.3.4), in an mc:Choice without the mc:Fallback ECMA-376 Part 3 leaves
+# optional, inline (wp:inline) or floating (wp:anchor, ECMA-376 Part 1, §20.4.2.3).
+EMU_PER_PT = 12700
+# A black outline of 0.5 pt, so that a box's frame shows in the reference.
+THIN_LINE = '<a:ln w="6350"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>'
+NO_LINE = "<a:ln><a:noFill/></a:ln>"
+NO_FILL = "<a:noFill/>"
+
+
+def emu(points: float) -> int:
+    value = points * EMU_PER_PT
+    if value != int(value):
+        raise ValueError(f"{points} pt is not a whole number of EMUs")
+    return int(value)
+
+
+def graphic(uri: str, content: str) -> str:
+    return (f'<a:graphic xmlns:a="{A_NS}"><a:graphicData uri="{uri}">{content}'
+            "</a:graphicData></a:graphic>")
+
+
+def wps_shape(
+    width: float,
+    height: float,
+    content: str | None = None,
+    *,
+    fill: str = NO_FILL,
+    line: str = THIN_LINE,
+    insets: tuple[float, float, float, float] | None = None,
+    anchor: str = "t",
+    fit: str = "<a:noAutofit/>",
+    style: str = "",
+) -> str:
+    """The graphic of a rectangle of width x height pt: a text box holding content (its
+    paragraphs), or with content None a shape without text; insets (left, top, right,
+    bottom) in points, or None to write none (ECMA-376 Part 1, §21.1.2.1.1 gives their
+    defaults); anchor and fit are bodyPr's vertical anchor and autofit; style a wps:style."""
+    kind = '<wps:cNvSpPr txBox="1"/>' if content is not None else "<wps:cNvSpPr/>"
+    size = f'<a:ext cx="{emu(width)}" cy="{emu(height)}"/>'
+    sp_pr = (f'<wps:spPr><a:xfrm><a:off x="0" y="0"/>{size}</a:xfrm>'
+             f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>{fill}{line}</wps:spPr>')
+    box = (f"<wps:txbx><w:txbxContent>{content}</w:txbxContent></wps:txbx>"
+           if content is not None else "")
+    margins = ""
+    if insets is not None:
+        margins = "".join(f' {side}Ins="{emu(value)}"'
+                          for side, value in zip(("l", "t", "r", "b"), insets))
+    body = (f'<wps:bodyPr rot="0" vert="horz" wrap="square"{margins} anchor="{anchor}" '
+            f'anchorCtr="0">{fit}</wps:bodyPr>')
+    return graphic(WPS_NS, f"<wps:wsp>{kind}{sp_pr}{style}{box}{body}</wps:wsp>")
+
+
+def drawing_picture(name: str, width: float, height: float) -> str:
+    """The graphic of a picture (pic:pic) of width x height pt, showing the media part name."""
+    size = f'<a:ext cx="{emu(width)}" cy="{emu(height)}"/>'
+    return graphic(
+        PIC_NS,
+        f'<pic:pic xmlns:pic="{PIC_NS}"><pic:nvPicPr><pic:cNvPr id="0" name="{name}"/>'
+        f'<pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{media_id(name)}"/>'
+        "<a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr>"
+        f'<a:xfrm><a:off x="0" y="0"/>{size}</a:xfrm><a:prstGeom prst="rect"><a:avLst/>'
+        "</a:prstGeom></pic:spPr></pic:pic>",
+    )
+
+
+def extent(width: float, height: float) -> str:
+    return (f'<wp:extent cx="{emu(width)}" cy="{emu(height)}"/>'
+            '<wp:effectExtent l="0" t="0" r="0" b="0"/>')
+
+
+def inline_drawing(n: int, width: float, height: float, graphic_xml: str) -> str:
+    """An inline drawing (wp:inline) of width x height pt; n is its docPr id, unique in the
+    document."""
+    return (f'<wp:inline distT="0" distB="0" distL="0" distR="0">{extent(width, height)}'
+            f'<wp:docPr id="{n}" name="Drawing {n}"/><wp:cNvGraphicFramePr/>{graphic_xml}'
+            "</wp:inline>")
+
+
+def anchored_drawing(
+    n: int,
+    width: float,
+    height: float,
+    graphic_xml: str,
+    *,
+    across: tuple[str, float],
+    down: tuple[str, float],
+    wrap: str = "<wp:wrapNone/>",
+) -> str:
+    """A floating drawing (wp:anchor) of width x height pt, placed across and down as
+    (relativeFrom, offset in points), in front of the text."""
+    return (
+        '<wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" '
+        f'relativeHeight="{251658240 + n}" behindDoc="0" locked="0" layoutInCell="1" '
+        'allowOverlap="1"><wp:simplePos x="0" y="0"/>'
+        f'<wp:positionH relativeFrom="{across[0]}"><wp:posOffset>{emu(across[1])}'
+        "</wp:posOffset></wp:positionH>"
+        f'<wp:positionV relativeFrom="{down[0]}"><wp:posOffset>{emu(down[1])}'
+        "</wp:posOffset></wp:positionV>"
+        f'{extent(width, height)}{wrap}<wp:docPr id="{n}" name="Drawing {n}"/>'
+        f"<wp:cNvGraphicFramePr/>{graphic_xml}</wp:anchor>"
+    )
+
+
+def shape_run(drawing: str, props: str = "") -> str:
+    """A run holding a wps shape's drawing, in mc:Choice as Word writes it; props are the
+    children of the run's w:rPr."""
+    r_pr = f"<w:rPr>{props}</w:rPr>" if props else ""
+    return (f'<w:r>{r_pr}<mc:AlternateContent><mc:Choice Requires="wps"><w:drawing>'
+            f"{drawing}</w:drawing></mc:Choice></mc:AlternateContent></w:r>")
+
+
+def picture_run(drawing: str, props: str = "") -> str:
+    r_pr = f"<w:rPr>{props}</w:rPr>" if props else ""
+    return f"<w:r>{r_pr}<w:drawing>{drawing}</w:drawing></w:r>"
+
+
+def box_lines(prefix: str, count: int, **props) -> str:
+    """count paragraphs of a text box reading <prefix> 1, <prefix> 2, ..."""
+    return "".join(para(run(f"{prefix} {k}"), **props) for k in range(1, count + 1))
+
+
+WRAPPING_BOX_TEXT = ("Box text that starts at the insets and runs on long enough to wrap "
+                     "onto a second line inside the box.")
+
+
+def box_cases(cases: list[tuple[str, str]], before: float = 6, after: float = 12) -> str:
+    """Each case's label, kept on the page of the paragraph after it, which holds its
+    drawing, with before pt above it and after pt below it."""
+    return "".join(
+        para(run(f"Case {n:02d}: {label}"), space=spacing(before=12), keep_next=True)
+        + para(drawing, space=spacing(before=before, after=after))
+        for n, (label, drawing) in enumerate(cases, 1)
+    )
+
+
+def inline_box(n: int, width: float, height: float, content: str | None, **options) -> str:
+    return shape_run(inline_drawing(n, width, height, wps_shape(width, height, content,
+                                                                **options)))
+
+
+def textbox_insets() -> Doc:
+    content = para(run(WRAPPING_BOX_TEXT))
+    cases = [
+        ("no insets written (the defaults)", None),
+        ("insets of 0 on every side", (0, 0, 0, 0)),
+        ("insets of 18 pt on every side", (18, 18, 18, 18)),
+        ("a left inset of 36 pt and a top inset of 12 pt, 0 on the right and at the bottom",
+         (36, 12, 0, 0)),
+    ]
+    return Doc(
+        "E-textbox-insets",
+        "Where Word starts the text of a text box (wps:txbx) across and down: no insets "
+        "written, insets of 0, of 18 pt, and of other sizes on each side; inline boxes of "
+        "216 x 90 pt with a 0.5 pt outline",
+        box_cases([(label, inline_box(n, 216, 90, content, insets=insets))
+                   for n, (label, insets) in enumerate(cases, 1)])
+        + para(run("End of the document.")),
+    )
+
+
+def textbox_anchor() -> Doc:
+    cases = []
+    for lines_, height_note in ((1, "one line"), (6, "six lines, taller than the box")):
+        for value, name in (("t", "top"), ("ctr", "centre"), ("b", "bottom")):
+            n = len(cases) + 1
+            cases.append((f"anchor {value} ({name}), {height_note}",
+                          inline_box(n, 216, 48, box_lines("Box line", lines_), anchor=value)))
+    return Doc(
+        "E-textbox-anchor",
+        "Where Word puts the text of a text box down the box for each vertical anchor "
+        "(bodyPr anchor t, ctr and b), with one line and with text taller than the box; "
+        "inline boxes of 216 x 48 pt with a 0.5 pt outline, 48 pt of space around each",
+        box_cases(cases, before=48, after=48) + para(run("End of the document.")),
+    )
+
+
+def textbox_spacing() -> Doc:
+    first = para(run("First paragraph"), space=spacing(before=12))
+    last = para(run("Last paragraph"), space=spacing(after=12))
+    plain_first, plain_last = para(run("First paragraph")), para(run("Last paragraph"))
+    cases = [
+        ("anchor top, no space before or after (to compare)", plain_first + plain_last, "t"),
+        ("anchor top, 12 pt before the first paragraph", first + plain_last, "t"),
+        ("anchor bottom, no space before or after (to compare)", plain_first + plain_last,
+         "b"),
+        ("anchor bottom, 12 pt after the last paragraph", plain_first + last, "b"),
+        ("anchor centre, no space before or after (to compare)", plain_first + plain_last,
+         "ctr"),
+        ("anchor centre, 12 pt before the first paragraph", first + plain_last, "ctr"),
+        ("anchor centre, 12 pt after the last paragraph", plain_first + last, "ctr"),
+    ]
+    return Doc(
+        "E-textbox-spacing",
+        "Whether Word keeps the space before the first paragraph and after the last one of "
+        "a text box, at the top, bottom and centre anchors; inline boxes of 216 x 72 pt with "
+        "insets of 0 and a 0.5 pt outline",
+        box_cases([(label, inline_box(n, 216, 72, content, anchor=anchor,
+                                      insets=(0, 0, 0, 0)))
+                   for n, (label, content, anchor) in enumerate(cases, 1)])
+        + para(run("End of the document.")),
+    )
+
+
+def textbox_autofit() -> Doc:
+    four = box_lines("Box line", 4)
+    spaced = para(run("Spaced line"), space=spacing(before=12, after=12))
+    cases = [
+        ("spAutoFit, the box written 20 pt tall for four lines", inline_box(
+            1, 216, 20, four, fit="<a:spAutoFit/>")),
+        ("spAutoFit, the box written 120 pt tall for one line", inline_box(
+            2, 216, 120, para(run("One line")), fit="<a:spAutoFit/>")),
+        ("noAutofit, the box written 20 pt tall for four lines (to compare)", inline_box(
+            3, 216, 20, four)),
+        ("spAutoFit, one line with 12 pt before and after, the box written 20 pt tall",
+         inline_box(4, 216, 20, spaced, fit="<a:spAutoFit/>")),
+    ]
+    return Doc(
+        "E-textbox-autofit",
+        "Whether Word fits a text box to its text when it lays the page out (bodyPr "
+        "spAutoFit): a box written too short and one written too tall, a box without "
+        "autofit, and a box whose line has space before and after; inline boxes 216 pt wide "
+        "with a 0.5 pt outline",
+        box_cases(cases, after=60) + para(run("End of the document.")),
+    )
+
+
+def solid(rgb: str) -> str:
+    return f'<a:solidFill><a:srgbClr val="{rgb}"/></a:solidFill>'
+
+
+def outline(width_pt: float, color: str = '<a:srgbClr val="000000"/>', align: str = "") -> str:
+    algn = f' algn="{align}"' if align else ""
+    return f'<a:ln w="{emu(width_pt)}"{algn}><a:solidFill>{color}</a:solidFill></a:ln>'
+
+
+def textbox_fill_outline() -> Doc:
+    content = para(run("Text in the automatic colour"))
+    cases = [
+        ("filled 404040 (dark grey), no outline", {"fill": solid("404040"), "line": NO_LINE}),
+        ("filled 7F7F7F (middle grey), no outline", {"fill": solid("7F7F7F"),
+                                                     "line": NO_LINE}),
+        ("filled 002060 (dark blue), no outline", {"fill": solid("002060"), "line": NO_LINE}),
+        ("a 6 pt outline, no alignment written (centred on the frame by ECMA-376)",
+         {"line": outline(6)}),
+        ("a 6 pt outline aligned inside the frame (algn in)", {"line": outline(6, align="in")}),
+        ("a 0.5 pt outline (to compare)", {}),
+    ]
+    return Doc(
+        "E-textbox-fill-outline",
+        "Text in the automatic colour on dark fills of a text box, and where Word draws an "
+        "outline of 6 pt and the text inside it: no alignment written and aligned inside; "
+        "inline boxes of 216 x 48 pt",
+        box_cases([(label, inline_box(n, 216, 48, content, **options))
+                   for n, (label, options) in enumerate(cases, 1)], after=24)
+        + para(run("End of the document.")),
+    )
+
+
+def textbox_lists() -> Doc:
+    numbering = (abstract_num(1, "1A2B3C01", [level(0, "decimal", "%1.", left=720,
+                                                     hanging=360)])
+                 + num(1, 1))
+
+    def item(label: str) -> str:
+        return para(run(label), list_item=(1, 0))
+
+    box = inline_box(1, 288, 48, item("Box item, first") + item("Box item, second"))
+    header_box = inline_box(2, 288, 24, item("Header box item"))
+    body = (
+        para(run("Case 01: three items of a list in the body, then a text box with two items "
+                 "of the same list, then two more items of it in the body"))
+        + item("Body item, first") + item("Body item, second") + item("Body item, third")
+        + para(box, space=spacing(before=6, after=6))
+        + item("Body item after the box, first") + item("Body item after the box, second")
+        + para(run("Case 02: the header holds a text box with one item of the same list"))
+        + para(run("End of the document."))
+    )
+    return Doc(
+        "E-textbox-lists",
+        "How Word numbers a list whose items are in the body and in a text box, and an item "
+        "of the same list in a text box of the header: three body items, two in a box, two "
+        "more in the body",
+        body,
+        numbering=numbering,
+        headers=(header_part("header1.xml", para(header_box)),),
+        last_section=section(refs=(("headerReference", "default", "header1.xml"),)),
+    )
+
+
+def textbox_footer_page() -> Doc:
+    box = shape_run(inline_drawing(1, 144, 24, wps_shape(
+        144, 24, para(run("page ") + page_field()))))
+    body = (para(run("Case 01: the footer holds a text box with a PAGE field; three pages"))
+            + para(run("Page 1.")) + para(page_break_run() + run("Page 2."))
+            + para(page_break_run() + run("Page 3.")))
+    return Doc(
+        "E-textbox-footer-page",
+        "The number Word shows on each of three pages for a PAGE field in a text box of the "
+        "footer: an inline box of 144 x 24 pt with a 0.5 pt outline",
+        body,
+        headers=(header_part("footer1.xml", para(box)),),
+        last_section=section(refs=(("footerReference", "default", "footer1.xml"),)),
+    )
+
+
+def textbox_inline_floating() -> Doc:
+    small = inline_box(1, 72, 18, para(run("Box")), insets=(0, 0, 0, 0))
+    tall = inline_box(2, 72, 48, para(run("Tall box")))
+    from_margin = shape_run(anchored_drawing(3, 144, 48, wps_shape(
+        144, 48, para(run("From the margin"))), across=("margin", 144), down=("margin", 360)))
+    from_page = shape_run(anchored_drawing(4, 144, 48, wps_shape(
+        144, 48, para(run("From the page"))), across=("page", 300), down=("page", 600)))
+    body = (
+        para(run("Case 01: an inline box of 72 x 18 pt with insets of 0 in a line: before ")
+             + small + run(" after."))
+        + para(run("Case 02: an inline box of 72 x 48 pt, taller than the line: before ")
+               + tall + run(" after."))
+        + para(run("Case 03, on the next page: a floating box of 144 x 48 pt, 144 pt from "
+                   "the left margin and 360 pt below the top margin, no wrapping"),
+               page_break_before=True)
+        + para(from_margin + run("The anchor of case 03."))
+        + para(run("Case 04: a floating box of 144 x 48 pt, 300 pt from the page's left "
+                   "edge and 600 pt below its top, no wrapping"))
+        + para(from_page + run("The anchor of case 04."))
+        + para(run("End of the document."))
+    )
+    return Doc(
+        "E-textbox-inline-floating",
+        "Where Word puts inline text boxes of 18 and 48 pt in a line of 11 pt text, and "
+        "floating ones placed from the margin and from the page, without wrapping; each box "
+        "with a 0.5 pt outline",
+        body,
+    )
+
+
+def textbox_from_paragraph() -> Doc:
+    # #465, from the review of #467: in letter-cfpb-validation-notice a centred box placed
+    # from a paragraph with space before is about 2 pt from where centring puts it; these
+    # cases tell whether centring or the paragraph's top for positioning is off.
+    one_line = para(run("One line"))
+
+    def placed(n: int, anchor: str) -> str:
+        return shape_run(anchored_drawing(n, 144, 36, wps_shape(
+            144, 36, one_line, anchor=anchor, insets=(7.2, 0, 7.2, 0)),
+            across=("margin", 144), down=("paragraph", 0)))
+
+    cases = [
+        ("anchor centre, from a paragraph with 4 pt before", "ctr", 4),
+        ("anchor top, from a paragraph with 4 pt before (to compare)", "t", 4),
+        ("anchor bottom, from a paragraph with 4 pt before (to compare)", "b", 4),
+        ("anchor centre, from a paragraph with no space before (to compare)", "ctr", 0),
+    ]
+    # An empty paragraph without space after it lies between each label and the anchor's
+    # paragraph: Word lays out the larger of a paragraph's space after and the next one's
+    # space before, so the 4 pt take effect, and the box stays clear of the label whichever
+    # top of the paragraph Word places it from.
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), space=spacing(before=12), keep_next=True)
+        + para(keep_next=True)
+        + para(placed(n, anchor) + run(f"The anchor of case {n:02d}."),
+               space=spacing(before=before, after=48))
+        for n, (label, anchor, before) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-textbox-from-paragraph",
+        "Where Word puts the one line of a text box of 144 x 36 pt, with top and bottom "
+        "insets of 0, anchored at the centre, top and bottom and placed 0 pt below the top "
+        "of a paragraph with 4 pt space before, and with none; floating, 144 pt from the "
+        "left margin, a 0.5 pt outline",
+        body + para(run("End of the document.")),
+    )
+
+
+# The text box shape type (o:spt 202), as Word writes it in the VML copy of a text box.
+TEXT_BOX_TYPE = (
+    '<v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" '
+    'path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/>'
+    '<v:path gradientshapeok="t" o:connecttype="rect"/></v:shapetype>'
+)
+
+
+def vml_box(shape_id: str, style: str, content: str, inset: str | None = None,
+            first: bool = False) -> str:
+    """A run holding a VML text box (v:shape of the text box type with v:textbox) of the
+    given CSS style and v:textbox inset, with a 0.5 pt outline."""
+    insets = f' inset="{inset}"' if inset is not None else ""
+    shape_type = TEXT_BOX_TYPE if first else ""
+    return (f'<w:r><w:pict>{shape_type}<v:shape id="{shape_id}" type="#_x0000_t202" '
+            f'style="{style}" strokeweight=".5pt"><v:textbox{insets}><w:txbxContent>'
+            f"{content}</w:txbxContent></v:textbox></v:shape></w:pict></w:r>")
+
+
+def textbox_vml() -> Doc:
+    content = para(run(WRAPPING_BOX_TEXT))
+    size = "width:216pt;height:90pt"
+    # Floating, as older documents write them: 144 pt from the left margin and 12 pt below
+    # the top of the paragraph that holds the case's anchor, clear of the label above it
+    # whether Word takes that top above the paragraph's space before or below it.
+    floating = ("position:absolute;margin-left:144pt;margin-top:12pt;" + size
+                + ";z-index:{z};mso-position-horizontal-relative:margin")
+    cases = [
+        ("floating, no inset written (the defaults of VML)",
+         vml_box("t1", floating.format(z=1), content, first=True)),
+        ("floating, an inset of 18 pt on every side",
+         vml_box("t2", floating.format(z=2), content, "18pt,18pt,18pt,18pt")),
+        ("floating, an inset of 0, v-text-anchor middle", vml_box(
+            "t3", floating.format(z=3) + ";v-text-anchor:middle", para(run("One line")),
+            "0,0,0,0")),
+        ("floating, an inset of 0, v-text-anchor bottom", vml_box(
+            "t4", floating.format(z=4) + ";v-text-anchor:bottom", para(run("One line")),
+            "0,0,0,0")),
+    ]
+    anchored = [(label, box + run(f"The anchor of case {n:02d}."))
+                for n, (label, box) in enumerate(cases, 1)]
+    inline = [("inline, no inset written (to compare)", vml_box("t5", size, content))]
+    return Doc(
+        "E-textbox-vml",
+        "Where Word puts the text of VML text boxes (w:pict, v:textbox), as older documents "
+        "write them, floating: the default inset, an inset of 18 pt, v-text-anchor middle "
+        "and bottom; and an inline one; 216 x 90 pt with a 0.5 pt outline",
+        box_cases(anchored + inline, after=108) + para(run("End of the document.")),
+    )
+
+
+def textbox_bar_tab() -> Doc:
+    two_lines = "two lines of text in one paragraph with a bar tab at 72 pt, " * 2
+
+    def spaced(**props) -> str:
+        return para(run(two_lines), tabs=[("bar", 1440)], space=spacing(before=12, after=12),
+                    **props)
+
+    body = box_cases([("in a text box of 288 x 120 pt with insets of 0: 12 pt before and "
+                       "after the paragraph",
+                       inline_box(1, 288, 120, spaced(), insets=(0, 0, 0, 0)))])
+    body += para(run("Case 02: the same paragraph in the body, 288 pt wide (to compare)"),
+                 space=spacing(before=12))
+    body += spaced(ind={"right": TEXT_W - 5760})
+    return Doc(
+        "E-textbox-bar-tab",
+        "How far the line of a bar tab (w:tab w:val=bar) reaches in a paragraph with space "
+        "before and after inside a text box, beside the same paragraph in the body",
+        body + para(run("End of the document.")),
+    )
+
+
+SHADE_ACCENT = "4F81BD"
+
+
+def shape_colors() -> Doc:
+    def rgb(transform: str = "") -> str:
+        return f'<a:srgbClr val="{SHADE_ACCENT}">{transform}</a:srgbClr>'
+
+    def accent(transform: str = "") -> str:
+        return f'<a:schemeClr val="accent1">{transform}</a:schemeClr>'
+
+    shade, tint = '<a:shade val="50000"/>', '<a:tint val="50000"/>'
+    themed = (f'<wps:style><a:lnRef idx="0"/><a:fillRef idx="1">{accent(shade)}</a:fillRef>'
+              '<a:effectRef idx="0"/><a:fontRef idx="minor"/></wps:style>')
+    fills = [
+        (f"filled RGB {SHADE_ACCENT} (to compare)", rgb()),
+        (f"filled RGB {SHADE_ACCENT} shaded 50 %", rgb(shade)),
+        (f"filled accent1 ({SHADE_ACCENT}) (to compare)", accent()),
+        ("filled accent1 shaded 50 %", accent(shade)),
+        (f"filled RGB {SHADE_ACCENT} tinted 50 %", rgb(tint)),
+        ("filled accent1 tinted 50 %", accent(tint)),
+    ]
+    cases = [(label, {"fill": f"<a:solidFill>{color}</a:solidFill>", "line": NO_LINE})
+             for label, color in fills]
+    cases += [
+        ("no fill of its own; wps:style fills it from the theme's first fill (phClr) with "
+         "accent1 shaded 50 %", {"fill": "", "line": NO_LINE, "style": themed}),
+        (f"no fill, a 6 pt outline of RGB {SHADE_ACCENT} shaded 50 %",
+         {"line": outline(6, rgb(shade))}),
+        ("no fill, a 6 pt outline of accent1 shaded 50 %", {"line": outline(6, accent(shade))}),
+    ]
+    return Doc(
+        "E-shape-colors",
+        "The colours Word draws for shapes filled or outlined with an RGB colour and with "
+        "the scheme's accent1 (both 4F81BD) shaded and tinted 50 %, and filled from the "
+        "theme through wps:style; inline shapes of 100 x 40 pt without text",
+        box_cases([(label, inline_box(n, 100, 40, None, **options))
+                   for n, (label, options) in enumerate(cases, 1)], after=6)
+        + para(run("End of the document.")),
+        theme=True,
+        theme_overrides=(("accent1", SHADE_ACCENT),),
+    )
+
+
+# Character and line units on paragraphs of other sizes and on document grids (#452): each
+# case gives a value in units and a different one in points, so that the reference shows
+# which one Word took, and in units of which size.
+UNIT_TEXT = "text long enough to wrap onto a second line, so that the hanging indent shows " * 2
+
+
+def size_props(size: float) -> str:
+    hp = half_points(size)
+    return f'<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>'
+
+
+def paragraph_units_sizes() -> Doc:
+    styles = (
+        '<w:style w:type="paragraph" w:customStyle="1" w:styleId="Size14">'
+        '<w:name w:val="Size14"/><w:basedOn w:val="Normal"/>'
+        f"<w:rPr>{size_props(14)}</w:rPr></w:style>"
+    )
+    indent = {"left": 1440, "leftChars": 300, "hanging": 360, "hangingChars": 100}
+    before = spacing(before=6, before_lines=100)
+    cases = [
+        ("a style of 14 pt, the mark 11 pt, the text 10 pt; leftChars 300 beside left 72 pt, "
+         "hangingChars 100 beside hanging 18 pt", "Size14", 11, 10, {"ind": indent}),
+        ("no style (Normal, 11 pt), the mark 14 pt, the text 10 pt; the same indents", None,
+         14, 10, {"ind": indent}),
+        ("no style (Normal, 11 pt), the mark 10 pt, the text 14 pt; the same indents", None,
+         10, 14, {"ind": indent}),
+        ("a style of 14 pt, mark and text 14 pt as well (to compare); the same indents",
+         "Size14", None, None, {"ind": indent}),
+        ("a style of 14 pt, the mark 11 pt, the text 10 pt; beforeLines 100 beside 6 pt "
+         "before", "Size14", 11, 10, {"space": before}),
+        ("no style (Normal, 11 pt), the mark 14 pt, the text 10 pt; beforeLines 100 beside "
+         "6 pt before", None, 14, 10, {"space": before}),
+    ]
+    body = ""
+    for n, (label, style_id, mark, size, props) in enumerate(cases, 1):
+        toggles = size_props(size) if size is not None else ""
+        content = styled_run(f"Case {n:02d}: {label}: ", toggles) + styled_run(UNIT_TEXT,
+                                                                                toggles)
+        body += para(content, p_style=style_id, shading=GREY,
+                     mark=size_props(mark) if mark is not None else None, **props)
+        body += para(run("Between the cases."))
+    return Doc(
+        "E-paragraph-units-sizes",
+        "Which size a character unit (w:leftChars, w:hangingChars) and a line unit "
+        "(w:beforeLines) take when the paragraph mark, the text and the paragraph style have "
+        "different sizes; each beside a different value in points",
+        body,
+        styles=styles,
+    )
+
+
+def grid_doc(name: str, purpose: str, grid: str, cases: list[tuple[str, dict]]) -> Doc:
+    body = ""
+    for n, (label, props) in enumerate(cases, 1):
+        body += para(run(f"Case {n:02d}: {label}: {UNIT_TEXT}"), shading=GREY, **props)
+        body += para(run("Between the cases."))
+    return Doc(name, purpose, body, last_section=section(grid=grid))
+
+
+def paragraph_units_line_grid() -> Doc:
+    return grid_doc(
+        "E-paragraph-units-line-grid",
+        "What a line unit (w:beforeLines, w:afterLines) is on a document grid of lines "
+        "(w:docGrid w:type lines, a pitch of 24 pt), each beside a different value in points",
+        '<w:docGrid w:type="lines" w:linePitch="480"/>',
+        [
+            ("beforeLines 100 beside 6 pt before", {"space": spacing(before=6,
+                                                                       before_lines=100)}),
+            ("beforeLines 50 beside 6 pt before", {"space": spacing(before=6,
+                                                                      before_lines=50)}),
+            ("6 pt before only (to compare)", {"space": spacing(before=6)}),
+            ("afterLines 100 beside 6 pt after", {
+                "space": '<w:spacing w:after="120" w:afterLines="100"/>'}),
+        ],
+    )
+
+
+def paragraph_units_char_grid() -> Doc:
+    indent = {"left": 1440, "leftChars": 200}
+    return grid_doc(
+        "E-paragraph-units-char-grid",
+        "What a character unit (w:leftChars, w:hangingChars) is on a document grid of lines "
+        "and characters (w:docGrid w:type linesAndChars, w:charSpace 40960, 10 pt added to "
+        "each character's pitch), each beside a different value in points",
+        '<w:docGrid w:type="linesAndChars" w:linePitch="360" w:charSpace="40960"/>',
+        [
+            ("leftChars 200 beside left 72 pt", {"ind": indent}),
+            ("hangingChars 100 beside hanging 18 pt, left 72 pt", {
+                "ind": {"left": 1440, "hanging": 360, "hangingChars": 100}}),
+            ("left 72 pt only (to compare)", {"ind": {"left": 1440}}),
+        ],
+    )
+
+
+# Pictures in hidden runs (#447): hidden text is not drawn when Word prints or exports;
+# whether its pictures are, inline or floating, DrawingML or VML.
+VANISH = "<w:vanish/>"
+
+
+def hidden_pictures() -> Doc:
+    def picture(n: int, props: str = "") -> str:
+        return picture_run(inline_drawing(n, 72, 36, drawing_picture("image1.png", 72, 36)),
+                           props)
+
+    def floating(n: int, props: str = "") -> str:
+        return picture_run(anchored_drawing(
+            n, 72, 72, drawing_picture("image2.png", 72, 72), across=("margin", 300),
+            down=("paragraph", 0)), props)
+
+    vml_floating = ("position:absolute;margin-left:300pt;margin-top:0;width:72pt;"
+                    "height:72pt;z-index:1;mso-position-horizontal-relative:margin")
+    hidden = styled_run("hidden text ", VANISH)
+    cases = [
+        ("a visible inline picture (to compare)", run("Before ") + picture(1) + run(" after.")),
+        ("an inline picture in a hidden run, after hidden text",
+         run("Before ") + hidden + picture(2, VANISH) + run(" after.")),
+        ("an inline VML picture in a hidden run, after hidden text",
+         run("Before ") + hidden + vml_picture("image1.png", "p1", "width:72pt;height:36pt",
+                                               first=True, props=VANISH) + run(" after.")),
+        ("a floating picture whose anchor run is hidden, 300 pt from the left margin",
+         floating(3, VANISH) + run("Visible text of the anchor's paragraph.")),
+        ("a floating VML picture in a hidden run, 300 pt from the left margin",
+         vml_picture("image2.png", "p2", vml_floating, "none", props=VANISH)
+         + run("Visible text of the anchor's paragraph.")),
+    ]
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), space=spacing(before=12))
+        + para(content, space=spacing(after=60))
+        for n, (label, content) in enumerate(cases, 1)
+    )
+    body += para(run("Case 06: a paragraph hidden whole, its mark too, holding an inline "
+                     "picture; the next line follows it"), space=spacing(before=12))
+    body += para(styled_run("Hidden paragraph ", VANISH) + picture(4, VANISH), mark=VANISH)
+    body += para(run("The line after the hidden paragraph."))
+    return Doc(
+        "E-hidden-pictures",
+        "Whether Word draws pictures in hidden runs (w:vanish): inline and floating, "
+        "DrawingML and VML, and in a paragraph hidden whole, beside a visible picture; each "
+        "picture a grey PNG of its own size",
+        body + para(run("End of the document.")),
+        media=(("image1.png", grey_png(96, 48)), ("image2.png", grey_png(96, 96))),
+    )
+
+
+def exact_height_cut() -> Doc:
+    # #461: where Word cuts text taller than a row of exact height when the cell has margins
+    # or the text reaches past the cell, and whether it draws a nested table's picture whole.
+    def exact_table(height_twips: int, content: str, tc_pr: str = "") -> str:
+        return rule_table(
+            [row_cells(["r1c1", "r1c2", "r1c3"]),
+             ([cell(content, tc_pr), cell(para(run("r2c2"))), cell(para(run("r2c3")))],
+              f'<w:trHeight w:val="{height_twips}" w:hRule="exact"/>'),
+             row_cells(["r3c1", "r3c2", "r3c3"])],
+            EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True, border_eighths=12,
+        )
+
+    margins = ('<w:tcMar><w:top w:w="200" w:type="dxa"/><w:bottom w:w="200" w:type="dxa"/>'
+               "</w:tcMar>")
+    wide = para(run("Text indented past both edges of the cell, long enough to wrap " * 2),
+                ind={"left": -400, "right": -400})
+    inner = rule_table(
+        [[cell(para(vml_picture("image1.png", "p1", "width:30pt;height:90pt", first=True)))]],
+        [1800], tbl_w=(1800, "dxa"), fixed=True, border_eighths=4,
+    )
+    cases = [
+        ("row 2 is exactly 40 pt high; its first cell has top and bottom margins of 10 pt "
+         "and holds 6 lines", exact_table(800, numbered_lines("Cut", 6), margins)),
+        ("row 2 is exactly 30 pt high; its first cell holds a paragraph indented -20 pt on "
+         "both sides, of several lines", exact_table(600, wide)),
+        ("row 2 is exactly 40 pt high; its first cell holds a nested table whose cell holds "
+         "an inline picture 90 pt tall", exact_table(800, inner + para())),
+    ]
+    body = "".join(table_case(n, label, xml) for n, (label, xml) in enumerate(cases, 1))
+    return Doc(
+        "E-table-row-exact-cut",
+        "Where Word cuts text taller than a row of exact height (w:hRule exact) whose cell "
+        "has top and bottom margins, whose text is indented past the cell's edges, and whose "
+        "nested table holds a picture taller than the row",
+        body + para(run("End of the document.")),
+        media=(("image1.png", grey_png(40, 120)),),
+    )
+
+
+# Page-break marks Word writes in a row that crosses a page (#472): the rows of these cases
+# have cells of 20 lines of exact 12 pt that start low on a page of their own, and the shape
+# a case is about at the start of a later cell of the crossing row and of the next row.
+def exact_lines(prefix: str, count: int) -> str:
+    return "".join(page_para(run(f"{prefix} {k:02d}")) for k in range(1, count + 1))
+
+
+def crossing_case(n: int, label: str, table_xml: str, filler_lines: int = 40) -> str:
+    """Case n on pages of its own: its label, filler lines, then its table, which crosses
+    into the next page."""
+    return (page_para(run(f"Case {n:02d}: {label}"), page_break_before=n > 1)
+            + exact_lines("Filler", filler_lines) + table_xml
+            + page_para(run(f"After case {n:02d}.")))
+
+
+def crossing_table(shapes: tuple[str, str] = ("", ""), *, paragraphs: bool = False,
+                   rows: list | None = None, header: tuple | None = None) -> str:
+    """Three columns: row 1 crosses the page in every cell, its second cell starting with
+    the first of shapes, and row 2 starts with the second; with paragraphs, the shapes are
+    whole paragraphs put first in those cells. rows replaces both rows, and header is a
+    row put before them."""
+    def start(shape: str, label: str) -> str:
+        if paragraphs:
+            return shape + page_para(run(label))
+        return page_para(shape + run(label))
+
+    crossing = [cell(exact_lines("First cell", 20)),
+                cell(start(shapes[0], "Second cell") + exact_lines("Second cell", 19)),
+                cell(exact_lines("Third cell", 20))]
+    next_row = [cell(start(shapes[1], "Next row")), cell(page_para(run("Next row b"))),
+                cell(page_para(run("Next row c")))]
+    body = [header] if header else []
+    body += rows if rows is not None else [crossing, next_row]
+    return rule_table(body, EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True, border_eighths=4)
+
+
+def nested_if_field() -> str:
+    """An IF field whose code holds another field, as { IF { = 2 + 2 } = 4 "..." "..." }."""
+    def char(kind: str) -> str:
+        return f'<w:r><w:fldChar w:fldCharType="{kind}"/></w:r>'
+
+    def code(value: str) -> str:
+        return f'<w:r><w:instrText xml:space="preserve"> {escape(value)} </w:instrText></w:r>'
+
+    return (char("begin") + code("IF") + char("begin") + code("= 2 + 2") + char("separate")
+            + run("4") + char("end") + code('= 4 "Nested result " "Other result "')
+            + char("separate") + run("Nested result ") + char("end"))
+
+
+FORM_FIELDS = {
+    "FORMCHECKBOX": '<w:checkBox><w:sizeAuto/><w:default w:val="0"/></w:checkBox>',
+    "FORMDROPDOWN": ('<w:ddList><w:listEntry w:val="First choice"/>'
+                     '<w:listEntry w:val="Second choice"/></w:ddList>'),
+    "FORMTEXT": "<w:textInput/>",
+}
+
+
+def form_field(kind: str, name: str) -> str:
+    """A legacy form field as Word writes it: its w:ffData in the begin mark; only FORMTEXT
+    has a result."""
+    data = (f'<w:ffData><w:name w:val="{name}"/><w:enabled/><w:calcOnExit w:val="0"/>'
+            f"{FORM_FIELDS[kind]}</w:ffData>")
+    result = run("Typed text ") if kind == "FORMTEXT" else ""
+    return (f'<w:r><w:fldChar w:fldCharType="begin">{data}</w:fldChar></w:r>'
+            f'<w:r><w:instrText xml:space="preserve"> {kind} </w:instrText></w:r>'
+            f'<w:r><w:fldChar w:fldCharType="separate"/></w:r>{result}'
+            '<w:r><w:fldChar w:fldCharType="end"/></w:r>')
+
+
+def row_break_fields() -> Doc:
+    def forms(kind: str, name: str) -> tuple[str, str]:
+        return form_field(kind, f"{name}1"), form_field(kind, f"{name}2")
+
+    cases = [
+        ("an IF field whose code holds another field starts the second cell and the next row",
+         (nested_if_field(), nested_if_field())),
+        ("a check box (FORMCHECKBOX) starts the second cell and the next row",
+         forms("FORMCHECKBOX", "Check")),
+        ("a drop-down list (FORMDROPDOWN) starts the second cell and the next row",
+         forms("FORMDROPDOWN", "Choice")),
+        ("a text form field (FORMTEXT), which has a result, starts the second cell and the "
+         "next row (to compare)", forms("FORMTEXT", "Text")),
+    ]
+    body = "".join(crossing_case(n, label, crossing_table(shapes))
+                   for n, (label, shapes) in enumerate(cases, 1))
+    return Doc(
+        "E-row-break-fields",
+        "The page-break marks Word writes in a table row that crosses a page when a field "
+        "whose code holds another field, or a legacy form field, starts a later cell of the "
+        "row and the next row",
+        body + page_para(run("End of the document.")),
+    )
+
+
+def row_break_hidden() -> Doc:
+    styles = (style("character", "HiddenChar", VANISH)
+              + style("paragraph", "HiddenPara", VANISH, based_on="Normal"))
+    hidden_by_style = '<w:r><w:rPr><w:rStyle w:val="HiddenChar"/></w:rPr>' + text(
+        "Hidden by a style ") + "</w:r>"
+    hidden_paragraph = page_para(run("A paragraph hidden by its style"), p_style="HiddenPara")
+    hidden_directly = styled_run("Hidden directly ", VANISH)
+    cases = [
+        ("text hidden through a character style starts the second cell and the next row",
+         crossing_table((hidden_by_style, hidden_by_style))),
+        ("a paragraph hidden through its paragraph style, its mark too, comes first in the "
+         "second cell and the next row",
+         crossing_table((hidden_paragraph, hidden_paragraph), paragraphs=True)),
+        ("text hidden by the run's own w:vanish starts the second cell and the next row "
+         "(to compare)", crossing_table((hidden_directly, hidden_directly))),
+    ]
+    body = "".join(crossing_case(n, label, table_xml)
+                   for n, (label, table_xml) in enumerate(cases, 1))
+    return Doc(
+        "E-row-break-hidden",
+        "The page-break marks Word writes in a table row that crosses a page when text "
+        "hidden through a character or paragraph style starts a later cell of the row and "
+        "the next row",
+        body + page_para(run("End of the document.")),
+        styles=styles,
+    )
+
+
+REVISION = 'w:author="Officewright" w:date="2026-01-01T00:00:00Z"'
+
+
+def row_break_revisions() -> Doc:
+    def deleted(k: int) -> str:
+        return (f'<w:del w:id="{k}" {REVISION}><w:r><w:delText xml:space="preserve">'
+                "Deleted words </w:delText></w:r></w:del>")
+
+    def inserted(k: int) -> str:
+        return f'<w:ins w:id="{k}" {REVISION}>{run("Inserted words ")}</w:ins>'
+
+    def moved(k: int, kind: str, name: str) -> str:
+        # A move's source and destination share the name of their ranges; k and k + 1 are
+        # the ids of the range and of the moved run.
+        return (f'<w:{kind}RangeStart w:id="{k}" {REVISION} w:name="{name}"/>'
+                f'<w:{kind} w:id="{k + 1}" {REVISION}>{run("Moved words ")}</w:{kind}>'
+                f'<w:{kind}RangeEnd w:id="{k}"/>')
+
+    # Every revision and range has an id of its own.
+    cases = [
+        ("deleted text (w:del) starts the second cell and the next row",
+         crossing_table((deleted(1), deleted(2))), ""),
+        ("text moved away (w:moveFrom) starts the second cell and the next row; it moved to "
+         "the end of this label: ",
+         crossing_table((moved(10, "moveFrom", "move1"), moved(12, "moveFrom", "move2"))),
+         moved(14, "moveTo", "move1") + moved(16, "moveTo", "move2")),
+        ("inserted text (w:ins) starts the second cell and the next row (to compare)",
+         crossing_table((inserted(3), inserted(4))), ""),
+    ]
+    body = ""
+    for n, (label, table_xml, after_label) in enumerate(cases, 1):
+        body += (page_para(run(f"Case {n:02d}: {label}") + after_label,
+                           page_break_before=n > 1)
+                 + exact_lines("Filler", 40) + table_xml
+                 + page_para(run(f"After case {n:02d}.")))
+    # A paragraph of lines that crosses a page, with deleted, moved-away and hidden text in
+    # its lines before the crossing: what the text before and after Word's mark counts.
+    values = [f"Paragraph line {k:02d}" for k in range(1, 31)]
+    crossing = (lines(values[:10]) + "<w:r><w:br/></w:r>" + deleted(5)
+                + moved(20, "moveFrom", "move3") + styled_run("Hidden words ", VANISH)
+                + lines(values[10:]))
+    n = len(cases) + 1
+    body += (page_para(run(f"Case {n:02d}: a paragraph of 30 lines crosses the page; deleted, "
+                           "moved-away and hidden words are in its 11th line; they moved to "
+                           "the end of this label: ") + moved(22, "moveTo", "move3"),
+                       page_break_before=True)
+             + exact_lines("Filler", 40) + page_para(crossing))
+    return Doc(
+        "E-row-break-revisions",
+        "The page-break marks Word writes in a table row that crosses a page when deleted, "
+        "moved-away or inserted text starts a later cell of the row and the next row, and in "
+        "a paragraph that crosses a page after deleted, moved-away and hidden words",
+        body + page_para(run("End of the document.")),
+    )
+
+
+def row_break_numbers() -> Doc:
+    # The shapes of #454's Risks: a next row whose first line is only its number, below a
+    # page number alone on top of the page (an even header) and below a repeated header row
+    # with a "#" column; and two cells of a row that cross the same page.
+    def numbered_row(number: str) -> list:
+        return [cell(page_para(run(number))), cell(page_para(run("Widget"))),
+                cell(page_para(run("Next row c")))]
+
+    crossing = [cell(exact_lines("First cell", 20)), cell(exact_lines("Second cell", 20)),
+                cell(exact_lines("Third cell", 20))]
+    two_cells = [cell(exact_lines("First cell", 20)), cell(page_para(run("Short cell"))),
+                 cell(exact_lines("Third cell", 20))]
+    header = ([cell(page_para(run("#"))), cell(page_para(run("Item"))),
+               cell(page_para(run("Note")))], "<w:tblHeader/>")
+    cases = [
+        ("the next row's first cell holds only its number, 2, and pages of even numbers have "
+         "a header of the page number alone", crossing_table(rows=[crossing,
+                                                                   numbered_row("2")])),
+        ("a header row with a # column repeats on every page; the next row's first cell holds "
+         "only its number, 4", crossing_table(rows=[crossing, numbered_row("4")],
+                                              header=header)),
+        ("the first and third cells of the row cross the page, the second does not; the next "
+         "row starts on the next page", crossing_table(rows=[two_cells, numbered_row("6")])),
+    ]
+    body = "".join(crossing_case(n, label, table_xml)
+                   for n, (label, table_xml) in enumerate(cases, 1))
+    headers = (header_part("header1.xml", page_para(run("Teaming Agreement"))),
+               header_part("header2.xml", page_para(page_field())))
+    return Doc(
+        "E-row-break-numbers",
+        "The page-break marks Word writes when the row after one that crosses a page starts "
+        "with a cell of its number alone, below a header of the page number alone or a "
+        "repeated header row with a # column, and when two cells of the row cross the page",
+        body + page_para(run("End of the document.")),
+        headers=headers,
+        even_and_odd_headers=True,
+        last_section=section(refs=(("headerReference", "default", "header1.xml"),
+                                   ("headerReference", "even", "header2.xml"))),
+    )
+
+
 # Whether Word reads a font's DMAP table before cmap (#458): the DMAP font of
 # tests/fonts-word/test-dmap maps A to the glyph of B, B to that of A and U+E000, which its
 # cmap lacks, to that of Z; its cmap is Noto Sans's.
@@ -4514,6 +5436,27 @@ def documents() -> list[Doc]:
         table_style_size_pair(13, 12),
         table_style_size_pair(10, 11),
         underline_trailspace_indent(),
+        textbox_insets(),
+        textbox_anchor(),
+        textbox_spacing(),
+        textbox_autofit(),
+        textbox_fill_outline(),
+        textbox_lists(),
+        textbox_footer_page(),
+        textbox_inline_floating(),
+        textbox_from_paragraph(),
+        textbox_vml(),
+        textbox_bar_tab(),
+        shape_colors(),
+        paragraph_units_sizes(),
+        paragraph_units_line_grid(),
+        paragraph_units_char_grid(),
+        hidden_pictures(),
+        exact_height_cut(),
+        row_break_fields(),
+        row_break_hidden(),
+        row_break_revisions(),
+        row_break_numbers(),
         dmap_font(),
     ]
 
@@ -4569,10 +5512,13 @@ def styles_xml(doc: Doc) -> str:
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
 
-def theme_xml() -> str:
+def theme_xml(overrides: tuple[tuple[str, str], ...] = ()) -> str:
     """A theme of this repository: the colours and fonts of THEME_COLORS and THEME_FONTS,
-    and the smallest format scheme the schema allows (three styles in each list)."""
-    colors = "".join(f"<a:{name}>{color}</a:{name}>" for name, color in THEME_COLORS.items())
+    but for the RGB colours of overrides, and the smallest format scheme the schema allows
+    (three styles in each list)."""
+    scheme = dict(THEME_COLORS)
+    scheme.update((name, f'<a:srgbClr val="{rgb}"/>') for name, rgb in overrides)
+    colors = "".join(f"<a:{name}>{color}</a:{name}>" for name, color in scheme.items())
 
     def collection(kind: str) -> str:
         latin = THEME_FONTS[kind]
@@ -4662,7 +5608,8 @@ def settings_xml(doc: Doc) -> str:
         f'<w:settings xmlns:w="{W_NS}">'
         '<w:zoom w:percent="100"/>'
         '<w:defaultTabStop w:val="720"/>'
-        '<w:characterSpacingControl w:val="doNotCompress"/>'
+        + ("<w:evenAndOddHeaders/>" if doc.even_and_odd_headers else "")
+        + '<w:characterSpacingControl w:val="doNotCompress"/>'
         f"<w:compat>{flags}{settings}</w:compat>"
         # The languages and number format are set, so that a re-saved copy that names the
         # language or locale of the machine Word ran on stands out (corpus-import.py).
@@ -4714,15 +5661,8 @@ def relationships(rels: list[tuple[str, ...]]) -> str:
 
 def parts(doc: Doc) -> list[tuple[str, bytes]]:
     """The package parts of a document, in the order they are stored."""
-    namespaces = f'xmlns:w="{W_NS}" xmlns:r="{R_NS}"'
-    if "<w14:" in doc.body:
-        # Word 2010's run properties, which an application that does not know them ignores
-        # (ECMA-376 Part 3, mc:Ignorable).
-        namespaces += f' xmlns:w14="{W14_NS}" xmlns:mc="{MC_NS}" mc:Ignorable="w14"'
-    if "<v:" in doc.body:
-        namespaces += f' xmlns:v="{V_NS}" xmlns:o="{O_NS}" xmlns:w10="{W10_NS}"'
     document = (
-        f"<w:document {namespaces}>"
+        f"<w:document {namespaces(doc.body)}>"
         f"<w:body>{doc.body}{doc.last_section or sect_pr()}</w:body></w:document>"
     )
     numbering = None
@@ -4792,7 +5732,7 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
     if numbering:
         result.append(("word/numbering.xml", xml_part(numbering)))
     if doc.theme:
-        result.append(("word/theme/theme1.xml", xml_part(theme_xml())))
+        result.append(("word/theme/theme1.xml", xml_part(theme_xml(doc.theme_overrides))))
     for name, root in doc.headers:
         result.append((f"word/{name}", xml_part(root)))
     result.append(("word/_rels/document.xml.rels", xml_part(relationships(word_rels))))
