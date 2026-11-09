@@ -138,19 +138,24 @@ fn format_scheme(
         let entries = list
             .children_through_alternates(names.mc)
             .filter(|entry| entry.local_in(&names.a).is_some());
+        // The effects (`a:effectStyleLst`) and anything else are not read.
         for entry in entries {
-            if local == "lnStyleLst" {
-                let (line, over) = style_line_entry(entry, names, report);
-                scheme.lines.push(line);
-                cut += usize::from(over);
-            } else {
-                let (fill, over) = style_fill_entry(entry, names, report);
-                cut += usize::from(over);
-                if local == "fillStyleLst" {
-                    scheme.fills.push(fill);
-                } else {
-                    scheme.background_fills.push(fill);
+            match local {
+                "lnStyleLst" => {
+                    let (line, over) = style_line_entry(entry, names, report);
+                    scheme.lines.push(line);
+                    cut += usize::from(over);
                 }
+                "fillStyleLst" | "bgFillStyleLst" => {
+                    let (fill, over) = style_fill_entry(entry, names, report);
+                    cut += usize::from(over);
+                    if local == "fillStyleLst" {
+                        scheme.fills.push(fill);
+                    } else {
+                        scheme.background_fills.push(fill);
+                    }
+                }
+                _ => break,
             }
         }
     }
