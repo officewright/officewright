@@ -154,6 +154,9 @@ shellcheck scripts/*.sh .githooks/pre-commit
 step "actionlint"
 actionlint
 
+step "committed corpus: each file at most 1 MB, tests/corpus at most 100 MB"
+"$python" -B scripts/check-corpus-size.py
+
 step "committed files: no Python bytecode, no home directory paths"
 scripts/check-added-files.sh
 "$python" -B -m unittest discover -s tests/scripts -v
