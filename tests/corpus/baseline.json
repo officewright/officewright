@@ -568,23 +568,23 @@
       "text_score": 0.9764
     },
     "tests/corpus/business/form-ec-state-aid-notification-bg.docx": {
-      "line_agreement": 0.6989,
+      "line_agreement": 0.7333,
       "page_break_agreement": 0.0,
       "ssim_mean": 0.5573,
       "ssim_min": 0.0,
-      "text_score": 0.2505
+      "text_score": 0.2509
     },
     "tests/corpus/business/form-ec-state-aid-notification-de.docx": {
-      "line_agreement": 0.6592,
+      "line_agreement": 0.6772,
       "page_break_agreement": 0.0,
       "ssim_mean": 0.5242,
       "ssim_min": 0.0,
       "text_score": 0.2414
     },
     "tests/corpus/business/form-ec-state-aid-notification-el.docx": {
-      "line_agreement": 0.6868,
+      "line_agreement": 0.7076,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.5182,
+      "ssim_mean": 0.518,
       "ssim_min": 0.0,
       "text_score": 0.2131
     },
