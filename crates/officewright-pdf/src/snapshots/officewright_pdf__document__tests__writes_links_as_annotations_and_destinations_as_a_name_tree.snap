@@ -1,0 +1,74 @@
+---
+source: crates/officewright-pdf/src/document.rs
+expression: readable(&pdf)
+---
+%PDF-1.4
+%\xe2\xe3\xcf\xd3
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Names << /Dests 12 0 R >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.2756 841.8898] /Resources << >> /Contents 4 0 R /Annots [9 0 R 10 0 R] >>
+endobj
+4 0 obj
+<< /Length 0 >>
+stream
+
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.2756 841.8898] /Resources << >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 0 >>
+stream
+
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> /Contents 8 0 R /Annots [11 0 R] >>
+endobj
+8 0 obj
+<< /Length 0 >>
+stream
+
+endstream
+endobj
+9 0 obj
+<< /Type /Annot /Subtype /Link /Rect [72 700 192 714.5] /Border [0 0 0] /A << /S /URI /URI (https://example.com/a%20b/\\(%D0%96\\)) >> >>
+endobj
+10 0 obj
+<< /Type /Annot /Subtype /Link /Rect [72 680 152 694] /Border [0 0 0] /Dest <417070656E646978> >>
+endobj
+11 0 obj
+<< /Type /Annot /Subtype /Link /Rect [-10 0 10 10] /Border [0 0 0] /Dest <FEFF0413043B043004320430> >>
+endobj
+12 0 obj
+<< /Names [
+<417070656E646978> [7 0 R /XYZ 72 770.25 null]
+<FEFF0413043B043004320430> [7 0 R /XYZ 0 400 null]
+] >>
+endobj
+xref
+0 13
+0000000000 65535 f\r
+0000000015 00000 n\r
+0000000091 00000 n\r
+0000000160 00000 n\r
+0000000297 00000 n\r
+0000000346 00000 n\r
+0000000460 00000 n\r
+0000000509 00000 n\r
+0000000630 00000 n\r
+0000000679 00000 n\r
+0000000830 00000 n\r
+0000000944 00000 n\r
+0000001063 00000 n\r
+trailer
+<< /Size 13 /Root 1 0 R >>
+startxref
+1194
+%%EOF
