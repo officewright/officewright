@@ -9,6 +9,7 @@
 //! renders `E-footnote-two-notes.docx` and `E-footnote-no-room.docx`: the spacing, and
 //! that a note is never cut, which Word does where a note does not fit (15c).
 
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use officewright_core::Pt;
@@ -72,25 +73,24 @@ impl PageNotes<'_> {
         self.notes.len()
     }
 
-    /// Keeps the first `count` notes.
-    pub(super) fn truncate(&mut self, count: usize) {
-        self.notes.truncate(count);
+    /// Keeps the first `count` notes, and returns the others.
+    pub(super) fn truncate(&mut self, count: usize) -> Vec<NoteId> {
+        self.notes
+            .drain(count.min(self.notes.len())..)
+            .map(|placed| placed.note)
+            .collect()
     }
 
     /// The notes it holds.
     pub(super) fn notes(&self) -> impl Iterator<Item = NoteId> + '_ {
         self.notes.iter().map(|placed| placed.note)
     }
-
-    fn holds(&self, note: NoteId) -> bool {
-        self.notes.iter().any(|placed| placed.note == note)
-    }
 }
 
-/// The footnotes laid out so far in a pass: each by its note, the width it was laid out
-/// at, and the number of the page it was laid out for when it has a `PAGE` field.
-pub(super) type NoteLayouts<'d> =
-    std::collections::HashMap<(NoteId, u64, Option<u32>), Rc<NoteLayout<'d>>>;
+/// The footnotes laid out so far in a pass, by note, while their page may still change:
+/// each layout with the width it was laid out at, and the number of the page it was laid
+/// out for when it has a `PAGE` field.
+pub(super) type NoteLayouts<'d> = HashMap<NoteId, Vec<(u64, Option<u32>, Rc<NoteLayout<'d>>)>>;
 
 /// Whether `table` references a footnote in a cell, nested tables' included, where the
 /// notes are not laid out yet.
@@ -139,6 +139,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         line: usize,
     ) -> Vec<NoteId> {
         let mut notes = Vec::new();
+        let mut seen = HashSet::new();
         let Some(line) = layout.lines.get(line) else {
             return notes;
         };
@@ -157,16 +158,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 .document
                 .note(*note)
                 .is_some_and(|ir| ir.kind() == NoteKind::Footnote);
-            if footnote && !notes.contains(note) && !self.placed(*note) {
+            if footnote && !self.placed.contains(note) && seen.insert(*note) {
                 notes.push(*note);
             }
         }
         notes
-    }
-
-    /// Whether a page holds `note` already.
-    fn placed(&self, note: NoteId) -> bool {
-        self.notes_done.contains(&note) || self.footnotes.iter().any(|page| page.holds(note))
     }
 
     /// How many of the lines of `layout`, the layout of paragraph `paragraph` of section
@@ -184,15 +180,14 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             Some(last) => (last.room, Some(Rc::clone(&last.layout))),
             None => (0.0, None),
         };
-        let mut taken: Vec<NoteId> = Vec::new();
+        let mut taken: HashSet<NoteId> = HashSet::new();
         let mut y = top;
         let mut count = 0;
         for (index, line) in layout.lines.iter().enumerate().skip(first) {
             for note in self.line_footnotes(paragraph, layout, index) {
-                if taken.contains(&note) {
+                if !taken.insert(note) {
                     continue;
                 }
-                taken.push(note);
                 let laid = self.note_layout(note, section)?;
                 room = self.room_after(room, tail.as_deref(), &laid, section)?.1;
                 tail = Some(laid);
@@ -266,6 +261,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     None => Some(self.separator_layout(section)?),
                 };
                 if let Some(page) = self.footnotes.last_mut() {
+                    self.placed.insert(note);
                     if separator.is_some() {
                         page.separator = separator;
                     }
@@ -287,24 +283,33 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// page.
     fn note_layout(&mut self, note: NoteId, section: usize) -> Result<Rc<NoteLayout<'d>>> {
         let width = self.body()?.width.0.to_bits();
+        let laid_out = |page: Option<u32>, layouts: &NoteLayouts<'d>| {
+            layouts.get(&note).and_then(|laid| {
+                laid.iter()
+                    .find(|(at, on, _)| (*at, *on) == (width, page))
+                    .map(|(.., laid)| Rc::clone(laid))
+            })
+        };
         // A note laid out for no page has no `PAGE` field.
-        if let Some(laid) = self.note_layouts.get(&(note, width, None)) {
-            return Ok(Rc::clone(laid));
+        if let Some(laid) = laid_out(None, &self.note_layouts) {
+            return Ok(laid);
         }
         let blocks: &'d [Block] = self.document.note(note).map_or(&[], |ir| ir.blocks());
         let page = super::field_kinds(blocks, 0)
             .0
             .then(|| self.field_values(section).page);
-        let key = (note, width, page);
-        if let Some(laid) = self.note_layouts.get(&key) {
-            return Ok(Rc::clone(laid));
+        if let Some(laid) = laid_out(page, &self.note_layouts) {
+            return Ok(laid);
         }
         let mut location = Location::default();
         location.push(Step::Field("notes"));
         location.push(Step::Index(note.index()));
         location.push(Step::Field("blocks"));
         let laid = Rc::new(self.lay_out_note(blocks, location, section, Some(note))?);
-        self.note_layouts.insert(key, Rc::clone(&laid));
+        self.note_layouts
+            .entry(note)
+            .or_default()
+            .push((width, page, Rc::clone(&laid)));
         Ok(laid)
     }
 
