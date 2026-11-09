@@ -602,11 +602,11 @@
       "text_score": 0.9764
     },
     "tests/corpus/business/form-ec-state-aid-notification-bg.docx": {
-      "line_agreement": 0.9238,
-      "page_break_agreement": 0.3333,
-      "ssim_mean": 0.7295,
-      "ssim_min": 0.5861,
-      "text_score": 0.9085
+      "line_agreement": 0.9247,
+      "page_break_agreement": 0.3889,
+      "ssim_mean": 0.7279,
+      "ssim_min": 0.578,
+      "text_score": 0.9049
     },
     "tests/corpus/business/form-ec-state-aid-notification-de.docx": {
       "line_agreement": 0.8291,
@@ -616,11 +616,11 @@
       "text_score": 0.7768
     },
     "tests/corpus/business/form-ec-state-aid-notification-el.docx": {
-      "line_agreement": 0.7915,
+      "line_agreement": 0.7951,
       "page_break_agreement": 0.1053,
-      "ssim_mean": 0.6609,
-      "ssim_min": 0.562,
-      "text_score": 0.6663
+      "ssim_mean": 0.614,
+      "ssim_min": 0.0,
+      "text_score": 0.5993
     },
     "tests/corpus/business/form-gsa-dira-dias-template.docx": {
       "line_agreement": 0.8922,
@@ -1109,25 +1109,25 @@
       "text_score": 0.8947
     },
     "tests/corpus/word-rules/E-footnote-long-notice.docx": {
-      "line_agreement": 0.6893,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.6301,
-      "ssim_min": 0.0,
-      "text_score": 0.2966
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9893,
+      "ssim_min": 0.9872,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-footnote-long.docx": {
-      "line_agreement": 0.6961,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.6305,
-      "ssim_min": 0.0,
-      "text_score": 0.2941
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.989,
+      "ssim_min": 0.9873,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-footnote-no-room.docx": {
-      "line_agreement": 0.8286,
-      "page_break_agreement": 0.7778,
-      "ssim_mean": 0.9938,
-      "ssim_min": 0.9795,
-      "text_score": 0.7916
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9989,
+      "ssim_min": 0.9963,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-footnote-numbering-settings.docx": {
       "line_agreement": 0.4737,
