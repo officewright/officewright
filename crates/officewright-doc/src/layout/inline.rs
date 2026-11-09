@@ -86,7 +86,7 @@ impl<'a> Translator<'a> {
         let (mut shows, mut boxed) = (false, false);
         // Whether a picture or an object is in the line, which the IR places on the baseline.
         let mut in_line_object = false;
-        for item in run.content() {
+        for (item, custom_mark) in run.content_with_custom_marks() {
             match item {
                 RunContent::Text(text) => {
                     shows = true;
@@ -133,13 +133,13 @@ impl<'a> Translator<'a> {
                 RunContent::FootnoteReference(id) => {
                     if let Some(note) = self.note_reference(false, id) {
                         shows = true;
-                        content.push(ir::Inline::note_reference(note, false, style));
+                        content.push(ir::Inline::note_reference(note, custom_mark, style));
                     }
                 }
                 RunContent::EndnoteReference(id) => {
                     if let Some(note) = self.note_reference(true, id) {
                         shows = true;
-                        content.push(ir::Inline::note_reference(note, false, style));
+                        content.push(ir::Inline::note_reference(note, custom_mark, style));
                     }
                 }
                 RunContent::NoteNumber => {

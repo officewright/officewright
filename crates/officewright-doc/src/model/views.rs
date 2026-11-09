@@ -494,13 +494,39 @@ impl<'a> Run<'a> {
     /// What the run contains, in document order.
     pub fn content(self) -> impl Iterator<Item = RunContent<'a>> + 'a {
         let document = self.document;
-        let items: &'a [RunItem] = match &self.node.kind {
-            Kind::Run { content } => content,
-            _ => &[],
-        };
-        items
+        self.items()
             .iter()
             .map(move |item| RunContent::new(document, item))
+    }
+
+    /// What the run contains, as [`content`](Self::content) gives it, each item with whether
+    /// it is the reference of a note whose own mark follows it (`w:customMarkFollows`).
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn content_with_custom_marks(
+        self,
+    ) -> impl Iterator<Item = (RunContent<'a>, bool)> + 'a {
+        let document = self.document;
+        self.items().iter().map(move |item| {
+            let custom_mark = matches!(
+                item,
+                RunItem::FootnoteReference {
+                    custom_mark: true,
+                    ..
+                } | RunItem::EndnoteReference {
+                    custom_mark: true,
+                    ..
+                }
+            );
+            (RunContent::new(document, item), custom_mark)
+        })
+    }
+
+    fn items(self) -> &'a [RunItem] {
+        match &self.node.kind {
+            Kind::Run { content } => content,
+            _ => &[],
+        }
     }
 
     /// The character properties written on the run (its `w:rPr`), without those of its
@@ -612,8 +638,8 @@ impl<'a> RunContent<'a> {
             RunItem::FieldChar { kind, .. } => Self::FieldChar(*kind),
             RunItem::NoBreakHyphen => Self::NoBreakHyphen,
             RunItem::SoftHyphen => Self::SoftHyphen,
-            RunItem::FootnoteReference(id) => Self::FootnoteReference(*id),
-            RunItem::EndnoteReference(id) => Self::EndnoteReference(*id),
+            RunItem::FootnoteReference { id, .. } => Self::FootnoteReference(*id),
+            RunItem::EndnoteReference { id, .. } => Self::EndnoteReference(*id),
             RunItem::CommentReference(id) => Self::CommentReference(*id),
             RunItem::NoteNumber => Self::NoteNumber,
             RunItem::Separator => Self::Separator,

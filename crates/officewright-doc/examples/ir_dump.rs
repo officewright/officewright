@@ -7,8 +7,9 @@
 //!
 //! It prints the settings; each section's page and columns, its headers and footers; each
 //! paragraph's formatting, list item and mark; and its content, each piece with its run
-//! style, and each note reference with its note's text; each table's properties, borders
-//! and rows, and each cell's span, alignment, shading, and its own margins and borders.
+//! style, and each note reference with its note's text and whether a mark of its own
+//! follows it; each table's properties, borders and rows, and each cell's span, alignment,
+//! shading, and its own margins and borders.
 //! Then it lists what the translation left out, and whether the IR passes `validate`.
 
 use std::process::ExitCode;
@@ -184,10 +185,15 @@ fn describe(ir: &ir::Document, inline: &ir::Inline) -> String {
         ir::Inline::Symbol { font, code, .. } => format!("symbol {font} {code:04X}"),
         ir::Inline::SoftHyphen { .. } => "soft hyphen".to_owned(),
         ir::Inline::NoBreakHyphen { .. } => "no-break hyphen".to_owned(),
-        ir::Inline::NoteReference { note, .. } => match ir.note(*note) {
-            Some(note) => format!("{:?} reference [{}]", note.kind(), note_text(note)),
-            None => "note reference".to_owned(),
-        },
+        ir::Inline::NoteReference {
+            note, custom_mark, ..
+        } => {
+            let mark = if *custom_mark { ", custom mark" } else { "" };
+            match ir.note(*note) {
+                Some(note) => format!("{:?} reference{mark} [{}]", note.kind(), note_text(note)),
+                None => format!("note reference{mark}"),
+            }
+        }
         ir::Inline::Field(field) => {
             let result: Vec<String> = field
                 .result()
