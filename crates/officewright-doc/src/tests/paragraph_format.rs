@@ -1170,6 +1170,27 @@ fn takes_level_0_for_a_style_without_a_level_whose_list_names_it() {
 }
 
 #[test]
+fn takes_level_0_for_a_paragraph_s_own_list_without_a_level_in_a_style_its_list_names() {
+    // The paragraph's own w:numPr gives the list and no level, and level 2 of that list
+    // names the paragraph's style, which gives no list: level 0, as for a style's list
+    // without a level (cases 01 and 02 of word-rules/E-list-level-linked-no-level.docx).
+    let numbering = [
+        definition(10, r#"<w:pStyle w:val="Named"/>"#),
+        r#"<w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>"#.to_owned(),
+    ]
+    .concat();
+    let styles = [defaults(""), style("paragraph", "Named", None, "")].concat();
+    let body = paragraph("Named", r#"<w:numPr><w:numId w:val="1"/></w:numPr>"#);
+    let format = &formats(&build(&body, &styles, Some(&numbering)))[0];
+    let list = format.list().unwrap();
+    assert_eq!((list.instance(), list.level_number()), (1, 0));
+    assert_eq!(
+        (format.start_indent().0, format.first_line_indent().0),
+        (36.0, -18.0)
+    );
+}
+
+#[test]
 fn bounds_set_and_cleared_tab_stops_apart() {
     // [MS-DOC] 2.9.179 and 2.9.180: one change adds at most 64 stops and removes at most
     // 64, so cleared stops do not take the place of set ones.
