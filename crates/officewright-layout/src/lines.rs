@@ -804,11 +804,13 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         while let Some(unit) = self.units.get(index).cloned() {
             match &unit.kind {
                 UnitKind::Break { kind, .. } => {
-                    // Floating objects that only the paragraph's end follows stay on the
-                    // break's line, as they take no line of their own (#476; a hypothesis
-                    // for page and column breaks until a Word render). Those before text go
-                    // with it, as the heading after a page break and a text box does in
-                    // Word's render of `letter-dol-cobra-election-notice`.
+                    // Floating objects that only the paragraph's end follows after a page or
+                    // column break stay on the break's line, as they take no line of their
+                    // own on the next page (#476; a hypothesis until a Word render). Those
+                    // before text go with it, as the heading after a page break and a text
+                    // box does in Word's render of `letter-dol-cobra-election-notice`. After
+                    // a line break the paragraph's mark has a line of its own, and they go
+                    // on it.
                     let after = index + 1;
                     let floats = self
                         .units
@@ -817,7 +819,8 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                         .iter()
                         .take_while(|next| next.range.is_empty())
                         .count();
-                    let end = if after + floats == self.units.len() {
+                    let page = matches!(kind, BreakKind::Page | BreakKind::Column);
+                    let end = if page && after + floats == self.units.len() {
                         self.units.len()
                     } else {
                         after

@@ -4378,7 +4378,7 @@ mod tests {
         // break in `letter-dol-cobra-election-notice`, its heading first on its page.
         type Texts<'a> = &'a [(usize, &'a str, f64)];
         type Pictures<'a> = &'a [(usize, f64)];
-        let cases: [(&str, Texts<'_>, Pictures<'_>); 12] = [
+        let cases: [(&str, Texts<'_>, Pictures<'_>); 13] = [
             ("Ap", &[(0, "A", 36.0), (0, "Z", 56.0)], &[(0, 20.0)]),
             (
                 "App",
@@ -4409,6 +4409,9 @@ mod tests {
             // on the break's line, and the next paragraph starts the next page.
             ("Agp", &[(0, "A", 36.0), (1, "Z", 36.0)], &[(0, 20.0)]),
             ("Acp", &[(0, "A", 36.0), (1, "Z", 36.0)], &[(0, 20.0)]),
+            // After a line break the paragraph's mark has a line of its own, and the picture
+            // at the end goes on it.
+            ("Abp", &[(0, "A", 36.0), (0, "Z", 76.0)], &[(0, 40.0)]),
             ("pA", &[(0, "A", 36.0), (0, "Z", 56.0)], &[(0, 20.0)]),
             (
                 "ApB",
