@@ -41,6 +41,11 @@ def part(parts, name):
     return ElementTree.fromstring(dict(parts)[name])
 
 
+def note_parts(parts):
+    """The names of a document's footnotes and endnotes parts, if it has them."""
+    return [name for name, _ in parts if name in ("word/footnotes.xml", "word/endnotes.xml")]
+
+
 def carlito_width(text, size=11):
     """The width in points of text in Carlito, Calibri's metric twin, at size points: the
     advances of hmtx for the glyphs that its (3, 1) cmap, of format 4, maps the text to."""
@@ -82,6 +87,20 @@ def carlito_width(text, size=11):
         index = min(glyph(ord(character)), metrics - 1)
         total += struct.unpack(">H", tables[b"hmtx"][4 * index : 4 * index + 2])[0]
     return total * size / units
+
+
+def carlito_line_height(size):
+    """The height in points of a single line of Carlito at size points, as Word sets one:
+    the ascent and descent of the OS/2 table's Windows metrics (Calibri's are the same)."""
+    data = CARLITO.read_bytes()
+    (count,) = struct.unpack(">H", data[4:6])
+    tables = {}
+    for i in range(count):
+        tag, _, offset, length = struct.unpack(">4sIII", data[12 + 16 * i : 28 + 16 * i])
+        tables[tag] = data[offset : offset + length]
+    (units,) = struct.unpack(">H", tables[b"head"][18:20])
+    ascent, descent = struct.unpack(">HH", tables[b"OS/2"][74:78])
+    return (ascent + descent) * size / units
 
 
 class CommittedDocuments(unittest.TestCase):
@@ -335,7 +354,7 @@ class Packages(unittest.TestCase):
             parts = rules.parts(doc)
             table = {f.get(f"{W}name") for f in part(parts, "word/fontTable.xml")}
             named = set()
-            for name in ("word/document.xml", "word/styles.xml"):
+            for name in ("word/document.xml", "word/styles.xml", *note_parts(parts)):
                 for fonts in part(parts, name).iter(f"{W}rFonts"):
                     for attribute, value in fonts.attrib.items():
                         # w:hint names a slot, not a font.
@@ -444,6 +463,7 @@ class Packages(unittest.TestCase):
             roots = [part(parts, "word/document.xml"), styles]
             if any(name == "word/numbering.xml" for name, _ in parts):
                 roots.append(part(parts, "word/numbering.xml"))
+            roots += [part(parts, name) for name in note_parts(parts)]
             named = {
                 n.get(f"{W}val")
                 for root in roots
@@ -532,11 +552,15 @@ class Packages(unittest.TestCase):
                 "vAlign", "noEndnote", "titlePg", "textDirection", "bidi", "rtlGutter",
                 "docGrid", "printerSettings", "sectPrChange",
             ],
+            # A section's footnote and endnote properties, 17.11.11 and 17.11.5.
+            "footnotePr": ["pos", "numFmt", "numStart", "numRestart"],
+            "endnotePr": ["pos", "numFmt", "numStart", "numRestart"],
         }
         for doc in self.docs:
             parts = rules.parts(doc)
             for name, _ in parts:
-                stories = ("word/document.xml", "word/styles.xml", "word/numbering.xml")
+                stories = ("word/document.xml", "word/styles.xml", "word/numbering.xml",
+                           "word/footnotes.xml", "word/endnotes.xml")
                 if name not in stories and not name.startswith(("word/header", "word/footer")):
                     continue
                 root = part(parts, name)
@@ -562,7 +586,8 @@ class Packages(unittest.TestCase):
         # row's w:tblPrEx at most.
         for doc in self.docs:
             for name, _ in rules.parts(doc):
-                if not name.startswith(("word/document.xml", "word/header", "word/footer")):
+                if not name.startswith(("word/document.xml", "word/header", "word/footer",
+                                        "word/footnotes", "word/endnotes")):
                     continue
                 root = part(rules.parts(doc), name)
                 for parent, props in (("p", "pPr"), ("r", "rPr"), ("tc", "tcPr"), ("tr", "trPr")):
@@ -4134,6 +4159,403 @@ class Packages(unittest.TestCase):
         entries = {f.get(f"{W}name"): f for f in table.iter(f"{W}font")}
         self.assertIn("Noto Sans", entries)
         self.assertEqual(list(entries["Officewright Test DMAP"]), [])
+
+    def test_note_parts_are_typed_and_every_reference_resolves(self):
+        # ECMA-376 §17.11: a document with notes has a footnotes and an endnotes part, each
+        # with its separator and continuation separator, which the document-wide properties
+        # of the settings name; Word matches each reference to its note by id (MS-OI29500
+        # 2.1.304 a), and the notes start with their mark in the reference style.
+        relationship = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+        content = "application/vnd.openxmlformats-officedocument.wordprocessingml."
+        documents_with_notes = 0
+        for doc in self.docs:
+            listed = rules.parts(doc)
+            parts = dict(listed)
+            settings = ElementTree.fromstring(parts["word/settings.xml"])
+            if not (doc.footnotes or doc.endnotes):
+                self.assertEqual(note_parts(listed), [], doc.name)
+                self.assertIsNone(settings.find(f"{W}footnotePr"), doc.name)
+                self.assertIsNone(settings.find(f"{W}endnotePr"), doc.name)
+                continue
+            documents_with_notes += 1
+            self.assertEqual(note_parts(listed), ["word/footnotes.xml", "word/endnotes.xml"])
+            types = ElementTree.fromstring(parts["[Content_Types].xml"])
+            overrides = {e.get("PartName"): e.get("ContentType")
+                         for e in types.iter(f"{CT}Override")}
+            rels = {r.get("Target"): r.get("Type") for r in
+                    ElementTree.fromstring(parts["word/_rels/document.xml.rels"])
+                    .iter(f"{PR}Relationship")}
+            body = ElementTree.fromstring(parts["word/document.xml"])
+            # The custom marks of the references (w:customMarkFollows): the text of the run
+            # after the reference's run.
+            custom = {}
+            for p in body.iter(f"{W}p"):
+                runs = p.findall(f"{W}r")
+                for k, r in enumerate(runs):
+                    for ref in r:
+                        if ref.get(f"{W}customMarkFollows") == "1":
+                            custom[(ref.tag, ref.get(f"{W}id"))] = runs[k + 1].find(f"{W}t").text
+            for kind, notes in (("footnote", doc.footnotes), ("endnote", doc.endnotes)):
+                name = f"word/{kind}s.xml"
+                self.assertEqual(overrides[f"/{name}"], f"{content}{kind}s+xml", doc.name)
+                self.assertEqual(rels[f"{kind}s.xml"], f"{relationship}{kind}s", doc.name)
+                root = ElementTree.fromstring(parts[name])
+                self.assertEqual(root.tag, f"{W}{kind}s", doc.name)
+                entries = root.findall(f"{W}{kind}")
+                by_id = {e.get(f"{W}id"): e for e in entries}
+                self.assertEqual(len(by_id), len(entries), f"{doc.name}: ids repeat")
+                special = {i: e.get(f"{W}type") for i, e in by_id.items() if e.get(f"{W}type")}
+                expected = {"-1": "separator", "0": "continuationSeparator"}
+                if kind == "footnote" and doc.continuation_notice:
+                    expected[str(len(notes) + 1)] = "continuationNotice"
+                self.assertEqual(special, expected, doc.name)
+                for i, mark in (("-1", "separator"), ("0", "continuationSeparator")):
+                    self.assertIsNotNone(by_id[i].find(f"{W}p/{W}r/{W}{mark}"), doc.name)
+                # The settings name the special notes, and only them.
+                named = [e.get(f"{W}id") for e in settings.find(f"{W}{kind}Pr")
+                         if e.tag == f"{W}{kind}"]
+                self.assertEqual(named, sorted(special, key=int), doc.name)
+                # Each note is referenced once, from the body, by a run in the reference style.
+                normal = [i for i in by_id if i not in special]
+                self.assertEqual(normal, [str(n) for n in range(1, len(notes) + 1)], doc.name)
+                references = [r.get(f"{W}id") for r in body.iter(f"{W}{kind}Reference")]
+                self.assertEqual(sorted(references, key=int), normal, doc.name)
+                style = f"{kind.capitalize()}Reference"
+                for r in body.iter(f"{W}r"):
+                    if r.find(f"{W}{kind}Reference") is not None:
+                        self.assertEqual(r.find(f"{W}rPr/{W}rStyle").get(f"{W}val"), style)
+                self.assertIsNone(body.find(f".//{W}{kind}Ref"), doc.name)
+                for i in normal:
+                    paragraphs = by_id[i].findall(f"{W}p")
+                    for p in paragraphs:
+                        self.assertEqual(p.find(f"{W}pPr/{W}pStyle").get(f"{W}val"),
+                                         f"{kind.capitalize()}Text", doc.name)
+                    first = paragraphs[0].find(f"{W}r")
+                    self.assertEqual(first.find(f"{W}rPr/{W}rStyle").get(f"{W}val"), style)
+                    mark = custom.get((f"{W}{kind}Reference", i))
+                    if mark is None:
+                        self.assertIsNotNone(first.find(f"{W}{kind}Ref"), f"{doc.name}: {i}")
+                    else:
+                        # A note with a custom mark shows that mark, not its number.
+                        self.assertIsNone(by_id[i].find(f".//{W}{kind}Ref"), doc.name)
+                        self.assertEqual(first.find(f"{W}t").text, mark, doc.name)
+        self.assertEqual(documents_with_notes, 14)
+
+    def test_settings_follow_the_schema_order(self):
+        # CT_Settings 17.15.1.78 is a sequence (here the elements the script writes), and so
+        # are the document-wide footnote and endnote properties (17.11.12 and 17.11.4): first
+        # the properties a section can give its notes too, then the special notes.
+        order = ["zoom", "defaultTabStop", "evenAndOddHeaders", "characterSpacingControl",
+                 "footnotePr", "endnotePr", "compat", "themeFontLang", "clrSchemeMapping",
+                 "decimalSymbol", "listSeparator"]
+        for doc in self.docs:
+            settings = part(rules.parts(doc), "word/settings.xml")
+            tags = [child.tag.replace(W, "") for child in settings]
+            for tag in tags:
+                self.assertIn(tag, order, doc.name)
+            self.assertEqual([order.index(t) for t in tags],
+                             sorted(order.index(t) for t in tags), f"{doc.name}: {tags}")
+            self.assertEqual(len(tags), len(set(tags)), doc.name)
+            for kind in ("footnote", "endnote"):
+                props = settings.find(f"{W}{kind}Pr")
+                if props is None:
+                    continue
+                note_order = ["pos", "numFmt", "numStart", "numRestart", kind]
+                tags = [child.tag.replace(W, "") for child in props]
+                self.assertEqual([note_order.index(t) for t in tags],
+                                 sorted(note_order.index(t) for t in tags), f"{doc.name}: {tags}")
+                # Three special notes at most: separator, continuation separator and notice.
+                self.assertLessEqual(tags.count(kind), 3, doc.name)
+
+    def test_refuses_note_properties_without_notes(self):
+        doc = next(doc for doc in self.docs if doc.name == "E-line-exact")
+        for field, value in (("footnote_props", rules.note_props(pos="beneathText")),
+                             ("endnote_props", rules.note_props(pos="sectEnd")),
+                             ("continuation_notice", rules.para(rules.run("notice")))):
+            mistyped = dataclasses.replace(doc, **{field: value})
+            with self.assertRaisesRegex(ValueError, "note properties without notes"):
+                rules.settings_xml(mistyped)
+
+    def test_note_documents_have_the_markup_their_labels_name(self):
+        by_name = {doc.name: doc for doc in self.docs}
+        exact_12 = "240"
+
+        def load(name):
+            doc = by_name[name]
+            parts = dict(rules.parts(doc))
+            body = ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+            settings = ElementTree.fromstring(parts["word/settings.xml"])
+            notes = {kind: {e.get(f"{W}id"): e for e in
+                            ElementTree.fromstring(parts[f"word/{kind}s.xml"]).findall(f"{W}{kind}")}
+                     for kind in ("footnote", "endnote")}
+            return body, settings, notes
+
+        def texts(element):
+            return "".join(t.text or "" for t in element.iter(f"{W}t"))
+
+        def refs(element, kind="footnote"):
+            return [r.get(f"{W}id") for r in element.iter(f"{W}{kind}Reference")]
+
+        def note_lines(note):
+            """The lines of a note of one paragraph: its line breaks and one."""
+            (p,) = note.findall(f"{W}p")
+            return len(p.findall(f".//{W}br")) + 1
+
+        def props(element, kind="footnote"):
+            """The note properties of a w:sectPr or the settings, as {name: value}."""
+            found = element.find(f"{W}{kind}Pr")
+            if found is None:
+                return {}
+            return {c.tag.replace(W, ""): c.get(f"{W}val") for c in found if c.tag != f"{W}{kind}"}
+
+        def sections(body):
+            """Each section's paragraphs and w:sectPr."""
+            result, current = [], []
+            for p in body.findall(f"{W}p"):
+                current.append(p)
+                sect = p.find(f"{W}pPr/{W}sectPr")
+                if sect is not None:
+                    result.append((current, sect))
+                    current = []
+            result.append((current, body.find(f"{W}sectPr")))
+            return result
+
+        def pages(paragraphs):
+            """The paragraphs of each page, as w:pageBreakBefore starts them."""
+            result = []
+            for p in paragraphs:
+                if not result or p.find(f"{W}pPr/{W}pageBreakBefore") is not None:
+                    result.append([])
+                result[-1].append(p)
+            return result
+
+        def line(p):
+            spacing = p.find(f"{W}pPr/{W}spacing")
+            return spacing.get(f"{W}lineRule"), int(spacing.get(f"{W}line"))
+
+        # E-footnote-separator: a note from line 2 of three, then one from Line 10 of a page of
+        # 70 lines of 12 pt.
+        body, settings, notes = load("E-footnote-separator")
+        first, second = pages(body.findall(f"{W}p"))
+        self.assertEqual([texts(p) for p in first[1:]], [
+            "Body line 2 holds the reference.", "Body line 3, the last line of the text."])
+        self.assertEqual([refs(p) for p in first], [[], ["1"], []])
+        self.assertTrue(texts(second[0]).startswith("Case 02: "))
+        lines_ = second[1:71]
+        self.assertEqual([texts(p) for p in lines_],
+                         [f"Line {k:02d}" + (" holds a reference" if k == 10 else "")
+                          for k in range(1, 71)])
+        self.assertEqual({line(p) for p in lines_}, {("exact", 240)})
+        self.assertEqual([k for k, p in enumerate(lines_, 1) if refs(p)], [10])
+        self.assertIn("Line 10", texts(second[0]))
+        self.assertGreater(len(lines_), rules.LINES_PER_PAGE)
+        self.assertEqual([note_lines(notes["footnote"][i]) for i in ("1", "2")], [1, 1])
+
+        # E-footnote-two-notes: the references of each case, the three lines of note 1, the
+        # spacing of notes 5 and 6, and the two paragraphs of note 7.
+        body, settings, notes = load("E-footnote-two-notes")
+        cases = pages(body.findall(f"{W}p"))
+        self.assertEqual([[refs(p) for p in page[1:4]] for page in cases], [
+            [["1"], [], ["2"]], [["3", "4"], [], []], [["5"], ["6"], []], [["7"], [], []]])
+        self.assertIn("lines 1 and 3; the first note has three lines", texts(cases[0][0]))
+        self.assertEqual(note_lines(notes["footnote"]["1"]), 3)
+        self.assertIn("the same line", texts(cases[1][0]))
+        self.assertIn("6 pt before and after", texts(cases[2][0]))
+        for i in ("5", "6"):
+            spacing = notes["footnote"][i].find(f"{W}p/{W}pPr/{W}spacing")
+            self.assertEqual((spacing.get(f"{W}before"), spacing.get(f"{W}after")), ("120", "120"))
+        self.assertIsNone(notes["footnote"]["4"].find(f"{W}p/{W}pPr/{W}spacing"))
+        self.assertIn("two paragraphs", texts(cases[3][0]))
+        self.assertEqual(len(notes["footnote"]["7"].findall(f"{W}p")), 2)
+
+        # E-footnote-no-room: label, spacer, reference line and a line of 48 pt fill the body
+        # but for the room the label names; that room holds the separator (a line of 11 pt)
+        # and one line of the note (10 pt) at 32 pt, not two lines, and neither at 10 pt.
+        separator, note_line = carlito_line_height(11), carlito_line_height(10)
+        self.assertLess(separator + note_line, 32)
+        self.assertGreater(separator + 2 * note_line, 32)
+        self.assertGreater(separator + note_line, 10)
+        body, settings, notes = load("E-footnote-no-room")
+        cases = pages(body.findall(f"{W}p"))
+        self.assertEqual(len(cases), 3)
+        for n, case in enumerate(cases, 1):
+            label, room, reference, after = case[:4]
+            count, left = map(int, re.match(r"Case \d+: a (\d)-line note, (\d+) pt left",
+                                            texts(label)).groups())
+            self.assertEqual([line(p) for p in (label, reference)], [("exact", 240)] * 2)
+            self.assertEqual(texts(room), "")
+            self.assertEqual(line(room)[0], "exact")
+            self.assertEqual(240 + line(room)[1] + 240 + left * 20, rules.PAGE_H - 2 * rules.MARGIN)
+            self.assertEqual(refs(reference), [str(n)])
+            self.assertEqual(line(after), ("exact", 960))
+            self.assertGreater(48, left)
+            self.assertEqual(note_lines(notes["footnote"][str(n)]), count)
+
+        # E-footnote-long and -notice: a note of 40 lines, taller than half the body, from
+        # Line 03 of 60; the continuation notice in the second only.
+        half = (rules.PAGE_H - 2 * rules.MARGIN) / 40
+        for name, notice in (("E-footnote-long", False), ("E-footnote-long-notice", True)):
+            body, settings, notes = load(name)
+            paragraphs = body.findall(f"{W}p")
+            self.assertEqual([texts(p)[:7] for p in paragraphs[:60]],
+                             [f"Line {k:02d}" for k in range(1, 61)])
+            self.assertEqual([k for k, p in enumerate(paragraphs, 1) if refs(p)], [3])
+            self.assertEqual(note_lines(notes["footnote"]["1"]), 40)
+            self.assertGreater(40 * carlito_line_height(10), half)
+            self.assertIn("a footnote of 40 lines, taller than half a page, from Line 03",
+                          texts(paragraphs[0]))
+            self.assertEqual("continuation notice" in texts(paragraphs[0]), notice)
+            self.assertEqual("2" in notes["footnote"], notice, name)
+
+        # E-footnote-beneath: each section's placement is the one its label names, and the
+        # settings give none.
+        body, settings, notes = load("E-footnote-beneath")
+        self.assertEqual(props(settings), {})
+        placed = []
+        for paragraphs, sect in sections(body):
+            label = texts(paragraphs[0])
+            given = re.search(r"w:pos (\w+) in the section", label)
+            self.assertEqual(props(sect), {"pos": given.group(1)} if given else {}, label)
+            if not given:
+                self.assertIn("no w:footnotePr", label)
+                self.assertIsNone(sect.find(f"{W}footnotePr"))
+            self.assertEqual(len(refs(body)), 4)
+            self.assertEqual(sum(len(refs(p)) for p in paragraphs), 1, label)
+            placed.append(props(sect).get("pos"))
+        self.assertEqual(placed, ["beneathText", "sectEnd", "pageBottom", None])
+
+        # E-footnote-beneath-settings: beneath the text in the settings, nothing in the section.
+        body, settings, notes = load("E-footnote-beneath-settings")
+        self.assertEqual(props(settings), {"pos": "beneathText"})
+        ((paragraphs, sect),) = sections(body)
+        self.assertIsNone(sect.find(f"{W}footnotePr"))
+        self.assertIn("w:pos beneathText in the settings only", texts(paragraphs[0]))
+        self.assertEqual(refs(body), ["1"])
+
+        # E-footnote-numbering: each section's numbering as its label names it, the references
+        # on each of its pages, and the custom mark between two numbered notes.
+        body, settings, notes = load("E-footnote-numbering")
+        self.assertEqual(props(settings), {})
+        expected = [
+            ({"numFmt": "upperRoman", "numStart": "5"}, [2, 1]),
+            ({"numFmt": "decimal", "numRestart": "eachSect"}, [2]),
+            ({"numRestart": "continuous"}, [1]),
+            ({"numFmt": "chicago", "numRestart": "eachPage"}, [5, 2]),
+            ({"numFmt": "decimal", "numRestart": "eachSect"}, [3]),
+        ]
+        found = sections(body)
+        self.assertEqual(len(found), len(expected))
+        for (paragraphs, sect), (numbering, counts) in zip(found, expected):
+            label = texts(paragraphs[0])
+            self.assertEqual(props(sect), numbering, label)
+            self.assertEqual([sum(len(refs(p)) for p in page) for page in pages(paragraphs)],
+                             counts, label)
+            words = {"upperRoman": "upperRoman", "decimal": "decimal", "chicago": "chicago"}
+            if "numFmt" in numbering:
+                self.assertIn(words[numbering["numFmt"]], label)
+            else:
+                self.assertIn("no number format", label)
+            if "numStart" in numbering:
+                self.assertIn(f"from {numbering['numStart']}", label)
+            restart = {"eachSect": "restart in each section", "eachPage": "restart on each page",
+                       "continuous": "numbered on", None: "numbered on"}
+            self.assertIn(restart[numbering.get("numRestart")], label)
+        last = found[-1][0]
+        marked = [r for p in last for r in p.iter(f"{W}footnoteReference")]
+        self.assertEqual([r.get(f"{W}customMarkFollows") for r in marked], [None, "1", None])
+        self.assertIn("a custom mark between notes", texts(last[0]))
+
+        # E-footnote-numbering-settings: lower-case letters from 3, restarting on each page, in
+        # the settings; section 1 has no w:footnotePr, section 2 upper-case letters only.
+        body, settings, notes = load("E-footnote-numbering-settings")
+        self.assertEqual(props(settings),
+                         {"numFmt": "lowerLetter", "numStart": "3", "numRestart": "eachPage"})
+        (first, first_sect), (second, second_sect) = sections(body)
+        self.assertIsNone(first_sect.find(f"{W}footnotePr"))
+        self.assertIn("no w:footnotePr in the section", texts(first[0]))
+        self.assertEqual(props(second_sect), {"numFmt": "upperLetter"})
+        self.assertIn("upperLetter in the section", texts(second[0]))
+        self.assertEqual([[sum(len(refs(p)) for p in page) for page in pages(paragraphs)]
+                          for paragraphs in (first, second)], [[2, 1], [1, 1]])
+
+        # E-footnote-table: one reference in a table of one row, and one in line 3 and in
+        # line 18 of a row whose first 17 lines fit on page 1 after 41 lines.
+        body, settings, notes = load("E-footnote-table")
+        tables = body.findall(f"{W}tbl")
+        self.assertEqual([refs(t) for t in tables], [["1"], ["2"], ["3"]])
+        self.assertEqual(refs(body), ["1", "2", "3"])
+        top = [p for p in body if p.tag == f"{W}p"]
+        labels = [texts(p) for p in top if texts(p).startswith("Case ")]
+        self.assertEqual(len(labels), 3)
+        for table, label in zip(tables[1:], labels[1:]):
+            first_cell = table.find(f"{W}tr/{W}tc")
+            cell_lines = first_cell.findall(f"{W}p")
+            self.assertEqual(len(cell_lines), 20)
+            self.assertEqual({line(p) for p in cell_lines}, {("exact", 240)})
+            (at,) = [k for k, p in enumerate(cell_lines, 1) if refs(p)]
+            self.assertIn(f"in line {at:02d} of a row cut across pages", label)
+            # The label and 40 filler lines of 12 pt right before the table, as crossing_case().
+            elements = list(body)
+            start = next(k for k, e in enumerate(elements) if texts(e) == label)
+            between = elements[start + 1:elements.index(table)]
+            self.assertEqual([texts(p) for p in between],
+                             [f"Filler {k:02d}" for k in range(1, 41)])
+            self.assertEqual({line(p) for p in [elements[start], *between]}, {("exact", 240)})
+            self.assertEqual(rules.LINES_PER_PAGE - 41, 17)
+            self.assertEqual(at <= 17, at == 3)
+
+        # E-endnote-doc-end: no placement anywhere (the end of the document), three endnotes,
+        # the last of two lines, and no footnote.
+        body, settings, notes = load("E-endnote-doc-end")
+        self.assertEqual(props(settings, "endnote"), {})
+        self.assertEqual([props(s, "endnote") for _, s in sections(body)], [{}, {}])
+        self.assertEqual(refs(body, "endnote"), ["1", "2", "3"])
+        self.assertEqual(refs(body), [])
+        self.assertEqual([note_lines(notes["endnote"][i]) for i in "123"], [1, 1, 2])
+
+        # E-endnote-doc-end-full: 58 lines of 12 pt fill the page, references in Line 01 and
+        # Line 57.
+        body, settings, notes = load("E-endnote-doc-end-full")
+        paragraphs = body.findall(f"{W}p")
+        self.assertEqual(len(paragraphs), rules.LINES_PER_PAGE)
+        self.assertEqual({line(p) for p in paragraphs}, {("exact", 240)})
+        self.assertLessEqual(rules.LINES_PER_PAGE * 12, rules.BODY_HEIGHT)
+        self.assertGreater((rules.LINES_PER_PAGE + 1) * 12, rules.BODY_HEIGHT)
+        self.assertEqual([texts(p) for p in paragraphs if refs(p, "endnote")],
+                         ["Line 01 holds a reference", "Line 57 holds a reference"])
+        self.assertIn("endnotes from lines 01 and 57", texts(paragraphs[0]))
+
+        # E-endnote-section-end and -section: endnotes at the end of each section, by the
+        # settings or by each section; section 2 is continuous, section 3 on the next page.
+        for name, in_settings in (("E-endnote-section-end", True),
+                                  ("E-endnote-section-end-section", False)):
+            body, settings, notes = load(name)
+            at_end = {"pos": "sectEnd"}
+            self.assertEqual(props(settings, "endnote"), at_end if in_settings else {}, name)
+            found = sections(body)
+            self.assertEqual([props(s, "endnote") for _, s in found],
+                             [{} if in_settings else at_end] * 3, name)
+            kinds = [s.find(f"{W}type") for _, s in found]
+            self.assertEqual([k.get(f"{W}val") if k is not None else None for k in kinds],
+                             [None, "continuous", None])
+            self.assertEqual([len(refs(p, "endnote")) for p in body.findall(f"{W}p")
+                              if refs(p, "endnote")], [1, 1, 1, 1])
+            where = "the settings" if in_settings else "each section"
+            self.assertIn(f"by {where}", texts(found[0][0][0]))
+
+        # Every paragraph of these documents' bodies fits one line in Carlito, Calibri's twin,
+        # so that the lines they count are the lines Word draws.
+        # A cell is half the text's width, less its margins of 108 twips on either side.
+        width = rules.TEXT_W / 20
+        cell_width = (rules.TEXT_W // 2 - 2 * 108) / 20
+        for name in by_name:
+            if not name.startswith(("E-footnote-", "E-endnote-")):
+                continue
+            body, _, _ = load(name)
+            in_cells = {id(p) for tc in body.iter(f"{W}tc") for p in tc.iter(f"{W}p")}
+            for p in body.iter(f"{W}p"):
+                room = cell_width if id(p) in in_cells else width
+                self.assertLess(carlito_width(texts(p)) + 12, room, f"{name}: {texts(p)}")
 
     def test_pictures_are_typed_png_parts_that_resolve(self):
         # Every VML picture of every document is Word's picture frame, and every VML text box
