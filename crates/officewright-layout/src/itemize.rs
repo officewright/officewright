@@ -1169,6 +1169,22 @@ mod tests {
         let (itemized, _, _) = setup.run(&[Inline::text("i\u{DF}", turkish)]);
         assert_eq!(itemized.text, "\u{130}SS");
         assert_eq!(itemized.source, "i\u{DF}");
+        // In small capitals they stand for those capitals.
+        let turkish_small = setup.style(
+            plain(TEST)
+                .with_small_caps(true)
+                .with_language(Language::default().with_latin(Some("tr-TR".into()))),
+        );
+        let (itemized, _, _) = setup.run(&[Inline::text("i\u{DF}", turkish_small)]);
+        assert_eq!(itemized.text, "\u{130}SS");
+        assert_eq!(itemized.source, "\u{130}SS");
+        // Lower-case text in a symbol font that is not installed: small capitals draw the
+        // Greek capitals its capitals stand for, and the letters stand for the capitals of
+        // the letters typed, as small capitals make them.
+        let symbol_small = setup.style(plain("Symbol").with_small_caps(true));
+        let (itemized, _, _) = setup.run(&[Inline::text("ab", symbol_small)]);
+        assert_eq!(itemized.text, "\u{391}\u{392}");
+        assert_eq!(itemized.source, "AB");
     }
 
     #[test]
