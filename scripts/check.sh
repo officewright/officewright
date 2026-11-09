@@ -52,6 +52,7 @@ linux)
 	need pdftotext "apt install poppler-utils"
 	need pdffonts "apt install poppler-utils"
 	need pdftoppm "apt install poppler-utils"
+	need pdfinfo "apt install poppler-utils"
 	need cc "apt install gcc"
 	need c++ "apt install g++"
 	need nm "apt install binutils"
@@ -62,6 +63,7 @@ macos)
 	need pdftotext "brew install poppler"
 	need pdffonts "brew install poppler"
 	need pdftoppm "brew install poppler"
+	need pdfinfo "brew install poppler"
 	need cc "xcode-select --install"
 	need c++ "xcode-select --install"
 	need nm "xcode-select --install"
@@ -214,13 +216,14 @@ scripts/check-capi.sh target/capi
 # The PDF bytes do not depend on the platform (the golden snapshot test checks them on
 # every OS), and Windows has no official poppler build, so this runs on Linux and macOS.
 if [ "$os" != windows ]; then
-	step "PDF output (qpdf, pdftotext, pdffonts, pdfimages, pdftoppm)"
+	step "PDF output (qpdf, pdftotext, pdffonts, pdfimages, pdftoppm, pdfinfo)"
 	cargo build -p officewright-cli
 	cargo build -p officewright-pdf --example primitives --example images --example embed_report \
-		--example synthetic
+		--example synthetic --example links
 	OW_CLI=${CARGO_TARGET_DIR:-target}/debug/officewright \
 		OW_PRIMITIVES=${CARGO_TARGET_DIR:-target}/debug/examples/primitives \
 		OW_SYNTHETIC=${CARGO_TARGET_DIR:-target}/debug/examples/synthetic \
+		OW_LINKS=${CARGO_TARGET_DIR:-target}/debug/examples/links \
 		OW_IMAGES=${CARGO_TARGET_DIR:-target}/debug/examples/images \
 		OW_EMBED_REPORT=${CARGO_TARGET_DIR:-target}/debug/examples/embed_report \
 		"$python" -B -m unittest discover -s tests/pdf-output -v
