@@ -412,6 +412,42 @@ mod tests {
     }
 
     #[test]
+    fn no_paragraph_gives_harfrust_a_run_of_a_face_refused_before() {
+        use crate::ir::{RunFonts, RunStyle};
+        use crate::shape::HARFRUST_CALLS;
+        // Issue #405: once a run of a face is refused, the layout's later paragraphs in
+        // it go to HarfRust neither to be shaped nor to be cut where a cluster starts: a
+        // run longer than the itemizer cuts runs at (4,096 bytes) is not shaped either.
+        let font = crate::testing::with_multiplied_a(crate::testing::minimal(), 64);
+        let book = crate::testing::book(vec![font]);
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let location = Location::default();
+        let mut lay_out_text = |text: &str| {
+            let paragraph = Paragraph::new(style).with_inlines([Inline::text(text, style)]);
+            let before = HARFRUST_CALLS.with(std::cell::Cell::get);
+            lay_out(
+                &document,
+                &paragraph,
+                Pt(400.0),
+                &mut fonts,
+                &mut shaper,
+                &location,
+            );
+            HARFRUST_CALLS.with(std::cell::Cell::get) - before
+        };
+        let long = " ".repeat(5000);
+        assert!(lay_out_text("A") > 0);
+        assert_eq!(lay_out_text(&long), 0);
+    }
+
+    #[test]
     fn the_space_between_two_paragraphs_is_the_larger_of_theirs() {
         // Word's renders of the CVs: 12 pt below and 12 pt above are 12.08 pt apart
         // (cv-en-academic-open), 6 and 14 are 14.05, 4 and 6 are 6.09, 2 and 6 are 5.89
