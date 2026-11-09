@@ -153,8 +153,8 @@ pub(crate) struct FieldValues {
     pub(crate) notes: Arc<NoteNumbers>,
 }
 
-// The values are compared and hashed by the fields that vary from page to page: the notes'
-// numbers are one table for the whole layout, compared by its address.
+// The values are compared by the fields that vary from page to page: the notes' numbers
+// are one table for the whole layout, compared by its address.
 impl PartialEq for FieldValues {
     fn eq(&self, other: &Self) -> bool {
         (self.page, &self.format, self.pages, self.section_pages)
@@ -164,13 +164,6 @@ impl PartialEq for FieldValues {
 }
 
 impl Eq for FieldValues {}
-
-impl std::hash::Hash for FieldValues {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        (self.page, &self.format, self.pages, self.section_pages).hash(state);
-        Arc::as_ptr(&self.notes).hash(state);
-    }
-}
 
 /// Itemizes `inlines` of a paragraph of `document`. Fonts are chosen through `fonts`,
 /// which also collects what to report; `location` is the paragraph's. Every field shows
@@ -367,10 +360,17 @@ impl Builder<'_, '_, '_> {
                 );
                 // The note's number, unless the text after it is the mark.
                 if !custom_mark {
-                    let number = self.fields.and_then(|values| values.notes.text(*note));
-                    if let Some(number) = number {
-                        let number = number.to_owned();
-                        self.text(&number, *style);
+                    if let Some(values) = self.fields {
+                        match values.notes.text(*note) {
+                            Some(number) => {
+                                let number = number.to_owned();
+                                self.text(&number, *style);
+                            }
+                            None if !values.notes.ignored(*note) => self.unsupported(
+                                "note references in headers and footers show no number",
+                            ),
+                            None => {}
+                        }
                     }
                 }
                 self.item(Item::NoteReference(path, *style));
