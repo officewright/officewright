@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use skrifa::charmap::Charmap;
 use skrifa::raw::tables::os2::{Os2, SelectionFlags};
+use skrifa::raw::types::Tag;
 use skrifa::raw::{FileRef, FontRef, ReadError, TableProvider};
 
 use crate::error::{Cause, Error, Result};
@@ -238,13 +239,18 @@ impl FontFace {
     /// permissions are never guessed. Character map subtables in formats or encodings
     /// that are not read are ignored.
     ///
+    /// A `DMAP` table (ISO/IEC 14496-22:2026) is not read, as Word maps characters
+    /// through `cmap` only: the face keeps a copy of the data whose table directory leaves
+    /// it out ([`data`](Self::data)), so that nothing that reads the face, a shaper
+    /// included, finds it.
+    ///
     /// # Errors
     ///
     /// [`Error::NotAFont`] if the data is not a font, [`Error::FaceIndexOutOfRange`] if
     /// there is no such face, and [`Error::MissingTable`], [`Error::MalformedTable`],
     /// [`Error::MalformedFace`] or [`Error::InvalidUnitsPerEm`] if the face is damaged.
     pub fn from_bytes(data: impl Into<Arc<[u8]>>, index: u32) -> Result<Self> {
-        let data = data.into();
+        let data = hide_dmap(data.into(), index)?;
         let face = Face::read(&font_ref(&data, index)?, index)?;
         Ok(Self(Arc::new(Inner {
             data,
@@ -268,6 +274,8 @@ impl FontFace {
     }
 
     /// The data the face was read from: the whole file, so for a collection all of it.
+    /// For a face whose font has a `DMAP` table it is a copy whose table directory leaves
+    /// that table out ([`from_bytes`](Self::from_bytes)); its bytes stay in the copy.
     pub fn data(&self) -> &[u8] {
         &self.0.data
     }
@@ -564,6 +572,83 @@ fn file_ref(data: &[u8]) -> Result<FileRef<'_>> {
     }
 }
 
+/// The tag of the `DMAP` table, which Skrifa's `Charmap` and HarfRust look characters up
+/// in before `cmap`.
+const DMAP: Tag = Tag::new(b"DMAP");
+
+/// `data` with every `DMAP` record of face `index`'s table directory left out: Word maps
+/// characters through `cmap` only (its reference of `E-dmap-font.docx` draws a font's
+/// `cmap` glyphs, not those its `DMAP` gives). The records after it move up and the
+/// directory's search fields follow; the table's bytes stay, unreferenced. A face without
+/// a `DMAP` table keeps `data` itself, and so does one that cannot be read, which reading
+/// the face then refuses.
+///
+/// # Errors
+///
+/// [`Error::MalformedFace`] if the face has a `DMAP` table but its directory does not fit
+/// in the data.
+fn hide_dmap(data: Arc<[u8]>, index: u32) -> Result<Arc<[u8]>> {
+    let has_dmap = font_ref(&data, index).is_ok_and(|font| font.table_data(DMAP).is_some());
+    if !has_dmap {
+        return Ok(data);
+    }
+    match without_records(&data, index, DMAP) {
+        Some(copy) => Ok(copy.into()),
+        None => Err(Error::MalformedFace {
+            face: index,
+            source: Cause::new("the table directory does not fit in the data"),
+        }),
+    }
+}
+
+/// A copy of `data` without the records of `tag` in face `index`'s table directory;
+/// `None` if the directory does not fit in the data.
+fn without_records(data: &[u8], index: u32, tag: Tag) -> Option<Vec<u8>> {
+    // A collection lists where each face's directory starts (OpenType, "Font Collections").
+    let start = if data.get(0..4)? == b"ttcf" {
+        let at = usize::try_from(index)
+            .ok()?
+            .checked_mul(4)?
+            .checked_add(12)?;
+        usize::try_from(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?)).ok()?
+    } else {
+        0
+    };
+    let count = usize::from(u16::from_be_bytes(
+        data.get(start + 4..start + 6)?.try_into().ok()?,
+    ));
+    let records = start.checked_add(12)?;
+    let end = records.checked_add(count.checked_mul(16)?)?;
+    let directory = data.get(records..end)?;
+    let kept: Vec<&[u8]> = directory
+        .chunks_exact(16)
+        .filter(|record| record.get(0..4) != Some(&tag.to_be_bytes()[..]))
+        .collect();
+    // searchRange, entrySelector and rangeShift for the records left, which readers
+    // compute again; past the 4095 records a u16 holds they are cut to 16 bits, as the
+    // format's own arithmetic would.
+    let kept_count = u32::try_from(kept.len()).ok()?;
+    let selector = kept_count.checked_ilog2().unwrap_or(0);
+    let range = if kept_count == 0 {
+        0
+    } else {
+        16_u32 << selector
+    };
+    let shift = (kept_count * 16).saturating_sub(range);
+    let mut copy = data.to_vec();
+    let mut header = Vec::with_capacity(8);
+    for field in [kept_count, range, selector, shift] {
+        header.extend_from_slice(&field.to_be_bytes()[2..]);
+    }
+    copy.get_mut(start + 4..start + 12)?
+        .copy_from_slice(&header);
+    let mut table = kept.concat();
+    // The records that are left over are zeros.
+    table.resize(end - records, 0);
+    copy.get_mut(records..end)?.copy_from_slice(&table);
+    Some(copy)
+}
+
 /// The face `index` of a font file or collection.
 pub(crate) fn font_ref(data: &[u8], index: u32) -> Result<FontRef<'_>> {
     match file_ref(data)? {
@@ -638,6 +723,98 @@ mod tests {
 
     fn load(font: &TestFont) -> Result<FontFace> {
         FontFace::from_bytes(font.build(), 0)
+    }
+
+    /// A font whose `cmap` maps A to D to glyphs 1 to 4, and, with `dmap`, a `DMAP` that
+    /// swaps A and B and maps U+E000 to glyph 4.
+    fn mapped(dmap: bool) -> Vec<u8> {
+        use testing::{cmap_of, format4};
+        let d = |code: u16, glyph: u16| glyph.wrapping_sub(code);
+        let cmap = cmap_of(&[(3, 1, format4(&[(0x41, 0x44, d(0x41, 1), 0)], &[]))]);
+        let font = TestFont::new("Test Map").with_table(b"cmap", cmap);
+        if !dmap {
+            return font.build();
+        }
+        let segments = [
+            (0x41, 0x41, d(0x41, 2), 0),
+            (0x42, 0x42, d(0x42, 1), 0),
+            (0xE000, 0xE000, d(0xE000, 4), 0),
+        ];
+        font.with_table(b"DMAP", cmap_of(&[(3, 1, format4(&segments, &[]))]))
+            .build()
+    }
+
+    #[test]
+    fn hides_dmap_from_everything_that_reads_the_face() {
+        // Word maps characters through `cmap` only (its reference of `E-dmap-font.docx`).
+        let (plain, with_dmap) = (mapped(false), mapped(true));
+        let face = FontFace::from_bytes(with_dmap.clone(), 0).unwrap();
+        assert_eq!(face.glyph_id('A'), Some(GlyphId::new(1)));
+        assert_eq!(face.glyph_id('B'), Some(GlyphId::new(2)));
+        assert_eq!(face.glyph_id('\u{E000}'), None);
+        // Whatever reads the face's data, as the layout's shaper does, finds no `DMAP`, and
+        // every other table where it was.
+        let hidden = font_ref(face.data(), 0).unwrap();
+        let original = font_ref(&with_dmap, 0).unwrap();
+        assert!(original.table_data(DMAP).is_some());
+        assert!(hidden.table_data(DMAP).is_none());
+        let tags: Vec<Tag> = original
+            .table_directory()
+            .table_records()
+            .iter()
+            .map(|record| record.tag())
+            .filter(|&tag| tag != DMAP)
+            .collect();
+        assert_eq!(tags.len(), 10);
+        for tag in tags {
+            let bytes =
+                |font: &FontRef<'_>| font.table_data(tag).map(|data| data.as_bytes().to_vec());
+            assert_eq!(bytes(&hidden), bytes(&original), "{tag}");
+        }
+        assert_eq!(
+            Charmap::new(&hidden).map('B').map(|glyph| glyph.to_u32()),
+            Some(2)
+        );
+        // The directory's count and search fields are those of the same font without
+        // `DMAP`, and the record left over is zeros.
+        assert_eq!(face.data().get(4..12), plain.get(4..12));
+        assert_eq!(
+            face.data().get(12 + 16 * 10..12 + 16 * 11),
+            Some(&[0; 16][..])
+        );
+        assert_eq!(face.data().len(), with_dmap.len());
+
+        // A face without `DMAP` keeps the data it was given, uncopied.
+        let shared: Arc<[u8]> = plain.into();
+        let face = FontFace::from_bytes(shared.clone(), 0).unwrap();
+        assert!(std::ptr::eq(face.data(), &*shared));
+    }
+
+    #[test]
+    fn hides_dmap_in_the_face_of_a_collection_that_has_it() {
+        let ttc: Arc<[u8]> = testing::collection(&[mapped(false), mapped(true)]).into();
+        let first = FontFace::from_bytes(ttc.clone(), 0).unwrap();
+        assert!(std::ptr::eq(first.data(), &*ttc));
+        let second = FontFace::from_bytes(ttc.clone(), 1).unwrap();
+        assert_eq!(second.glyph_id('A'), Some(GlyphId::new(1)));
+        assert!(
+            font_ref(second.data(), 1)
+                .unwrap()
+                .table_data(DMAP)
+                .is_none()
+        );
+        // The other face of the copy is as it was.
+        assert_eq!(
+            font_ref(second.data(), 0)
+                .unwrap()
+                .table_directory()
+                .num_tables(),
+            10
+        );
+        assert_eq!(
+            second.data().get(..12 + 4 * 2 + 12),
+            ttc.get(..12 + 4 * 2 + 12)
+        );
     }
 
     #[test]

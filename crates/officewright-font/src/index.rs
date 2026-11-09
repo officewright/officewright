@@ -61,8 +61,8 @@ const MAX_FACES: u32 = 1024;
 /// The most named instances read from one variable font; real ones have a few dozen.
 const MAX_INSTANCES: usize = 256;
 
-/// The largest `cmap` or `DMAP` table the coverage of a face is read from. Fonts with the
-/// whole of Unicode need a few hundred kilobytes.
+/// The largest `cmap` table the coverage of a face is read from. Fonts with the whole of
+/// Unicode need a few hundred kilobytes.
 const MAX_CMAP: u32 = 16 << 20;
 
 /// How much reading the coverage of one file's faces may cost, all faces together.
@@ -71,7 +71,7 @@ pub(crate) struct CoverageLimits {
     /// Bytes read, table directories included.
     pub(crate) read: u64,
     /// Segments and groups looked at, and code points of format 4 segments that read the
-    /// glyph ID array; see [`Coverage::of_tables`].
+    /// glyph ID array; see [`Coverage::of_cmap`].
     pub(crate) steps: u64,
     /// Ranges of code points kept.
     pub(crate) ranges: usize,
@@ -90,10 +90,10 @@ impl CoverageLimits {
 /// The characters each of `faces` of a font file maps to a glyph, as
 /// [`FontFace::char_map`](crate::FontFace::char_map) maps them, in the order of `faces`.
 ///
-/// It reads like the index: the table directories, the `cmap` and `DMAP` tables and the
-/// start of the `maxp` tables, nothing else, within `limits` for the whole file. Faces
-/// that share these tables, as the faces of a collection usually do, share one coverage.
-/// A face that cannot be read, or would go past the limits, covers nothing.
+/// It reads like the index: the table directories, the `cmap` tables and the start of
+/// the `maxp` tables, nothing else, within `limits` for the whole file. Faces that share
+/// their `cmap` and `maxp` tables, as the faces of a collection usually do, share one
+/// coverage. A face that cannot be read, or would go past the limits, covers nothing.
 pub(crate) fn read_coverages<R: Read + Seek>(
     reader: &mut R,
     faces: &[u32],
@@ -118,9 +118,9 @@ pub(crate) fn read_coverages<R: Read + Seek>(
         .collect()
 }
 
-/// Where a face's `cmap` table, the part of its `maxp` table that is read and its `DMAP`
-/// table, if it has one, are in the file.
-type TablesKey = (u32, u32, u32, u32, Option<(u32, u32)>);
+/// Where a face's `cmap` table and the part of its `maxp` table that is read are in the
+/// file.
+type TablesKey = (u32, u32, u32, u32);
 
 /// The coverage of one face; `None` if it covers nothing.
 fn read_face_coverage<R: Read + Seek>(
@@ -176,13 +176,7 @@ fn read_face_coverage<R: Read + Seek>(
     let (maxp_offset, maxp_len) = record(b"maxp")?;
     // numGlyphs is at bytes 4 and 5; the parser wants the whole table of its version.
     let maxp_len = maxp_len.min(32);
-    let key = (
-        cmap_offset,
-        cmap_len,
-        maxp_offset,
-        maxp_len,
-        record(b"DMAP"),
-    );
+    let key = (cmap_offset, cmap_len, maxp_offset, maxp_len);
     if let Some(coverage) = known.get(&key) {
         return coverage.clone();
     }
@@ -191,13 +185,13 @@ fn read_face_coverage<R: Read + Seek>(
     coverage
 }
 
-/// The coverage of the `cmap`, `maxp` and `DMAP` tables at `key`.
+/// The coverage of the `cmap` and `maxp` tables at `key`.
 fn read_tables_coverage<R: Read + Seek>(
     file: &mut BoundedReader<'_, R>,
-    (cmap_offset, cmap_len, maxp_offset, maxp_len, dmap): TablesKey,
+    (cmap_offset, cmap_len, maxp_offset, maxp_len): TablesKey,
     allowance: &mut Allowance,
 ) -> Option<Coverage> {
-    if cmap_len > MAX_CMAP || dmap.is_some_and(|(_, dmap_len)| dmap_len > MAX_CMAP) {
+    if cmap_len > MAX_CMAP {
         return None;
     }
     let maxp = file
@@ -207,11 +201,7 @@ fn read_tables_coverage<R: Read + Seek>(
     let cmap = file
         .read_at(u64::from(cmap_offset), u64::from(cmap_len))
         .ok()??;
-    let dmap = match dmap {
-        Some((offset, len)) => Some(file.read_at(u64::from(offset), u64::from(len)).ok()??),
-        None => None,
-    };
-    Coverage::of_tables(&cmap, dmap.as_deref(), glyph_count, allowance)
+    Coverage::of_cmap(&cmap, glyph_count, allowance)
 }
 
 /// Why a font file could not be indexed.
@@ -912,17 +902,17 @@ mod tests {
     }
 
     #[test]
-    fn faces_that_share_cmap_but_not_dmap_count_apart() {
-        // Face 1 shares face 0's `cmap` and `maxp`, but its `DMAP` maps A to a glyph past
-        // the font, which hides `cmap`'s A.
+    fn coverage_reads_cmap_whatever_dmap_maps() {
+        // Face 1 shares face 0's `cmap` and `maxp`, and its `DMAP` maps A to a glyph past
+        // the font. `DMAP` is not read, as Word does not read it: both cover `cmap`'s A.
         let dmap = testing::cmap_format4(&[(0x41, 0x41, 4000_u16.wrapping_sub(0x41))]);
         let plain = TestFont::new("Test Sans").build();
-        let hidden = TestFont::new("Test Sans").with_table(b"DMAP", dmap).build();
-        let mut ttc = testing::collection(&[plain, hidden]);
+        let with_dmap = TestFont::new("Test Sans").with_table(b"DMAP", dmap).build();
+        let mut ttc = testing::collection(&[plain, with_dmap]);
         share_table(&mut ttc, b"cmap", 0, 1);
         share_table(&mut ttc, b"maxp", 0, 1);
-        assert_eq!(covers_a(&ttc, &[0, 1]), [true, false]);
-        assert_eq!(covers_a(&ttc, &[1, 0]), [false, true]);
+        assert_eq!(covers_a(&ttc, &[0, 1]), [true, true]);
+        assert_eq!(covers_a(&ttc, &[1, 0]), [true, true]);
     }
 
     /// `font` with its `tag` table moved to the end of the file, followed by zeros up to
@@ -949,19 +939,10 @@ mod tests {
             covers_a(&moved(font(), b"cmap", MAX_CMAP + 1), &[0]),
             [false]
         );
-        // The same for `DMAP`, which maps only B here, so A is `cmap`'s.
+        // A `DMAP` table is not read, however large.
         let dmap = testing::cmap_format4(&[(0x42, 0x42, 2_u16.wrapping_sub(0x42))]);
-        let font = || {
-            TestFont::new("Test Sans")
-                .with_table(b"DMAP", dmap.clone())
-                .build()
-        };
-        assert_eq!(covers_a(&moved(font(), b"DMAP", 4096), &[0]), [true]);
-        assert_eq!(covers_a(&moved(font(), b"DMAP", MAX_CMAP), &[0]), [true]);
-        assert_eq!(
-            covers_a(&moved(font(), b"DMAP", MAX_CMAP + 1), &[0]),
-            [false]
-        );
+        let font = TestFont::new("Test Sans").with_table(b"DMAP", dmap).build();
+        assert_eq!(covers_a(&moved(font, b"DMAP", MAX_CMAP + 1), &[0]), [true]);
     }
 
     fn cause(err: &Error) -> String {

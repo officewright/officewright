@@ -632,6 +632,48 @@ mod tests {
     }
 
     #[test]
+    fn a_font_s_dmap_is_not_read_as_word_does_not_read_it() {
+        // A `DMAP` table (the layout of `cmap`) that maps A to glyph 4, Á. Word maps
+        // characters through `cmap` only (its reference of `E-dmap-font.docx`), and so does
+        // the shaper: A stays glyph 2.
+        let be =
+            |values: &[u16]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        // Format 4 with two segments, A and the closing U+FFFF: endCode, a pad, startCode,
+        // idDelta, idRangeOffset.
+        let subtable = be(&[
+            4,
+            32,
+            0,
+            4,
+            4,
+            1,
+            0,
+            0x41,
+            0xFFFF,
+            0,
+            0x41,
+            0xFFFF,
+            4_u16.wrapping_sub(0x41),
+            1,
+            0,
+            0,
+        ]);
+        let mut dmap = be(&[0, 1, 3, 1, 0, 12]);
+        dmap.extend(subtable);
+        let font = crate::testing::with_table(crate::testing::minimal(), b"DMAP", &dmap);
+        let face = crate::testing::face(font);
+        assert_eq!(face.glyph_id('A'), Some(GlyphId::new(2)));
+        let shaped = shape(
+            &ShapingFace::new(face),
+            "A",
+            &ShapeRequest::default(),
+            &mut Plans::default(),
+        );
+        assert!(!shaped.is_nominal());
+        assert_eq!(ids(&shaped), [(2, 0, 600)]);
+    }
+
+    #[test]
     fn a_run_of_more_glyphs_than_any_writing_system_needs_is_shaped_nominally() {
         // Issue #403: a font whose layout tables turn `A` into 1,000 glyphs. No writing
         // system needs that many glyphs a character, so the run is shaped from the
