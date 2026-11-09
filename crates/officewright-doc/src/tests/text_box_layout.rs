@@ -771,3 +771,86 @@ fn translates_tables_nested_to_the_limit_around_and_in_a_text_box_on_a_small_sta
     });
     assert_eq!(kept, (half, half));
 }
+
+#[test]
+fn keeps_the_note_references_after_a_text_box_and_leaves_out_those_in_it() {
+    // From the review of #519: a reference after a box must not be taken as in one.
+    let footnotes = format!(
+        r#"<w:footnotes xmlns:w="{W}">{}</w:footnotes>"#,
+        ["1", "2", "3"]
+            .map(|id| format!(r#"<w:footnote w:id="{id}"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t>Note {id}</w:t></w:r></w:p></w:footnote>"#))
+            .concat()
+    );
+    let reference = |id: &str| format!(r#"<w:r><w:footnoteReference w:id="{id}"/></w:r>"#);
+    let boxed = inline(&shape("", &format!("<w:p>{}</w:p>", reference("1")), ""));
+    let body = format!(
+        "<w:p>{boxed}{}</w:p><w:p>{}</w:p>",
+        reference("2"),
+        reference("3")
+    );
+    let translation = translate(&with_parts(
+        &body,
+        &[("footnotes", "footnotes.xml", footnotes)],
+    ));
+    assert_eq!(
+        listed(&translation),
+        [
+            "sections[0].blocks[0].inlines[0].content.blocks[0].inlines: a reference to a footnote inside a text box is left out"
+        ]
+    );
+    let paragraphs = paragraphs(&translation);
+    let references = |paragraph: &ir::Paragraph| {
+        paragraph
+            .inlines()
+            .iter()
+            .filter(|inline| matches!(inline, ir::Inline::NoteReference { .. }))
+            .count()
+    };
+    assert_eq!(
+        (references(paragraphs[0]), references(paragraphs[1])),
+        (1, 1)
+    );
+    assert!(text_box(&paragraphs[0].inlines()[0]).blocks().len() == 1);
+}
+
+#[test]
+fn translates_no_embedded_object_in_a_field_s_instruction() {
+    // From the review of #519: an object in an instruction shows nothing, and lists
+    // nothing; one without a preview elsewhere is listed.
+    let object = format!(r#"<w:r><w:object {NAMESPACES} w:dxaOrig="1440" w:dyaOrig="720"/></w:r>"#);
+    let body = format!(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>EMBED x</w:instrText></w:r>{object}<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Result</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p>{object}</w:p>"#
+    );
+    let translation = translate(&open(&body));
+    assert_eq!(
+        listed(&translation),
+        [
+            "sections[0].blocks[1].inlines: an embedded object without a preview picture is left out (w:object)"
+        ]
+    );
+}
+
+#[test]
+fn anchors_justified_and_distributed_text_as_the_ir_says() {
+    // ST_TextAnchoringType's `just` and `dist`, which Word does not offer for a text box:
+    // centred and at the top, as the IR's `TextBoxAnchor` takes them.
+    let body: String = ["just", "dist", "t", "ctr", "b"]
+        .map(|anchor| inline(&shape("", &p("x"), &format!(r#"anchor="{anchor}""#))))
+        .concat();
+    let translation = translate(&open(&format!("<w:p>{body}</w:p>")));
+    let anchors: Vec<ir::TextBoxAnchor> = paragraphs(&translation)[0]
+        .inlines()
+        .iter()
+        .map(|inline| text_box(inline).anchor())
+        .collect();
+    assert_eq!(
+        anchors,
+        [
+            ir::TextBoxAnchor::Center,
+            ir::TextBoxAnchor::Top,
+            ir::TextBoxAnchor::Top,
+            ir::TextBoxAnchor::Center,
+            ir::TextBoxAnchor::Bottom,
+        ]
+    );
+}

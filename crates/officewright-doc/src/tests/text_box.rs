@@ -2143,3 +2143,21 @@ fn reads_where_a_drawing_text_box_s_line_is_drawn_value_by_value() {
     let outline = vml_text_boxes(&document)[0].outline().unwrap();
     assert_eq!(outline.alignment(), LineAlignment::Center);
 }
+
+#[test]
+fn reports_the_values_of_a_drawing_text_box_s_effects_its_readers_do_not_take() {
+    // From the review of #519: a box's effects are read as the document opens, as a
+    // picture's are, and a value not taken is reported once.
+    let body = format!(
+        "<w:p><w:r>{}</w:r></w:p>",
+        drawing(&format!(
+            r#"<wps:spPr><a:scene3d><a:camera prst="orthographicFront"><a:rot lat="x" lon="0" rev="0"/></a:camera><a:lightRig rig="threePt" dir="t"/></a:scene3d></wps:spPr>{}<wps:bodyPr/>"#,
+            txbx(&p("Box"))
+        ))
+    );
+    let document = open(&body);
+    assert_eq!(
+        reported(&document),
+        [r#"a:rot lat="x" is not valid; it is ignored"#]
+    );
+}
