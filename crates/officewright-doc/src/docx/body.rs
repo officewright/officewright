@@ -1357,8 +1357,9 @@ impl Reading<'_, '_, '_> {
         self.push_item(run, item)
     }
 
-    /// Registers the VML shape types (`v:shapetype`) of the drawing of `element` by their
-    /// ids, the first of each, for the shapes that name them anywhere in the document.
+    /// Registers the values of the VML shape types (`v:shapetype`) of the drawing of
+    /// `element` by their ids, the first of each, for the shapes that name them anywhere in
+    /// the document.
     fn register_shape_types(&mut self, element: Span) {
         let document = &mut *self.c.document;
         let names = document.names;
@@ -1374,7 +1375,10 @@ impl Reading<'_, '_, '_> {
             })
             .collect();
         for (id, span) in found {
-            document.vml_shape_types.entry(id).or_insert(span);
+            if !document.vml_shape_types.contains_key(&id) {
+                let values = text_box::shape_type_values(document.element(span), &names);
+                document.vml_shape_types.insert(id, values);
+            }
         }
     }
 

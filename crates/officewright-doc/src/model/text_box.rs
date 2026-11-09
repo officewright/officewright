@@ -246,13 +246,12 @@ impl<'a> TextBox<'a> {
         }
     }
 
-    /// The shape type its VML shape names (`type`), as the document registers shape types
-    /// while it is read: the first of each id.
-    fn shape_type(self) -> Option<Element<'a>> {
+    /// The values of the shape type its VML shape names (`type`), as the document
+    /// registers shape types while it is read: the first of each id.
+    fn shape_type(self) -> Option<ShapeTypeValues> {
         let id = self.shape.attribute(&[None], "type")?;
         let id = id.strip_prefix('#').unwrap_or(id);
-        let span = self.document.vml_shape_types.get(id)?;
-        Some(self.document.element(*span))
+        self.document.vml_shape_types.get(id).copied()
     }
 
     /// Whether it is in a chain of linked boxes, whose text runs on from one box to the
@@ -1147,14 +1146,38 @@ fn check_shape_type(shape_type: Element<'_>, names: &Names, report: Report<'_>) 
     value(shape_type, names, "strokeweight", stroke_weight, report);
 }
 
+/// The values a VML shape type (`v:shapetype`) gives the shapes that name it and write
+/// none of their own.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ShapeTypeValues {
+    filled: Option<bool>,
+    fill_color: Option<VmlColor>,
+    stroked: Option<bool>,
+    stroke_color: Option<VmlColor>,
+    stroke_weight: Option<Pt>,
+}
+
+/// The values of a shape type, read once, as the document registers it, so that a shape
+/// naming it does not read them again; they are reported where it is defined
+/// ([`check_shape_type`]).
+pub(crate) fn shape_type_values(shape_type: Element<'_>, names: &Names) -> ShapeTypeValues {
+    let quiet = &mut |_: &str, _: &str, _: &str| {};
+    ShapeTypeValues {
+        filled: value(shape_type, names, "filled", vml::true_false, quiet),
+        fill_color: value(shape_type, names, "fillcolor", vml_color, quiet),
+        stroked: value(shape_type, names, "stroked", vml::true_false, quiet),
+        stroke_color: value(shape_type, names, "strokecolor", vml_color, quiet),
+        stroke_weight: value(shape_type, names, "strokeweight", stroke_weight, quiet),
+    }
+}
+
 /// A value of a VML shape: from its child (`v:fill`, `v:stroke`) as `child_name`, else the
-/// shape's `name`, else its shape type's `name`. The child's and the shape's are read
-/// whether or not they are used, so that each not taken is reported; the shape type's
-/// are reported where it is defined ([`check_shape_type`]).
+/// shape's `name`, else `inherited`, its shape type's. The child's and the shape's are read
+/// whether or not they are used, so that each not taken is reported.
 fn vml_value<T>(
     (part, child_name): (Option<Element<'_>>, &str),
     shape: Element<'_>,
-    shape_type: Option<Element<'_>>,
+    inherited: Option<T>,
     names: &Names,
     name: &str,
     read: impl Fn(&str) -> Option<T>,
@@ -1162,14 +1185,12 @@ fn vml_value<T>(
 ) -> Option<T> {
     let from_part = part.and_then(|part| value(part, names, child_name, &read, report));
     let from_shape = value(shape, names, name, &read, report);
-    from_part.or(from_shape).or_else(|| {
-        shape_type.and_then(|shape_type| value(shape_type, names, name, &read, &mut |_, _, _| {}))
-    })
+    from_part.or(from_shape).or(inherited)
 }
 
 fn vml_fill(
     shape: Element<'_>,
-    shape_type: Option<Element<'_>>,
+    shape_type: Option<ShapeTypeValues>,
     names: &Names,
     report: Report<'_>,
 ) -> Option<ShapeFill> {
@@ -1177,7 +1198,7 @@ fn vml_fill(
     let on = vml_value(
         (fill, "on"),
         shape,
-        shape_type,
+        shape_type.and_then(|values| values.filled),
         names,
         "filled",
         vml::true_false,
@@ -1186,7 +1207,7 @@ fn vml_fill(
     let color = vml_value(
         (fill, "color"),
         shape,
-        shape_type,
+        shape_type.and_then(|values| values.fill_color),
         names,
         "fillcolor",
         vml_color,
@@ -1230,7 +1251,7 @@ fn vml_fill(
 
 fn vml_outline(
     shape: Element<'_>,
-    shape_type: Option<Element<'_>>,
+    shape_type: Option<ShapeTypeValues>,
     names: &Names,
     report: Report<'_>,
 ) -> Option<ShapeOutline> {
@@ -1238,7 +1259,7 @@ fn vml_outline(
     let on = vml_value(
         (stroke, "on"),
         shape,
-        shape_type,
+        shape_type.and_then(|values| values.stroked),
         names,
         "stroked",
         vml::true_false,
@@ -1247,7 +1268,7 @@ fn vml_outline(
     let color = vml_value(
         (stroke, "color"),
         shape,
-        shape_type,
+        shape_type.and_then(|values| values.stroke_color),
         names,
         "strokecolor",
         vml_color,
@@ -1256,7 +1277,7 @@ fn vml_outline(
     let width = vml_value(
         (stroke, "weight"),
         shape,
-        shape_type,
+        shape_type.and_then(|values| values.stroke_weight),
         names,
         "strokeweight",
         stroke_weight,

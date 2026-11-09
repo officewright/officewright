@@ -138,9 +138,10 @@ pub struct Document {
     pub(crate) images: Vec<ImageData>,
     /// The content of each text box read, in document order.
     pub(crate) text_boxes: Vec<TextBoxData>,
-    /// The VML shape types (`v:shapetype`) of the document by their ids, the first of each:
-    /// Word defines one once, in the first drawing that names it.
-    pub(crate) vml_shape_types: HashMap<Box<str>, xml::Span>,
+    /// The values of the VML shape types (`v:shapetype`) of the document by their ids, the
+    /// first of each: Word defines one once, in the first drawing that names it. Each is
+    /// read once, as it is registered, however many shapes name it.
+    pub(crate) vml_shape_types: HashMap<Box<str>, text_box::ShapeTypeValues>,
     /// Each image part read so far, by its name: where its image is among `images`, or
     /// none when it could not be read, so that it is read and reported once.
     pub(crate) image_parts: HashMap<Box<str>, Option<u32>>,
