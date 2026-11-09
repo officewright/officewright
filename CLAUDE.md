@@ -38,7 +38,8 @@ crates/
   officewright          facade crate; features doc, pdf, xls, slides; re-exports format crates, and
                         officewright-font as `font` with the pdf feature
   officewright-core     units (Pt, twips, EMU), PageSize, Color (sRGB), Error/Result
-  officewright-font     font loading (TrueType/OpenType, collections), metrics, cmap, subsetting for
+  officewright-font     font loading (TrueType/OpenType, collections), metrics, cmap (never DMAP, which Word
+                        does not read: a face hides it from Skrifa and HarfRust), subsetting for
                         embedding with a check of single glyphs against it (`FontFace::check_subset_glyph`,
                         so that the layout can draw text a damaged face cannot embed with another font),
                         system font index and font substitution with a report

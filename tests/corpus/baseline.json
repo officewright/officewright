@@ -1009,8 +1009,8 @@
     },
     "tests/corpus/word-rules/E-dmap-font.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.994,
-      "ssim_min": 0.994,
+      "ssim_mean": 0.9977,
+      "ssim_min": 0.9977,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-footer-tall-bottom.docx": {
