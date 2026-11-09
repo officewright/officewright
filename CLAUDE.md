@@ -92,8 +92,9 @@ tests/pdf-output/       checks text-to-pdf output, in Helvetica and with Liberat
                         officewright-pdf's example `primitives` draws in both fonts, and the JPEG and PNG files
                         images.py makes (also the fuzz seeds in fuzz/seeds/png and jpeg) drawn by the example
                         `images`, the synthetic italic and bold the example `synthetic` draws for a family
-                        resolved without those faces, with qpdf, pdftotext, pdffonts, pdfimages and pdftoppm,
-                        and what the example `embed_report` counts for fonts it cannot embed (Linux, macOS;
+                        resolved without those faces, and the links and named destinations of the example
+                        `links`, with qpdf, pdftotext, pdffonts, pdfimages, pdftoppm and pdfinfo, and what the
+                        example `embed_report` counts for fonts it cannot embed (Linux, macOS;
                         Windows has no official poppler build, and the golden snapshot proves the bytes are the same)
 tests/corpus/           small curated real documents (committed) + SOURCES.md + baseline.json
 tests/corpus/word-rules/  documents written by scripts/make-rule-docs.py, one undocumented Word rule each
@@ -156,7 +157,7 @@ scripts/corpus-import.py   checks make-reference.ps1 results and turns them into
 2. New behaviour has tests; a bug fix has a regression test that failed before the fix.
 3. Every new public item has a doc comment; non-trivial public APIs have a runnable doc example.
 4. A new parser comes with a fuzz target in `fuzz/`.
-5. Every public Rust feature that users need is exposed through the C ABI in the same PR, with the header regenerated and covered by `tests/c` and `tests/ffi-python`. A crate that no user-facing feature uses yet (a building block such as `officewright-font`) gets its C ABI in the PR that makes it user-facing. Work the maintainer planned as a chain of PRs gets its C ABI in the PR of the chain the plan names: the DOCX reader in the last one, once the document model is complete. The PDF drawing primitives of `officewright-pdf` (glyph runs, paths, strokes, clipping, images) are what the layout engine paints with, not an API for users: like the layout IR they are public but hidden in the docs unless feature `unstable-drawing`, exempt from semver until 1.0, the facade does not pass the feature on, and they have no C ABI. Users get them through DOCX to PDF, whose C ABI comes with it; a drawing API for users, Rust and C ABI together, gets a plan of its own after DOCX to PDF.
+5. Every public Rust feature that users need is exposed through the C ABI in the same PR, with the header regenerated and covered by `tests/c` and `tests/ffi-python`. A crate that no user-facing feature uses yet (a building block such as `officewright-font`) gets its C ABI in the PR that makes it user-facing. Work the maintainer planned as a chain of PRs gets its C ABI in the PR of the chain the plan names: the DOCX reader in the last one, once the document model is complete. The PDF drawing primitives of `officewright-pdf` (glyph runs, paths, strokes, clipping, images, links and named destinations) are what the layout engine paints with, not an API for users: like the layout IR they are public but hidden in the docs unless feature `unstable-drawing`, exempt from semver until 1.0, the facade does not pass the feature on, and they have no C ABI. Users get them through DOCX to PDF, whose C ABI comes with it; a drawing API for users, Rust and C ABI together, gets a plan of its own after DOCX to PDF.
 6. Never weaken a check to make it pass (no `#[allow]` without a `// reason:` comment, no skipped tests, no lowered lint levels).
 
 ## Rust conventions
@@ -388,7 +389,9 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   shows their colours and transparency, a PNG with every filter type renders the same decoded by officewright as
   unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example synthetic's page: qpdf --check,
   pdftotext reads every line, pdftoppm shows synthetic italic slanted by a third and synthetic bold bolder; the example
-  embed_report counts a font the subsetter does not support apart from a damaged one (Linux, macOS)
+  links' file: qpdf --check, each page's link annotations and the name tree of the named destinations as qpdf --json
+  gives them, and every destination pdfinfo -dests lists, with its page and position; the example embed_report counts
+  a font the subsetter does not support apart from a damaged one (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), CORPUS_JOBS documents at a time if that variable is set, else one
   per core, every document rendered with the fonts of tests/fonts and, first, tests/fonts-word/noto-truetype (the
   TrueType Noto Sans, the build Word had for the references that use it) and tests/fonts-word/test-symbol (the symbol

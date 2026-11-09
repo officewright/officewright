@@ -12,9 +12,10 @@ use crate::embed::{Codes, EXTRA_OBJECTS, Prepared, show};
 use crate::font::{SYNTHETIC_BOLD_STROKE, SYNTHETIC_ITALIC_SKEW, Synthetic, check_font_size};
 use crate::glyphs::MAX_STRING_BYTES;
 use crate::image::draw_operators;
+use crate::link::{Destination, Destinations, Link, MAX_LINKS};
 use crate::path::check_range;
 use crate::stream::stream_object;
-use crate::{Compression, Error, Font, GlyphRun, GraphicsPath, Image, Result, Stroke};
+use crate::{Compression, Error, Font, GlyphRun, GraphicsPath, Image, LinkTarget, Result, Stroke};
 
 /// Pages smaller or larger than this are outside ISO 32000-1, Annex C.
 const PAGE_SIDE: std::ops::RangeInclusive<f64> = 3.0..=14400.0;
@@ -114,6 +115,10 @@ pub struct Page {
     actual_text: bool,
     /// The document whose glyph codes the page's encoded text uses, once it has some.
     encoded_by: Option<u64>,
+    /// The page's links, each an annotation of the page.
+    links: Vec<Link>,
+    /// The named destinations on the page.
+    destinations: Vec<Destination>,
 }
 
 /// A piece of a page's content stream.
@@ -188,6 +193,8 @@ impl Document {
             clips: 0,
             actual_text: false,
             encoded_by: None,
+            links: Vec::new(),
+            destinations: Vec::new(),
         });
         self.open = Some(index);
         #[allow(clippy::indexing_slicing)] // reason: the page was just pushed at `index`
@@ -292,7 +299,9 @@ impl Document {
     /// [subset budget](Self::set_subset_budget) after the fonts reduced before it,
     /// [`Error::TooLarge`] if the file
     /// would exceed 10<sup>10</sup> bytes, [`Error::ForeignPage`] for a page that another
-    /// document encoded ([`Page`]), and [`Error::Io`] if writing fails.
+    /// document encoded ([`Page`]), and [`Error::Io`] if writing fails. A page's links
+    /// and named destinations, which the layout engine draws, fail it when a link goes to
+    /// a name that no page adds or two destinations have one name.
     pub fn write_to(&self, out: impl Write) -> Result<()> {
         if self.pages.is_empty() {
             return Err(Error::NoPages);
@@ -304,6 +313,11 @@ impl Document {
         {
             return Err(Error::ForeignPage { page });
         }
+        let destinations = Destinations::collect(
+            self.pages
+                .iter()
+                .map(|page| (page.destinations.as_slice(), page.links.as_slice())),
+        )?;
         // Each font is written once, in the order the pages first use it. For each page,
         // `page_fonts` has the document's index of each of its font resources.
         let mut fonts: Vec<&Font> = Vec::new();
@@ -402,6 +416,15 @@ impl Document {
             image_objects.push(next_object);
             next_object += image.object_count();
         }
+        // Then the annotation of each link, page by page, and the name tree of the named
+        // destinations.
+        let mut link_objects = Vec::with_capacity(self.pages.len());
+        for page in &self.pages {
+            link_objects.push(next_object);
+            next_object += page.links.len();
+        }
+        let tree_object = next_object;
+        next_object += destinations.object_count();
 
         let mut out = CountingWriter::new(out);
         let mut offsets = Vec::with_capacity(next_object);
@@ -415,7 +438,12 @@ impl Document {
         out.put(b"%\xE2\xE3\xCF\xD3\n")?;
 
         offsets.push(out.written);
-        out.put(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")?;
+        let names = if destinations.object_count() == 0 {
+            String::new()
+        } else {
+            format!(" /Names << /Dests {tree_object} 0 R >>")
+        };
+        out.put(format!("1 0 obj\n<< /Type /Catalog /Pages 2 0 R{names} >>\nendobj\n").as_bytes())?;
 
         offsets.push(out.written);
         let kids: Vec<String> = (0..self.pages.len())
@@ -468,11 +496,20 @@ impl Document {
             } else {
                 format!("<< {} >>", resources.join(" "))
             };
+            let annotations = match link_objects.get(i) {
+                Some(&first) if !page.links.is_empty() => {
+                    let links: Vec<String> = (first..first + page.links.len())
+                        .map(|link| format!("{link} 0 R"))
+                        .collect();
+                    format!(" /Annots [{}]", links.join(" "))
+                }
+                _ => String::new(),
+            };
             offsets.push(out.written);
             out.put(
                 format!(
                     "{page_id} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] \
-                     /Resources {resources} /Contents {} 0 R >>\nendobj\n",
+                     /Resources {resources} /Contents {} 0 R{annotations} >>\nendobj\n",
                     number(page.size.width().0),
                     number(page.size.height().0),
                     page_id + 1
@@ -501,6 +538,16 @@ impl Document {
                 out.put_object(id, &object)?;
                 id += 1;
             }
+        }
+        for link in self.pages.iter().flat_map(|page| &page.links) {
+            offsets.push(out.written);
+            out.put_object(id, &link.dictionary())?;
+            id += 1;
+        }
+        for object in destinations.objects(tree_object, page_object) {
+            offsets.push(out.written);
+            out.put_object(id, &object)?;
+            id += 1;
         }
 
         let xref = out.written;
@@ -832,6 +879,84 @@ impl Page {
         Ok(())
     }
 
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// Makes the rectangle with its lower-left corner at (`x`, `y`) and the given width and
+    /// height, in points, a link to `target`: a reader opens the URI, or shows the named
+    /// destination that a page of the document adds with
+    /// [`add_destination`](Self::add_destination), before or after the link. The link is
+    /// an annotation without a border, so it shows only as what the page draws under it.
+    /// Each call makes one link; a link that spans several lines of text takes one
+    /// rectangle for each.
+    ///
+    /// ```
+    /// use officewright_pdf::{Document, LinkTarget, PageSize, Pt};
+    ///
+    /// let mut doc = Document::new();
+    /// let first = doc.add_page(PageSize::A4)?;
+    /// let site = LinkTarget::Uri("https://example.com/".to_owned());
+    /// first.add_link(Pt(72.0), Pt(700.0), Pt(120.0), Pt(14.0), &site)?;
+    /// // A link to a destination of a page that comes later.
+    /// let appendix = LinkTarget::Destination("Appendix".to_owned());
+    /// first.add_link(Pt(72.0), Pt(680.0), Pt(80.0), Pt(14.0), &appendix)?;
+    /// doc.add_page(PageSize::A4)?.add_destination("Appendix", Pt(72.0), Pt(770.0))?;
+    /// assert!(doc.to_bytes()?.starts_with(b"%PDF-1.4"));
+    /// # Ok::<(), officewright_pdf::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OutOfRange`] if the width or height is outside 0.01 to 32767 pt, the URI or
+    /// name is empty or longer than 32767 bytes as written ([`LinkTarget`],
+    /// [`add_destination`](Self::add_destination)), or the page has 8191 links already,
+    /// the most elements an array may have in PDF 1.4; [`Error::InvalidPosition`] if a
+    /// corner of the rectangle is outside -32767 to 32767 pt. A link to a name that no page
+    /// adds makes [`Document::write_to`] fail with [`Error::UnknownDestination`]. On error
+    /// the page is unchanged.
+    pub fn add_link(
+        &mut self,
+        x: Pt,
+        y: Pt,
+        width: Pt,
+        height: Pt,
+        target: &LinkTarget,
+    ) -> Result<()> {
+        let link = Link::new(x, y, width, height, target)?;
+        if self.links.len() >= MAX_LINKS {
+            return Err(Error::OutOfRange {
+                what: "number of links on the page",
+                value: (self.links.len() + 1) as f64,
+                min: 0.0,
+                max: MAX_LINKS as f64,
+            });
+        }
+        self.links.push(link);
+        Ok(())
+    }
+
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// Adds a destination named `name` at the point (`x`, `y`) of the page, in points, for
+    /// links to go to ([`LinkTarget::Destination`]): a reader shows the page with that
+    /// point at the top-left corner of its window, at the zoom it has. Any text can be a
+    /// name, but a document has only one destination of each. See
+    /// [`add_link`](Self::add_link) for an example.
+    ///
+    /// The file stores a name in printable ASCII: each printable ASCII character but `%`
+    /// as it is, and every other byte of the name's UTF-8 form as `%XX`, so that "Résumé" is
+    /// `R%C3%A9sum%C3%A9`. Every reader then sorts the names alike, whether it compares them as
+    /// bytes or as text, and finds each.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidPosition`] if the point is outside -32767 to 32767 pt, and
+    /// [`Error::OutOfRange`] if the name is empty or longer than 32767 bytes as written: a
+    /// byte for each printable ASCII character but `%`, and three for each other byte of
+    /// its UTF-8 form. Two destinations of one name make [`Document::write_to`] fail with
+    /// [`Error::DuplicateDestination`]. On error the page is unchanged.
+    pub fn add_destination(&mut self, name: &str, x: Pt, y: Pt) -> Result<()> {
+        self.destinations.push(Destination::new(name, x, y)?);
+        Ok(())
+    }
+
     /// The index of `font` in the page's fonts, adding it on its first use. The font at
     /// index `i` is the page's font resource `/F(i + 1)`.
     fn font_index(&mut self, font: &Font) -> usize {
@@ -1016,7 +1141,7 @@ pub(crate) fn number(value: f64) -> String {
 
 /// Appends `bytes` as a PDF literal string (§7.3.4.2). Bytes outside printable ASCII are
 /// written as octal escapes, so content streams stay ASCII.
-fn push_string(out: &mut Vec<u8>, bytes: &[u8]) {
+pub(crate) fn push_string(out: &mut Vec<u8>, bytes: &[u8]) {
     out.push(b'(');
     for &byte in bytes {
         match byte {
@@ -1563,6 +1688,15 @@ mod tests {
             Error::NoClip,
             Error::TooManyClips,
             Error::ForeignPage { page: 2 },
+            Error::UnknownDestination {
+                name: "a".to_owned(),
+                page: 1,
+            },
+            Error::DuplicateDestination {
+                name: "a".to_owned(),
+                first: 0,
+                second: 1,
+            },
         ] {
             let message = err.to_string();
             assert!(
@@ -1749,5 +1883,407 @@ mod tests {
         let err = hello().save(&path).unwrap_err();
         assert_eq!(err.to_string(), format!("cannot write {}", path.display()));
         assert!(std::error::Error::source(&err).is_some());
+    }
+
+    /// Checks that the cross-reference table gives where each object starts.
+    fn assert_xref_is_right(pdf: &[u8]) {
+        let at = pdf.windows(10).rposition(|w| w == b"startxref\n").unwrap() + 10;
+        let end = at + pdf[at..].iter().position(|&b| b == b'\n').unwrap();
+        let xref: usize = std::str::from_utf8(&pdf[at..end]).unwrap().parse().unwrap();
+        let header = pdf[xref..].split(|&b| b == b'\n').nth(1).unwrap();
+        let count: usize = std::str::from_utf8(header)
+            .unwrap()
+            .strip_prefix("0 ")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let entries = &pdf[xref + b"xref\n".len() + header.len() + 1..];
+        for object in 1..count {
+            let entry = &entries[object * 20..object * 20 + 10];
+            let offset: usize = std::str::from_utf8(entry).unwrap().parse().unwrap();
+            assert!(
+                pdf[offset..].starts_with(format!("{object} 0 obj\n").as_bytes()),
+                "object {object} is not at {offset}"
+            );
+        }
+    }
+
+    /// Three pages: on the first, a link to a URI and one to a destination of the third,
+    /// which also has a destination with a Cyrillic name and a link to it.
+    fn linked() -> Document {
+        let mut doc = Document::new();
+        doc.set_compression(Compression::None);
+        let first = doc.add_page(PageSize::A4).unwrap();
+        let uri = LinkTarget::Uri("https://example.com/a b/(Ж)".to_owned());
+        first
+            .add_link(Pt(72.0), Pt(700.0), Pt(120.0), Pt(14.5), &uri)
+            .unwrap();
+        let appendix = LinkTarget::Destination("Appendix".to_owned());
+        first
+            .add_link(Pt(72.0), Pt(680.0), Pt(80.0), Pt(14.0), &appendix)
+            .unwrap();
+        doc.add_page(PageSize::A4).unwrap();
+        let third = doc.add_page(PageSize::LETTER).unwrap();
+        // Added after the link to it, and before the name that sorts first, "%D0%93…".
+        third
+            .add_destination("Appendix", Pt(72.0), Pt(770.25))
+            .unwrap();
+        third.add_destination("Глава", Pt(0.0), Pt(400.0)).unwrap();
+        let chapter = LinkTarget::Destination("Глава".to_owned());
+        third
+            .add_link(Pt(-10.0), Pt(0.0), Pt(20.0), Pt(10.0), &chapter)
+            .unwrap();
+        doc
+    }
+
+    #[test]
+    fn writes_links_as_annotations_and_destinations_as_a_name_tree() {
+        let pdf = linked().to_bytes().unwrap();
+        insta::assert_snapshot!(readable(&pdf));
+        assert_xref_is_right(&pdf);
+        let pdf = String::from_utf8_lossy(&pdf);
+        // No fonts: pages and their contents are 3 to 8, the links 9 to 11 and the name
+        // tree 12.
+        assert_eq!(
+            object(&pdf, 1),
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Names << /Dests 12 0 R >> >>\n"
+        );
+        assert!(object(&pdf, 3).ends_with("/Contents 4 0 R /Annots [9 0 R 10 0 R] >>\n"));
+        assert!(object(&pdf, 5).ends_with("/Contents 6 0 R >>\n"));
+        assert!(object(&pdf, 7).ends_with("/Contents 8 0 R /Annots [11 0 R] >>\n"));
+        assert_eq!(
+            object(&pdf, 9),
+            "9 0 obj\n<< /Type /Annot /Subtype /Link /Rect [72 700 192 714.5] /Border [0 0 0] \
+             /A << /S /URI /URI (https://example.com/a%20b/\\(%D0%96\\)) >> >>\n"
+        );
+        assert_eq!(
+            object(&pdf, 10),
+            "10 0 obj\n<< /Type /Annot /Subtype /Link /Rect [72 680 152 694] /Border [0 0 0] \
+             /Dest (Appendix) >>\n"
+        );
+        assert_eq!(
+            object(&pdf, 11),
+            "11 0 obj\n<< /Type /Annot /Subtype /Link /Rect [-10 0 10 10] /Border [0 0 0] \
+             /Dest (%D0%93%D0%BB%D0%B0%D0%B2%D0%B0) >>\n"
+        );
+        // Sorted by their bytes, and the root has no limits.
+        assert_eq!(
+            object(&pdf, 12),
+            "12 0 obj\n<< /Names [\n(%D0%93%D0%BB%D0%B0%D0%B2%D0%B0) [7 0 R /XYZ 0 400 null]\n\
+             (Appendix) [7 0 R /XYZ 72 770.25 null]\n] >>\n"
+        );
+    }
+
+    #[test]
+    fn writes_no_name_tree_without_destinations() {
+        let mut doc = hello();
+        let uri = LinkTarget::Uri("https://example.com/".to_owned());
+        doc.page_mut(0)
+            .unwrap()
+            .add_link(Pt(72.0), Pt(769.0), Pt(70.0), Pt(12.0), &uri)
+            .unwrap();
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        assert_eq!(
+            object(&pdf, 1),
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\n"
+        );
+        assert!(object(&pdf, 4).ends_with("/Contents 5 0 R /Annots [6 0 R] >>\n"));
+        assert!(object(&pdf, 6).contains("/URI (https://example.com/)"));
+        assert!(!pdf.contains("/Names"));
+    }
+
+    #[test]
+    fn a_destination_without_links_is_written() {
+        let mut doc = hello();
+        doc.page_mut(0)
+            .unwrap()
+            .add_destination("top", Pt(0.0), Pt(841.89))
+            .unwrap();
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        assert!(object(&pdf, 1).contains("/Names << /Dests 6 0 R >>"));
+        assert!(!pdf.contains("/Annots"));
+        assert_eq!(
+            object(&pdf, 6),
+            "6 0 obj\n<< /Names [\n(top) [4 0 R /XYZ 0 841.89 null]\n] >>\n"
+        );
+    }
+
+    #[test]
+    fn splits_many_destinations_into_a_tree_of_small_nodes() {
+        let mut doc = Document::new();
+        doc.set_compression(Compression::None);
+        for page in 0..2 {
+            let page_ = doc.add_page(PageSize::A4).unwrap();
+            // Added out of order: the tree sorts them.
+            for i in (0..100).rev() {
+                let name = format!("d{:03}", 100 * page + i);
+                page_
+                    .add_destination(&name, Pt(1.0), Pt(f64::from(i)))
+                    .unwrap();
+                page_
+                    .add_link(
+                        Pt(1.0),
+                        Pt(1.0),
+                        Pt(1.0),
+                        Pt(1.0),
+                        &LinkTarget::Destination(name),
+                    )
+                    .unwrap();
+            }
+        }
+        let pdf = doc.to_bytes().unwrap();
+        assert_xref_is_right(&pdf);
+        let pdf = String::from_utf8_lossy(&pdf);
+        let key = |i: usize| format!("d{i:03}");
+        // Pages and contents are 3 to 6, the links 7 to 206, the tree 207 to 211: a root
+        // above four leaves of 64, 64, 64 and 8 names.
+        assert!(object(&pdf, 1).contains("/Names << /Dests 207 0 R >>"));
+        assert_eq!(
+            object(&pdf, 207),
+            "207 0 obj\n<< /Kids [208 0 R 209 0 R 210 0 R 211 0 R] >>\n"
+        );
+        for (leaf, names) in [0..64, 64..128, 128..192, 192..200].into_iter().enumerate() {
+            let node = object(&pdf, 208 + leaf);
+            let listed: Vec<&str> = node.lines().filter(|line| line.starts_with('(')).collect();
+            assert_eq!(listed.len(), names.len());
+            for (line, i) in listed.iter().zip(names.clone()) {
+                let page = 3 + 2 * (i / 100);
+                assert_eq!(
+                    *line,
+                    format!("({}) [{page} 0 R /XYZ 1 {} null]", key(i), i % 100)
+                );
+            }
+            assert!(node.ends_with(&format!(
+                "] /Limits [({}) ({})] >>\n",
+                key(names.start),
+                key(names.end - 1)
+            )));
+        }
+    }
+
+    #[test]
+    fn sorts_names_the_same_as_bytes_and_as_text() {
+        // Names whose UTF-8 forms sort otherwise than their keys, among them a character
+        // from U+E000 to U+FFFF and one outside the BMP.
+        let names = [
+            "Zeta",
+            "Résumé",
+            "_Toc123",
+            "Éclair",
+            "\u{FB00}",
+            "\u{1F600}x",
+            "100%",
+        ];
+        let mut doc = Document::new();
+        doc.set_compression(Compression::None);
+        let page = doc.add_page(PageSize::A4).unwrap();
+        for name in names {
+            page.add_destination(name, Pt(0.0), Pt(0.0)).unwrap();
+            let target = LinkTarget::Destination(name.to_owned());
+            page.add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &target)
+                .unwrap();
+        }
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        let keys: Vec<&str> = object(&pdf, 12)
+            .lines()
+            .filter_map(|line| line.strip_prefix('(')?.split_once(") ["))
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "%C3%89clair",
+                "%EF%AC%80",
+                "%F0%9F%98%80x",
+                "100%25",
+                "R%C3%A9sum%C3%A9",
+                "Zeta",
+                "_Toc123",
+            ]
+        );
+        // Each link names its destination by the same key.
+        for (link, key) in (5..12).zip(["Zeta", "R%C3%A9sum%C3%A9", "_Toc123", "%C3%89clair"]) {
+            assert!(object(&pdf, link).ends_with(&format!("/Dest ({key}) >>\n")));
+        }
+    }
+
+    #[test]
+    fn escapes_the_delimiters_of_a_string_in_keys() {
+        let names = ["a)b", "c(d", "e\\f"];
+        let mut doc = Document::new();
+        doc.set_compression(Compression::None);
+        let page = doc.add_page(PageSize::A4).unwrap();
+        for name in names {
+            page.add_destination(name, Pt(0.0), Pt(0.0)).unwrap();
+            let target = LinkTarget::Destination(name.to_owned());
+            page.add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &target)
+                .unwrap();
+        }
+        let pdf = doc.to_bytes().unwrap();
+        assert_xref_is_right(&pdf);
+        let pdf = String::from_utf8_lossy(&pdf).into_owned();
+        for (link, key) in (5..8).zip([r"a\)b", r"c\(d", r"e\\f"]) {
+            assert!(object(&pdf, link).ends_with(&format!("/Dest ({key}) >>\n")));
+        }
+        assert_eq!(
+            object(&pdf, 8),
+            "8 0 obj\n<< /Names [\n(a\\)b) [3 0 R /XYZ 0 0 null]\n(c\\(d) [3 0 R /XYZ 0 0 null]\n\
+             (e\\\\f) [3 0 R /XYZ 0 0 null]\n] >>\n"
+        );
+    }
+
+    #[test]
+    fn a_page_has_at_most_max_links_links() {
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        let site = LinkTarget::Uri("https://example.com/".to_owned());
+        for _ in 0..MAX_LINKS {
+            page.add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &site)
+                .unwrap();
+        }
+        let err = page
+            .add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &site)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "number of links on the page 8192 is outside the 0 to 8191 range"
+        );
+        assert_eq!(page.links.len(), 8191);
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        assert_eq!(pdf.matches("/Subtype /Link").count(), 8191);
+    }
+
+    #[test]
+    fn refuses_links_to_unknown_names_and_names_two_destinations_share() {
+        let refused = |doc: &Document| {
+            let mut out = Vec::new();
+            let err = doc.write_to(&mut out).unwrap_err();
+            assert!(out.is_empty());
+            err
+        };
+        let mut doc = linked();
+        // Names are compared exactly.
+        let other = LinkTarget::Destination("appendix".to_owned());
+        doc.page_mut(1)
+            .unwrap()
+            .add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &other)
+            .unwrap();
+        let err = refused(&doc);
+        assert!(matches!(&err, Error::UnknownDestination { name, page: 1 } if name == "appendix"));
+        assert_eq!(
+            err.to_string(),
+            "a link on the page at index 1 goes to the destination \"appendix\", which no page \
+             adds"
+        );
+
+        let mut doc = linked();
+        doc.page_mut(0)
+            .unwrap()
+            .add_destination("Глава", Pt(0.0), Pt(0.0))
+            .unwrap();
+        let err = refused(&doc);
+        assert!(matches!(
+            &err,
+            Error::DuplicateDestination { name, first: 0, second: 2 } if name == "Глава"
+        ));
+        assert_eq!(
+            err.to_string(),
+            "the pages at index 0 and 2 both add a destination named \"Глава\""
+        );
+
+        let mut doc = linked();
+        doc.page_mut(2)
+            .unwrap()
+            .add_destination("Appendix", Pt(0.0), Pt(0.0))
+            .unwrap();
+        assert_eq!(
+            refused(&doc).to_string(),
+            "the page at index 2 adds two destinations named \"Appendix\""
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_links_and_destinations_and_leaves_the_page_unchanged() {
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        let uri = |text: &str| LinkTarget::Uri(text.to_owned());
+        let site = uri("https://example.com/");
+        let out_of_range = |result: Result<()>, expected: &str, length: f64| match result {
+            Err(Error::OutOfRange { what, value, .. }) => {
+                assert_eq!((what, value), (expected, length));
+            }
+            other => panic!("{other:?}"),
+        };
+        let position = |result: Result<()>| {
+            assert!(
+                matches!(result, Err(Error::InvalidPosition { .. })),
+                "{result:?}"
+            );
+        };
+        out_of_range(
+            page.add_link(Pt(0.0), Pt(0.0), Pt(0.009), Pt(1.0), &site),
+            "link width",
+            0.009,
+        );
+        out_of_range(
+            page.add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(32768.0), &site),
+            "link height",
+            32768.0,
+        );
+        assert!(matches!(
+            page.add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(f64::NAN), &site),
+            Err(Error::OutOfRange { what: "link height", value, .. }) if value.is_nan()
+        ));
+        position(page.add_link(Pt(-32768.0), Pt(0.0), Pt(1.0), Pt(1.0), &site));
+        position(page.add_link(Pt(32766.5), Pt(0.0), Pt(1.0), Pt(1.0), &site));
+        position(page.add_link(Pt(0.0), Pt(32767.0), Pt(1.0), Pt(0.01), &site));
+        out_of_range(
+            page.add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &uri("")),
+            "URI length in bytes",
+            0.0,
+        );
+        // Each "é" is written as "%C3%A9".
+        out_of_range(
+            page.add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &uri(&"é".repeat(5462))),
+            "URI length in bytes",
+            32772.0,
+        );
+        let unnamed = LinkTarget::Destination(String::new());
+        out_of_range(
+            page.add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &unnamed),
+            "destination name length in bytes",
+            0.0,
+        );
+        position(page.add_destination("a", Pt(0.0), Pt(40000.0)));
+        out_of_range(
+            page.add_destination("", Pt(0.0), Pt(0.0)),
+            "destination name length in bytes",
+            0.0,
+        );
+        assert!(page.links.is_empty() && page.destinations.is_empty());
+    }
+
+    #[test]
+    fn accepts_the_extremes_of_links_and_destinations() {
+        let mut doc = Document::new();
+        doc.set_compression(Compression::None);
+        let page = doc.add_page(PageSize::A4).unwrap();
+        let longest = LinkTarget::Uri("é".repeat(5461));
+        page.add_link(Pt(-32767.0), Pt(-32767.0), Pt(0.01), Pt(0.01), &longest)
+            .unwrap();
+        let name = "a".repeat(32767);
+        let target = LinkTarget::Destination(name.clone());
+        page.add_link(Pt(0.0), Pt(0.0), Pt(32767.0), Pt(32767.0), &target)
+            .unwrap();
+        page.add_destination(&name, Pt(32767.0), Pt(-32767.0))
+            .unwrap();
+        let pdf = doc.to_bytes().unwrap();
+        assert_xref_is_right(&pdf);
+        let pdf = String::from_utf8_lossy(&pdf);
+        assert!(object(&pdf, 5).starts_with(
+            "5 0 obj\n<< /Type /Annot /Subtype /Link /Rect [-32767 -32767 -32766.99 -32766.99]"
+        ));
+        assert!(object(&pdf, 6).contains("/Rect [0 0 32767 32767]"));
+        assert!(object(&pdf, 7).ends_with(" [3 0 R /XYZ 32767 -32767 null]\n] >>\n"));
     }
 }

@@ -151,6 +151,27 @@ pub enum Error {
     /// More clipping paths would be in effect at once than every PDF reader can nest:
     /// [`Page::MAX_CLIPS`](crate::Page::MAX_CLIPS).
     TooManyClips,
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// A link goes to a named destination that no page of the document adds; see
+    /// [`Page::add_link`](crate::Page::add_link).
+    UnknownDestination {
+        /// The destination's name.
+        name: String,
+        /// The index of the link's page, counting from 0.
+        page: usize,
+    },
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// Two named destinations of the document have one name; see
+    /// [`Page::add_destination`](crate::Page::add_destination).
+    DuplicateDestination {
+        /// The name.
+        name: String,
+        /// The index of the page of the first, counting from 0.
+        first: usize,
+        /// The index of the page of the second, counting from 0: the same as `first` when
+        /// that page adds both.
+        second: usize,
+    },
     /// The PDF would be larger than a cross-reference table can address (10^10 bytes).
     TooLarge,
     /// Writing the PDF failed.
@@ -326,6 +347,27 @@ impl fmt::Display for Error {
                 "more than {} clipping paths would be in effect at once",
                 crate::Page::MAX_CLIPS
             ),
+            Self::UnknownDestination { name, page } => write!(
+                f,
+                "a link on the page at index {page} goes to the destination {name:?}, which no \
+                 page adds"
+            ),
+            Self::DuplicateDestination {
+                name,
+                first,
+                second,
+            } if first == second => write!(
+                f,
+                "the page at index {first} adds two destinations named {name:?}"
+            ),
+            Self::DuplicateDestination {
+                name,
+                first,
+                second,
+            } => write!(
+                f,
+                "the pages at index {first} and {second} both add a destination named {name:?}"
+            ),
             Self::TooLarge => {
                 f.write_str("PDF exceeds the 10000000000 bytes a cross-reference table can address")
             }
@@ -413,7 +455,9 @@ impl From<Error> for officewright_core::Error {
             | Error::OutOfRange { .. }
             | Error::InvalidDash
             | Error::NoClip
-            | Error::TooManyClips => Self::InvalidArgument(message),
+            | Error::TooManyClips
+            | Error::UnknownDestination { .. }
+            | Error::DuplicateDestination { .. } => Self::InvalidArgument(message),
         }
     }
 }
