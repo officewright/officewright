@@ -4368,8 +4368,8 @@ mod tests {
         use crate::ir::{
             HorizontalPlacement, HorizontalReference, VerticalPlacement, VerticalReference,
         };
-        // Issue #476: a paragraph of `A`, `B`, `W` (40 `A`s, 240 pt), `X` (10 `A`s) and `s`
-        // a space, `h` a soft hyphen, `b` a line break, `g` a page break, `c` a column
+        // Issue #476: a paragraph of `A`, `B`, `W` (40 `A`s, 240 pt), `X` (10 `A`s), `V`
+        // (`AA`), `U` (5 `A`s) and `s` a space, `h` a soft hyphen, `b` a line break, `g` a page break, `c` a column
         // break and `p` a floating picture placed from the top of its line, then a
         // paragraph `Z`, in exact lines of 20 pt on pages with a body 260 pt wide: lines at
         // 20, 40 and 60 down, their baselines at 36, 56 and 76. A picture at the end, or
@@ -4378,7 +4378,7 @@ mod tests {
         // break in `letter-dol-cobra-election-notice`, its heading first on its page.
         type Texts<'a> = &'a [(usize, &'a str, f64)];
         type Pictures<'a> = &'a [(usize, f64)];
-        let cases: [(&str, Texts<'_>, Pictures<'_>); 13] = [
+        let cases: [(&str, Texts<'_>, Pictures<'_>); 15] = [
             ("Ap", &[(0, "A", 36.0), (0, "Z", 56.0)], &[(0, 20.0)]),
             (
                 "App",
@@ -4422,6 +4422,12 @@ mod tests {
             // of the line before, and the soft hyphen draws its hyphen.
             ("WspX", WRAPPED, &[(0, 20.0)]),
             ("WhpX", HYPHENATED, &[(0, 20.0)]),
+            // A soft hyphen whose hyphen does not fit, then a picture: the line wraps at the
+            // spaces before, as it does with no picture, and `AA` goes to line 2 with it.
+            ("WssVhpX", AT_THE_SPACES, &[(0, 40.0)]),
+            // A wrap at a space, then a picture inside the next word: the word is not broken
+            // at the picture, and the picture goes to line 2 with it.
+            ("WsVpU", IN_A_WORD, &[(0, 40.0)]),
         ];
         const WRAPPED: &[(usize, &str, f64)] = &[
             (0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 36.0),
@@ -4436,6 +4442,20 @@ mod tests {
             (0, "\u{ad}", 36.0),
             (0, "", 36.0),
             (0, "AAAAAAAAAA", 56.0),
+            (0, "Z", 76.0),
+        ];
+        const AT_THE_SPACES: &[(usize, &str, f64)] = &[
+            (0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 36.0),
+            (0, "  ", 36.0),
+            (0, "AA\u{ad}", 56.0),
+            (0, "AAAAAAAAAA", 56.0),
+            (0, "Z", 76.0),
+        ];
+        const IN_A_WORD: &[(usize, &str, f64)] = &[
+            (0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 36.0),
+            (0, " ", 36.0),
+            (0, "AA", 56.0),
+            (0, "AAAAA", 56.0),
             (0, "Z", 76.0),
         ];
         for (paragraph, texts, pictures) in cases {
@@ -4461,6 +4481,8 @@ mod tests {
                     ),
                     'W' => Inline::text("A".repeat(40), style),
                     'X' => Inline::text("A".repeat(10), style),
+                    'V' => Inline::text("AA", style),
+                    'U' => Inline::text("AAAAA", style),
                     's' => Inline::text(" ", style),
                     'h' => Inline::soft_hyphen(style),
                     text => Inline::text(text.to_string(), style),
