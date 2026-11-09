@@ -351,7 +351,7 @@ fn report_note_numbers(notes: &NoteNumbers, fonts: &mut Fonts<'_>) {
         fonts.report_once(
             ReportKind::FeatureUnsupported,
             &Location::default(),
-            "footnote numbers that start again on each page are numbered through the section"
+            "note numbers that start again on each page are numbered through the section"
                 .to_owned(),
         );
     }
@@ -4426,10 +4426,19 @@ mod tests {
         ];
         document.add_section(Section::new(setup()).with_blocks(vec![holding(style, inlines)]));
         let (laid, report) = laid(&document, 10);
-        assert_eq!(
-            texts(&laid.expect("pages").pages[0]),
-            ["A", "1", "A", "2", "A", "i", "A", "Á"]
-        );
+        let page = &laid.expect("pages").pages[0];
+        assert_eq!(texts(page), ["A", "1", "A", "2", "A", "i", "A", "Á"]);
+        // A number is raised as its style says.
+        let baseline = |text: &str| {
+            page.items.iter().find_map(|item| match item {
+                DisplayItem::Glyphs(run) if run.clusters.iter().any(|c| c.text == text) => {
+                    Some(run.origin.y.0)
+                }
+                _ => None,
+            })
+        };
+        let (number, text) = (baseline("1").expect("1"), baseline("A").expect("A"));
+        assert!(number < text, "{number} {text}");
         // The notes' texts are still left out, and that is reported.
         assert!(
             messages(&report)
@@ -4437,6 +4446,85 @@ mod tests {
                 .any(|m| m
                     == "footnotes and endnotes are not laid out yet: their texts are left out"),
             "{report:?}"
+        );
+    }
+
+    #[test]
+    fn numbers_written_otherwise_and_references_that_show_no_number_are_reported() {
+        use crate::ir::{
+            InlineObject, Note, NoteKind, NoteProps, NoteRestart, NumberFormat, ObjectContent, Size,
+        };
+        const DECIMAL: &str =
+            "numbers in a format the layout does not write are written as decimal";
+        const EACH_PAGE: &str =
+            "note numbers that start again on each page are numbered through the section";
+        const FRAMES: &str = "note references in headers and footers show no number";
+        // A section whose footnotes are numbered in a format the layout does not write and
+        // start again on each page, with its one footnote referenced nowhere, in the
+        // body, in a text box of the body or in the header.
+        #[derive(Clone, Copy, PartialEq)]
+        enum Place {
+            Nowhere,
+            Body,
+            TextBox,
+            Header,
+        }
+        let lay = |place: Place| {
+            let mut document = Document::default();
+            let style = document
+                .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+            let note = document.add_note(Note::new(NoteKind::Footnote, []));
+            let reference = Inline::note_reference(note, false, style);
+            let mut body = vec![Inline::text("A", style)];
+            let mut header = vec![Inline::text("Z", style)];
+            match place {
+                Place::Nowhere => {}
+                Place::Body => body.push(reference),
+                Place::TextBox => body.push(Inline::Object(InlineObject::new(
+                    ObjectContent::text_box(text_box(vec![holding(
+                        style,
+                        vec![Inline::text("B", style), reference],
+                    )])),
+                    Size::new(Pt(40.0), Pt(30.0)),
+                ))),
+                Place::Header => header.push(reference),
+            }
+            let footnotes = NoteProps::footnotes()
+                .with_format(NumberFormat::Other("hebrew1".into()))
+                .with_restart(NoteRestart::EachPage);
+            document.add_section(
+                Section::new(close_frames())
+                    .with_footnotes(footnotes)
+                    .with_headers(HeaderFooterSet::default().with_primary([holding(style, header)]))
+                    .with_blocks(vec![holding(style, body)]),
+            );
+            let (laid, report) = laid(&document, 10);
+            let mut texts = texts(&laid.expect("pages").pages[0]);
+            texts.sort();
+            let messages = messages(&report);
+            let reported = [DECIMAL, EACH_PAGE, FRAMES].map(|m| messages.iter().any(|r| r == m));
+            (texts, reported)
+        };
+        // Numbered in the body, in decimal through the section, and both reported; the
+        // number in the text's style is one run with it.
+        assert_eq!(
+            lay(Place::Body),
+            (vec!["A1".into(), "Z".into()], [true, true, false])
+        );
+        // A footnote referenced nowhere numbers nothing, and nothing is reported; nor is
+        // one in a text box, which Word ignores.
+        assert_eq!(
+            lay(Place::Nowhere),
+            (vec!["A".into(), "Z".into()], [false; 3])
+        );
+        assert_eq!(
+            lay(Place::TextBox),
+            (vec!["A".into(), "B".into(), "Z".into()], [false; 3])
+        );
+        // One in the header shows no number, which is reported.
+        assert_eq!(
+            lay(Place::Header),
+            (vec!["A".into(), "Z".into()], [false, false, true])
         );
     }
 

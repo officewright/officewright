@@ -17,9 +17,9 @@ pub(crate) struct NoteNumbers {
     ignored: HashSet<NoteId>,
     /// Whether a number's format is one the layout writes as decimal instead.
     pub(crate) decimal: bool,
-    /// Whether a footnote of a section that restarts the numbers of its footnotes on each
-    /// page is numbered, which the layout numbers through the section until it places
-    /// footnotes on their pages.
+    /// Whether a note is numbered in a section that starts the numbers of its kind again
+    /// on each page, which the layout numbers through the section until it places notes
+    /// on their pages.
     pub(crate) each_page: bool,
 }
 
@@ -173,7 +173,7 @@ impl Walk<'_, '_> {
             NoteKind::Endnote => self.section.endnotes(),
             _ => self.section.footnotes(),
         };
-        if kind == NoteKind::Footnote && props.restart() == NoteRestart::EachPage {
+        if props.restart() == NoteRestart::EachPage {
             self.numbers.each_page = true;
         }
         let number = self.next.get(kind).unwrap_or(u32::from(props.start()));
@@ -208,24 +208,36 @@ mod tests {
         let end = note(NoteKind::Endnote);
         let custom = note(NoteKind::Footnote);
         let boxed = note(NoteKind::Footnote);
+        let boxed_in_table = note(NoteKind::Footnote);
+        let paged = note(NoteKind::Footnote);
         let reference = |note, custom| Inline::note_reference(note, custom, style);
         // The second note's reference comes first, in a table; the third's in the stored
-        // result of a field; a reference to the first again takes no number.
+        // result of a field; a reference to the first again takes no number, nor does one
+        // in the result of a PAGE field, which the layout computes.
         let cell = Cell::default().with_blocks([holding(style, vec![reference(second, false)])]);
         let table: Block = Table::default()
             .with_rows([Row::default().with_cells([cell])])
             .into();
         let field = Field::new(FieldKind::Other("QUOTE".into()), style)
             .with_result(vec![reference(third, false)]);
+        let page = Field::new(FieldKind::Page, style).with_result(vec![reference(paged, false)]);
+        let cell =
+            Cell::default().with_blocks([holding(style, vec![reference(boxed_in_table, false)])]);
         let in_box = Inline::Object(InlineObject::new(
             ObjectContent::text_box(
-                TextBox::new().with_blocks([holding(style, vec![reference(boxed, false)])]),
+                TextBox::new().with_blocks([
+                    holding(style, vec![reference(boxed, false)]),
+                    Table::default()
+                        .with_rows([Row::default().with_cells([cell])])
+                        .into(),
+                ]),
             ),
             Size::new(Pt(10.0), Pt(10.0)),
         ));
         let paragraph = holding(
             style,
             vec![
+                Inline::Field(page),
                 reference(first, false),
                 Inline::Field(field),
                 reference(end, false),
@@ -244,6 +256,11 @@ mod tests {
         assert_eq!(numbers.text(end), Some("i"));
         assert_eq!(numbers.text(custom), None);
         assert_eq!(numbers.text(boxed), None);
+        assert_eq!(numbers.text(boxed_in_table), None);
+        assert_eq!(numbers.text(paged), None);
+        // Only the references in the text box, its table's too, are ones Word ignores.
+        assert!(numbers.ignored(boxed) && numbers.ignored(boxed_in_table));
+        assert!(![first, custom, paged].iter().any(|&id| numbers.ignored(id)));
         assert!(!numbers.decimal && !numbers.each_page);
     }
 
@@ -251,7 +268,7 @@ mod tests {
     fn a_section_s_numbering_gives_the_start_the_format_and_where_numbers_start_again() {
         let mut document = Document::default();
         let style = document.add_run_style(RunStyle::default());
-        let notes: Vec<NoteId> = (0..6)
+        let notes: Vec<NoteId> = (0..8)
             .map(|_| document.add_note(Note::new(NoteKind::Footnote, [])))
             .collect();
         let paragraph = |range: std::ops::Range<usize>| {
@@ -269,9 +286,19 @@ mod tests {
         let restarting = NoteProps::footnotes()
             .with_start(3)
             .with_restart(NoteRestart::EachSection);
+        let each_page = NoteProps::footnotes().with_restart(NoteRestart::EachPage);
         // V and VI; on through the next section, which numbers continuously, VII and VIII;
-        // then from its start in a section that starts again: 3 and 4.
-        for (props, range) in [(roman.clone(), 0..2), (roman, 2..4), (restarting, 4..6)] {
+        // then from its start in a section that starts again: 3 and 4; on through a
+        // section that numbers continuously after it, 5; from its start in a section that
+        // starts again on each page, 1.
+        let sections = [
+            (roman.clone(), 0..2),
+            (roman, 2..4),
+            (restarting, 4..6),
+            (NoteProps::footnotes(), 6..7),
+            (each_page.clone(), 7..8),
+        ];
+        for (props, range) in sections {
             let section = Section::new(PageSetup::default())
                 .with_footnotes(props)
                 .with_blocks([paragraph(range)]);
@@ -287,23 +314,39 @@ mod tests {
                 Some("VII"),
                 Some("VIII"),
                 Some("3"),
-                Some("4")
+                Some("4"),
+                Some("5"),
+                Some("1")
             ]
         );
-        // Starting again on each page is numbered through the section, and noted.
-        let mut document = Document::default();
-        let style = document.add_run_style(RunStyle::default());
-        let id = document.add_note(Note::new(NoteKind::Footnote, []));
-        document.add_section(
-            Section::new(PageSetup::default())
-                .with_footnotes(NoteProps::footnotes().with_restart(NoteRestart::EachPage))
-                .with_blocks([holding(
-                    style,
-                    vec![Inline::note_reference(id, false, style)],
-                )]),
-        );
-        let numbers = NoteNumbers::new(&document);
-        assert!(numbers.each_page);
-        assert_eq!(numbers.text(id), Some("1"));
+        // Starting again on each page is numbered through the section, and noted when a
+        // note of a kind that starts again so is numbered: not for a note of the other
+        // kind, nor for none.
+        let each_page_with = |restarting: NoteKind, referenced: Option<NoteKind>| {
+            let mut document = Document::default();
+            let style = document.add_run_style(RunStyle::default());
+            let inlines = referenced
+                .map(|kind| {
+                    let id = document.add_note(Note::new(kind, []));
+                    Inline::note_reference(id, false, style)
+                })
+                .into_iter()
+                .collect();
+            let section = Section::new(PageSetup::default());
+            let section = match restarting {
+                NoteKind::Endnote => {
+                    section.with_endnotes(NoteProps::endnotes().with_restart(NoteRestart::EachPage))
+                }
+                _ => section.with_footnotes(each_page.clone()),
+            };
+            document.add_section(section.with_blocks([holding(style, inlines)]));
+            NoteNumbers::new(&document).each_page
+        };
+        let (footnote, endnote) = (NoteKind::Footnote, NoteKind::Endnote);
+        assert!(each_page_with(footnote, Some(footnote)));
+        assert!(each_page_with(endnote, Some(endnote)));
+        assert!(!each_page_with(footnote, Some(endnote)));
+        assert!(!each_page_with(endnote, Some(footnote)));
+        assert!(!each_page_with(footnote, None));
     }
 }
