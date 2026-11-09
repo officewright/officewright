@@ -70,15 +70,53 @@ pub(crate) enum Written {
     Unrepresentable,
 }
 
-/// `number` written in `format`, and whether it is written in decimal instead, which the
-/// caller reports: a format the layout does not write, or a number the format cannot
-/// represent. Words and ordinals are English.
-pub(crate) fn number_text(number: u32, format: &NumberFormat) -> (String, bool) {
-    match written(number, format, Words::English) {
-        Written::Text(text) => (text, false),
-        Written::Decimal(text) => (text, true),
-        Written::Unrepresentable => (number.to_string(), true),
+/// How a list label's or a note's number is written otherwise than its format says, for
+/// the report.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Departures {
+    /// In decimal, since the layout does not write the format.
+    pub(crate) unsupported: bool,
+    /// In decimal, since the format cannot represent the number.
+    pub(crate) unrepresentable: bool,
+    /// In English words or with an English suffix, since the layout has no words for the
+    /// language.
+    pub(crate) language: bool,
+}
+
+impl Departures {
+    /// Adds the departures of `other`.
+    pub(crate) fn add(&mut self, other: Self) {
+        self.unsupported |= other.unsupported;
+        self.unrepresentable |= other.unrepresentable;
+        self.language |= other.language;
     }
+}
+
+/// `number` written in `format` for a list label or a note, with words and ordinals in
+/// the language of the BCP 47 tag `language`; a number the format cannot represent in
+/// decimal. How it departs from the format goes to the report.
+pub(crate) fn number_text(
+    number: u32,
+    format: &NumberFormat,
+    language: Option<&str>,
+) -> (String, Departures) {
+    let (words, known) = Words::of(language);
+    let mut departures = Departures {
+        language: !known && in_language(format),
+        ..Departures::default()
+    };
+    let text = match written(number, format, words) {
+        Written::Text(text) => text,
+        Written::Decimal(text) => {
+            departures.unsupported = true;
+            text
+        }
+        Written::Unrepresentable => {
+            departures.unrepresentable = true;
+            number.to_string()
+        }
+    };
+    (text, departures)
 }
 
 /// Whether `format` writes words or suffixes of a language.
@@ -429,7 +467,7 @@ mod tests {
     use super::*;
 
     fn text(number: u32, format: NumberFormat) -> String {
-        number_text(number, &format).0
+        number_text(number, &format, None).0
     }
 
     #[test]
@@ -493,15 +531,79 @@ mod tests {
     }
 
     #[test]
-    fn other_formats_are_decimal_and_say_so() {
+    fn labels_and_notes_say_how_their_numbers_depart_from_the_format() {
+        let none = Departures::default();
+        let hebrew = NumberFormat::Other("hebrew1".into());
         assert_eq!(
-            number_text(5, &NumberFormat::Other("hebrew1".into())),
-            ("5".to_owned(), true)
+            number_text(5, &hebrew, None),
+            (
+                "5".to_owned(),
+                Departures {
+                    unsupported: true,
+                    ..none
+                }
+            )
         );
         assert_eq!(
-            number_text(5, &NumberFormat::Decimal),
-            ("5".to_owned(), false)
+            number_text(5, &NumberFormat::Decimal, None),
+            ("5".to_owned(), none)
         );
+        // Letters stop at 780; such a number is written in decimal.
+        assert_eq!(
+            number_text(781, &NumberFormat::LowerLetter, None),
+            (
+                "781".to_owned(),
+                Departures {
+                    unrepresentable: true,
+                    ..none
+                }
+            )
+        );
+        // Words in the language of the label or note, English for one without words.
+        assert_eq!(
+            number_text(27, &NumberFormat::CardinalText, Some("de-DE")),
+            ("Siebenundzwanzig".to_owned(), none)
+        );
+        assert_eq!(
+            number_text(27, &NumberFormat::Ordinal, Some("fr-FR")),
+            (
+                "27th".to_owned(),
+                Departures {
+                    language: true,
+                    ..none
+                }
+            )
+        );
+        // A format without words has no language to depart from.
+        assert_eq!(
+            number_text(27, &NumberFormat::Hex, Some("fr-FR")),
+            ("1B".to_owned(), none)
+        );
+    }
+
+    #[test]
+    fn only_words_and_ordinals_have_a_language() {
+        use NumberFormat::*;
+        let formats = [
+            Decimal,
+            DecimalZero,
+            NumberInDash,
+            LowerLetter,
+            UpperLetter,
+            LowerRoman,
+            UpperRoman,
+            Ordinal,
+            CardinalText,
+            OrdinalText,
+            DollarText,
+            Hex,
+            Chicago,
+            Bullet,
+            None,
+            Other("hebrew1".into()),
+        ];
+        let with: Vec<&NumberFormat> = formats.iter().filter(|f| in_language(f)).collect();
+        assert_eq!(with, [&Ordinal, &CardinalText, &OrdinalText, &DollarText]);
     }
 
     #[test]
@@ -615,6 +717,11 @@ mod tests {
         assert_eq!(german(NumberFormat::Ordinal), "27.");
         assert_eq!(german(NumberFormat::OrdinalText), "Siebenundzwanzigste");
         assert_eq!(german(NumberFormat::CardinalText), "Siebenundzwanzig");
+        // German dollar text is a hypothesis until a reference shows it.
+        assert_eq!(
+            german(NumberFormat::DollarText),
+            "Siebenundzwanzig und 00/100"
+        );
     }
 
     #[test]
@@ -696,10 +803,9 @@ mod tests {
             }
         }
         // Lists and notes write such a number in decimal and say so.
-        assert_eq!(
-            number_text(1_000_000, &NumberFormat::CardinalText),
-            ("1000000".to_owned(), true)
-        );
+        let (text, departures) = number_text(1_000_000, &NumberFormat::CardinalText, None);
+        assert_eq!(text, "1000000");
+        assert!(departures.unrepresentable);
     }
 
     #[test]
@@ -708,6 +814,7 @@ mod tests {
         assert_eq!(Words::of(Some("en-GB")), (Words::English, true));
         assert_eq!(Words::of(Some("DE-at")), (Words::German, true));
         assert_eq!(Words::of(Some("de")), (Words::German, true));
+        assert_eq!(Words::of(Some("")), (Words::English, true));
         assert_eq!(Words::of(Some("fr-FR")), (Words::English, false));
         assert_eq!(Words::of(Some("deu")), (Words::English, false));
     }

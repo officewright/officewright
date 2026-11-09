@@ -309,13 +309,17 @@ pub enum NumberFormat {
     LowerRoman,
     /// I, II, III.
     UpperRoman,
-    /// 1st, 2nd, 3rd; in German 1., 2., 3.
+    /// 1st, 2nd, 3rd; in German 1., 2., 3. The language is that of the style of the
+    /// field, the list label or the note reference; for a language other than English and
+    /// German, English, which the layout reports.
     Ordinal,
-    /// one, two, three: in words, in English or German by the language of the text.
+    /// one, two, three: in words, in English or German as [`Ordinal`](Self::Ordinal) says.
     CardinalText,
-    /// first, second, third: in words, in English or German by the language of the text.
+    /// first, second, third: in words, in English or German as
+    /// [`Ordinal`](Self::Ordinal) says.
     OrdinalText,
-    /// one and 00/100, two and 00/100: in words as on a cheque.
+    /// one and 00/100, two and 00/100: in words as on a cheque, in English or German as
+    /// [`Ordinal`](Self::Ordinal) says.
     DollarText,
     /// 1, …, 9, A, …, F, 10: hexadecimal, in capitals.
     Hex,

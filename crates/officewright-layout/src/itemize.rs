@@ -748,18 +748,21 @@ impl Builder<'_, '_, '_> {
                  written in English",
             );
         }
-        let text = match written(number, format, words) {
-            Written::Text(text) => text,
+        let start = self.out.text.len();
+        match written(number, format, words) {
+            Written::Text(text) => self.text_in(&text, field.style(), &style),
             Written::Decimal(text) => {
                 self.unsupported(
                     "numbers in a format the layout does not write are written as decimal",
                 );
-                text
+                self.text_in(&text, field.style(), &style);
             }
-            Written::Unrepresentable => UNREPRESENTABLE.to_owned(),
-        };
-        let start = self.out.text.len();
-        self.text(&text, field.style());
+            // Word writes its error text in bold.
+            Written::Unrepresentable => {
+                let bold = style.with_bold(true).with_bold_complex_script(true);
+                self.text_in(UNREPRESENTABLE, field.style(), &bold);
+            }
+        }
         if *field.kind() == FieldKind::Page {
             self.out.page_fields.push(start..self.out.text.len());
         }

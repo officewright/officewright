@@ -10,7 +10,7 @@ use crate::ir::{
     Document, Level, LevelAlignment, LevelTextPart, ListId, ListInstanceId, ListItem, NumberFormat,
     Restart, RunStyleId, Suffix,
 };
-use crate::numbers::number_text;
+use crate::numbers::{Departures, number_text};
 use crate::report::Location;
 
 /// The levels a list has: Word takes `w:ilvl` from 0 to 8 (MS-OI29500 2.1.280 a).
@@ -51,6 +51,12 @@ pub(crate) struct Counters {
     /// The first paragraph whose label has a number written in decimal because its
     /// format is one the layout does not write.
     pub(crate) unsupported_format: Option<Location>,
+    /// The first paragraph whose label has a number written in decimal because its
+    /// format cannot represent it.
+    pub(crate) unrepresentable: Option<Location>,
+    /// The first paragraph whose label has a number in English words or with an English
+    /// suffix because the layout has no words for the label's language.
+    pub(crate) other_language: Option<Location>,
     /// The first paragraph whose label, or the template it is written from, is cut at
     /// [`MAX_LABEL_CHARS`].
     pub(crate) long_label: Option<Location>,
@@ -152,8 +158,11 @@ impl Counters {
                 *slot = None;
             }
         }
-        let mut unsupported = false;
+        let mut departures = Departures::default();
         let mut cut = long_template;
+        let language = document
+            .run_style(item.label_style())
+            .and_then(|style| style.language().latin());
         let shown = Shown {
             levels: &levels,
             starts: &counting,
@@ -164,10 +173,17 @@ impl Counters {
             level.legal(),
             index,
             &shown,
-            (&mut unsupported, &mut cut),
+            language,
+            (&mut departures, &mut cut),
         );
-        if unsupported && self.unsupported_format.is_none() {
-            self.unsupported_format = Some(location.clone());
+        for (departs, first) in [
+            (departures.unsupported, &mut self.unsupported_format),
+            (departures.unrepresentable, &mut self.unrepresentable),
+            (departures.language, &mut self.other_language),
+        ] {
+            if departs && first.is_none() {
+                *first = Some(location.clone());
+            }
         }
         if cut && self.long_label.is_none() {
             self.long_label = Some(location.clone());
@@ -251,14 +267,16 @@ fn read_template(template: &[LevelTextPart]) -> (Vec<Piece>, bool) {
 /// value of its level in that level's format, a level with no value its start. A
 /// placeholder of a level below the paragraph's makes Word ignore the whole template
 /// (MS-OI29500 2.1.283 c). A legal level writes every number in decimal but that of a
-/// level without numbers (OI 2.1.278 a, b). The text ends at [`MAX_LABEL_CHARS`], and
-/// `cut` says when it does.
+/// level without numbers (OI 2.1.278 a, b). Words and ordinals are in the language
+/// `language`, the label's. The text ends at [`MAX_LABEL_CHARS`], and `cut` says when it
+/// does; `departures` how a number is written otherwise than its format says.
 fn label_text(
     template: &[Piece],
     legal: bool,
     index: usize,
     shown: &Shown<'_, '_>,
-    (unsupported, cut): (&mut bool, &mut bool),
+    language: Option<&str>,
+    (departures, cut): (&mut Departures, &mut bool),
 ) -> String {
     let mut text = String::new();
     let mut count = 0;
@@ -286,8 +304,8 @@ fn label_text(
                 } else {
                     format
                 };
-                let (number, decimal) = number_text(value, format);
-                *unsupported |= decimal;
+                let (number, departs) = number_text(value, format, language);
+                departures.add(departs);
                 *cut |= push_within(&mut text, &mut count, number.chars());
             }
         }
@@ -545,6 +563,44 @@ mod tests {
             labels(&mut document, &items),
             ["(IV-A)", "4.2", "", "\u{2022}", "-", "-"]
         );
+    }
+
+    #[test]
+    fn labels_write_words_in_their_language_and_report_what_they_write_otherwise() {
+        use crate::ir::Language;
+        let mut document = Document::default();
+        let levels = [
+            level(&[LevelTextPart::Placeholder(0)], NumberFormat::CardinalText).with_start(27),
+            level(&[LevelTextPart::Placeholder(1)], NumberFormat::LowerLetter).with_start(781),
+        ];
+        let list = document.add_list(ListDefinition::default().with_levels(levels));
+        let one = document.add_list_instance(ListInstance::new(list));
+        let in_language = |document: &mut Document, tag: &str| {
+            document.add_run_style(
+                RunStyle::default().with_language(Language::default().with_latin(Some(tag.into()))),
+            )
+        };
+        let german = in_language(&mut document, "de-DE");
+        let french = in_language(&mut document, "fr-FR");
+        let mut counters = Counters::default();
+        let at = |index: usize| {
+            let mut location = Location::default();
+            location.push(crate::report::Step::Index(index));
+            location
+        };
+        let mut label = |level: u8, style: RunStyleId, index: usize| {
+            counters
+                .label(&document, &ListItem::new(one, level, style), &at(index))
+                .map(|label| label.text)
+        };
+        // The label's language gives the words; one without words gives English.
+        assert_eq!(label(0, german, 1).as_deref(), Some("Siebenundzwanzig"));
+        assert_eq!(label(0, french, 2).as_deref(), Some("twenty-eight"));
+        // Letters stop at 780: 781 is written in decimal.
+        assert_eq!(label(1, german, 3).as_deref(), Some("781"));
+        assert_eq!(counters.other_language, Some(at(2)));
+        assert_eq!(counters.unrepresentable, Some(at(3)));
+        assert_eq!(counters.unsupported_format, None);
     }
 
     #[test]
