@@ -1178,10 +1178,10 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-list-level-linked-no-level.docx": {
-      "line_agreement": 0.6667,
-      "ssim_mean": 0.9436,
-      "ssim_min": 0.9436,
-      "text_score": 0.9901
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9892,
+      "ssim_min": 0.9892,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-list-shared-abstract.docx": {
       "line_agreement": 1.0,
