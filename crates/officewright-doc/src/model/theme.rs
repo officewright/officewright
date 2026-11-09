@@ -51,17 +51,18 @@ pub(crate) struct FormatScheme {
     pub(crate) background_fills: Vec<StyleFill>,
 }
 
-/// A fill of a theme's format scheme: its kind, none for no fill, and its colour element
-/// (that of its `a:solidFill`, of its gradient's first stop, or of its pattern's
-/// foreground), kept with the document's tokens.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A fill of a theme's format scheme: its kind, none for no fill, and its colour (that of
+/// its `a:solidFill`, of its gradient's first stop, or of its pattern's foreground), read
+/// with at most [`MAX_SCHEME_TRANSFORMS`](super::text_box::MAX_SCHEME_TRANSFORMS) of its
+/// transforms, so that a shape resolves it without reading the theme's markup again.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StyleFill {
     pub(crate) kind: Option<super::text_box::FillKind>,
-    pub(crate) color: Option<super::xml::Span>,
+    pub(crate) color: Option<super::color::ColorData>,
 }
 
 /// A line of a theme's format scheme (`a:ln`): the values it writes, its width in EMUs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StyleLine {
     pub(crate) width: Option<u32>,
     pub(crate) compound: Option<super::text_box::CompoundLine>,

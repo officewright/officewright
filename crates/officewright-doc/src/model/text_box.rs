@@ -6,7 +6,9 @@
 
 use officewright_core::Pt;
 
-use super::color::{Paint, VmlColor, color_element, color_of_element, drawing_color, vml_color};
+use super::color::{
+    Paint, VmlColor, color_element, color_of_element, drawing_color, read_color, resolve, vml_color,
+};
 use super::drawing::{Offsets, boolean, child, coordinate, value};
 use super::properties::xml_enum;
 use super::theme::{StyleFill, StyleLine};
@@ -874,17 +876,16 @@ fn reference(
 /// `a:fillStyleLst` from 1, of `a:bgFillStyleLst` from 1001; none for 0 and 1000, no fill
 /// (§20.1.4.2.10), and without `document`, as when the values are checked while it is
 /// read.
-fn style_fill(
+fn style_fill<'d>(
     shape: Element<'_>,
     names: &Names,
-    document: Option<&Document>,
+    document: Option<&'d Document>,
     report: Report<'_>,
-) -> Option<(StyleFill, Option<Paint>)> {
+) -> Option<(&'d StyleFill, Option<Paint>)> {
     let (index, placeholder) = reference(shape, names, document, "fillRef", report)?;
     let scheme = &document?.theme.as_ref()?.format_scheme;
-    let at = |list: &[StyleFill], first: u32| {
+    let at = |list: &'d [StyleFill], first: u32| {
         list.get(usize::try_from(index.checked_sub(first)?).ok()?)
-            .copied()
     };
     let entry = match index {
         0 | 1000 => return None,
@@ -896,18 +897,17 @@ fn style_fill(
 
 /// The line of the theme's format scheme that a shape's style names (`a:lnRef`): of
 /// `a:lnStyleLst` from 1; none for 0, and without `document`.
-fn style_line(
+fn style_line<'d>(
     shape: Element<'_>,
     names: &Names,
-    document: Option<&Document>,
+    document: Option<&'d Document>,
     report: Report<'_>,
-) -> Option<(StyleLine, Option<Paint>)> {
+) -> Option<(&'d StyleLine, Option<Paint>)> {
     let (index, placeholder) = reference(shape, names, document, "lnRef", report)?;
     let scheme = &document?.theme.as_ref()?.format_scheme;
     let entry = scheme
         .lines
-        .get(usize::try_from(index.checked_sub(1)?).ok()?)
-        .copied()?;
+        .get(usize::try_from(index.checked_sub(1)?).ok()?)?;
     Some((entry, placeholder))
 }
 
@@ -932,19 +932,8 @@ fn fill_parts<'a>(fill: Element<'a>, names: &Names) -> Option<(FillKind, Option<
     ))
 }
 
-/// A fill of this kind and colour element, with at most `max_transforms` transforms of its
-/// colour applied.
-fn paint_fill(
-    kind: FillKind,
-    color: Option<Element<'_>>,
-    names: &Names,
-    document: Option<&Document>,
-    (placeholder, max_transforms): (Option<Paint>, usize),
-    report: Report<'_>,
-) -> ShapeFill {
-    let paint = color.and_then(|color| {
-        color_of_element(color, names, document, placeholder, max_transforms, report).0
-    });
+/// A fill of this kind and colour.
+fn shape_fill(kind: FillKind, paint: Option<Paint>) -> ShapeFill {
     ShapeFill {
         kind,
         color: paint.map(|paint| paint.rgb),
@@ -969,12 +958,13 @@ pub(crate) fn style_fill_entry(
             false,
         );
     };
-    let over = color.is_some_and(|color| {
-        color_of_element(color, names, None, None, MAX_SCHEME_TRANSFORMS, report).1
-    });
+    let (color, over) = match color {
+        Some(color) => read_color(color, names, MAX_SCHEME_TRANSFORMS, report),
+        None => (None, false),
+    };
     let fill = StyleFill {
         kind: Some(kind),
-        color: color.map(Element::span),
+        color,
     };
     (fill, over)
 }
@@ -1016,27 +1006,17 @@ fn drawing_fill(
     match own {
         Some(fill) => {
             let (kind, color) = fill_parts(fill, names)?;
-            Some(paint_fill(
-                kind,
-                color,
-                names,
-                document,
-                (None, usize::MAX),
-                report,
-            ))
+            let paint =
+                color.and_then(|color| color_of_element(color, names, document, None, report));
+            Some(shape_fill(kind, paint))
         }
         None => {
             let (entry, placeholder) = style_fill(shape, names, document, report)?;
-            let document = document?;
-            let color = entry.color.map(|color| document.element(color));
-            Some(paint_fill(
-                entry.kind?,
-                color,
-                names,
-                Some(document),
-                (placeholder, MAX_SCHEME_TRANSFORMS),
-                report,
-            ))
+            let paint = entry
+                .color
+                .as_ref()
+                .and_then(|color| resolve(color, document, placeholder));
+            Some(shape_fill(entry.kind?, paint))
         }
     }
 }
@@ -1066,22 +1046,12 @@ fn drawing_outline(
         },
         None => {
             let (line, placeholder) = style?;
-            let fill = line.fill?;
+            let fill = line.fill.as_ref()?;
             match fill.kind? {
-                FillKind::Solid => {
-                    let color = fill.color.and_then(|color| Some(document?.element(color)));
-                    color.and_then(|color| {
-                        color_of_element(
-                            color,
-                            names,
-                            document,
-                            placeholder,
-                            MAX_SCHEME_TRANSFORMS,
-                            report,
-                        )
-                        .0
-                    })
-                }
+                FillKind::Solid => fill
+                    .color
+                    .as_ref()
+                    .and_then(|color| resolve(color, document, placeholder)),
                 _ => None,
             }
         }

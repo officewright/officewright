@@ -16,7 +16,7 @@ pub(crate) struct Paint {
 }
 
 /// The colour of `parent` (`a:solidFill`, `a:fillRef` and the like): its first colour
-/// element, with the transforms in it applied in their order. `placeholder` stands for
+/// element, with every transform in it applied in their order. `placeholder` stands for
 /// `a:schemeClr val="phClr"`, the colour a style reference gives. A colour of the theme
 /// is resolved through `document`'s colour mapping and theme, and is none without it, as
 /// when the values are checked while the document is read. None also when it has no
@@ -29,31 +29,13 @@ pub(crate) fn drawing_color(
     placeholder: Option<Paint>,
     report: Report<'_>,
 ) -> Option<Paint> {
-    color_of(parent, names, document, placeholder, usize::MAX, report).0
-}
-
-/// The colour of `parent` as [`drawing_color`] reads it, with at most `max_transforms` of
-/// its transforms applied, and whether it has more, which are left out. Its transforms are
-/// read, and reported when not taken, also when its colour names nothing.
-pub(crate) fn color_of(
-    parent: Element<'_>,
-    names: &Names,
-    document: Option<&Document>,
-    placeholder: Option<Paint>,
-    max_transforms: usize,
-    report: Report<'_>,
-) -> (Option<Paint>, bool) {
-    match color_element(parent, names) {
-        Some(element) => color_of_element(
-            element,
-            names,
-            document,
-            placeholder,
-            max_transforms,
-            report,
-        ),
-        None => (None, false),
-    }
+    color_of_element(
+        color_element(parent, names)?,
+        names,
+        document,
+        placeholder,
+        report,
+    )
 }
 
 /// The colour element of `parent` (`a:srgbClr` and the others): its first.
@@ -66,27 +48,23 @@ pub(crate) fn color_element<'a>(parent: Element<'a>, names: &Names) -> Option<El
     })
 }
 
-/// A colour element as [`color_of`] reads the colour of its parent.
+/// A colour element as [`drawing_color`] reads the colour of its parent.
 pub(crate) fn color_of_element(
     element: Element<'_>,
     names: &Names,
     document: Option<&Document>,
     placeholder: Option<Paint>,
-    max_transforms: usize,
     report: Report<'_>,
-) -> (Option<Paint>, bool) {
-    let (color, cut) = read_color(element, names, max_transforms, report);
-    (
-        color.and_then(|color| resolve(&color, document, placeholder)),
-        cut,
-    )
+) -> Option<Paint> {
+    let (color, _) = read_color(element, names, usize::MAX, report);
+    resolve(&color?, document, placeholder)
 }
 
 /// A colour element read into data: its base and its transforms, the colours of the
 /// theme left to resolve when a shape asks for them, so that a colour of the theme's
 /// format scheme is read once however many shapes' styles name it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ColorValue {
+pub(crate) struct ColorData {
     base: Base,
     transforms: Vec<Transform>,
 }
@@ -138,7 +116,7 @@ pub(crate) fn read_color(
     names: &Names,
     max_transforms: usize,
     report: Report<'_>,
-) -> (Option<ColorValue>, bool) {
+) -> (Option<ColorData>, bool) {
     let base = read_base(element, names, report);
     let mut transforms = Vec::new();
     let mut cut = false;
@@ -189,14 +167,14 @@ pub(crate) fn read_color(
             amount: (amount * 1e6).round() as i64,
         });
     }
-    (base.map(|base| ColorValue { base, transforms }), cut)
+    (base.map(|base| ColorData { base, transforms }), cut)
 }
 
 /// A colour read into data, its transforms applied in their order; `placeholder` stands
 /// for `phClr`. A colour of the theme is resolved through `document`'s colour mapping and
 /// theme, and is none without it.
 pub(crate) fn resolve(
-    color: &ColorValue,
+    color: &ColorData,
     document: Option<&Document>,
     placeholder: Option<Paint>,
 ) -> Option<Paint> {
