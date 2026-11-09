@@ -138,7 +138,12 @@ class CheckCorpusSize(unittest.TestCase):
         self.write({"tests/corpus/kept.docx": 10})
         (self.repo / "tests/corpus/sub").mkdir()
         (self.repo / "tests/corpus/sub/large.bin").write_bytes(b"x" * (2 * MB))
-        self.git("update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},tests/corpus/sub")
+        # Any object id will do; the empty tree's has the length of the repository's hash.
+        tree = subprocess.run(
+            ["git", "hash-object", "-t", "tree", "--stdin"], cwd=self.repo, input=b"",
+            check=True, capture_output=True,
+        ).stdout.decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{tree},tests/corpus/sub")
         code, out, err = self.check()
         self.assertEqual((code, err), (0, ""))
         self.assertIn("in 1 files", out)
