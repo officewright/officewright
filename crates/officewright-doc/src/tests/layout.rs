@@ -3013,7 +3013,7 @@ fn translates_cell_values_word_reads_its_own_way() {
                 .with_width(Pt(0.5))
         )
     );
-    // A table's nil margin is taken as not written, as a cell's is.
+    // A table's nil margin is 0, as Word's render of E-table-cell-margins-nil shows.
     let margins = props.cell_margins();
     assert_eq!(
         (
@@ -3022,7 +3022,7 @@ fn translates_cell_values_word_reads_its_own_way() {
             margins.bottom(),
             margins.end()
         ),
-        (Pt(5.0), Pt(10.0), Pt(0.0), Pt(5.4))
+        (Pt(5.0), Pt(10.0), Pt(0.0), Pt(0.0))
     );
     let cells = table.rows()[0].cells();
     // Word ignores a cell's nil margin, which then comes from the table (MS-OI29500
@@ -3035,7 +3035,7 @@ fn translates_cell_values_word_reads_its_own_way() {
             margins.bottom(),
             margins.end()
         ),
-        (Pt(5.0), Pt(10.0), Pt(2.0), Pt(5.4))
+        (Pt(5.0), Pt(10.0), Pt(2.0), Pt(0.0))
     );
     // Both is top in a cell (MS-OI29500 §17.4.83(a)); so is none.
     assert_eq!(cells[0].vertical_align(), ir::CellVerticalAlign::Top);
@@ -3052,6 +3052,73 @@ fn translates_cell_values_word_reads_its_own_way() {
     // A continuing cell adds its own span to the cell it continues.
     assert_eq!(cells.len(), 4);
     assert_eq!(cells[3].grid_span(), 3);
+}
+
+#[test]
+fn takes_cell_margins_that_are_no_length_as_word_s_renders_show() {
+    // word-rules/E-table-cell-margins: Word starts the text of cells whose own margins
+    // are of type pct, auto and nil where it starts that of a cell without margins of
+    // its own, at the table's 5 pt.
+    let margins = |kind: &str, width: u32| {
+        ["top", "start", "bottom", "end"]
+            .map(|side| format!(r#"<w:{side} w:w="{width}" w:type="{kind}"/>"#))
+            .concat()
+    };
+    let cells = [("pct", 500), ("auto", 200), ("nil", 0)]
+        .map(|(kind, width)| {
+            format!(
+                "<w:tc><w:tcPr><w:tcMar>{}</w:tcMar></w:tcPr><w:p/></w:tc>",
+                margins(kind, width)
+            )
+        })
+        .concat();
+    let body = format!(
+        "<w:tbl><w:tblPr><w:tblCellMar>{}</w:tblCellMar></w:tblPr><w:tr>{cells}<w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>",
+        margins("dxa", 100)
+    );
+    let translation = translate(&open(&body));
+    let table = tables(&translation)[0];
+    let five = ir::CellMargins::default()
+        .with_top(Pt(5.0))
+        .with_start(Pt(5.0))
+        .with_bottom(Pt(5.0))
+        .with_end(Pt(5.0));
+    assert_eq!(table.props().cell_margins(), five);
+    let cells = table.rows()[0].cells();
+    for cell in &cells[..3] {
+        assert_eq!(cell.margins(), Some(five));
+    }
+    assert_eq!(cells[3].margins(), None);
+
+    // word-rules/E-table-cell-margins-nil: in a table style whose margins are 10 pt, a
+    // table's own side of type nil is 0 at the start and the end (and at the top and
+    // bottom, where Word's render agrees with 0); the other sides keep the style's.
+    let styles = format!(
+        r#"<w:style w:type="table" w:styleId="Margins10"><w:name w:val="Margins10"/><w:tblPr><w:tblCellMar>{}</w:tblCellMar></w:tblPr></w:style>"#,
+        margins("dxa", 200)
+    );
+    for side in ["top", "start", "bottom", "end"] {
+        let body = format!(
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="Margins10"/><w:tblCellMar><w:{side} w:w="0" w:type="nil"/></w:tblCellMar></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/>"#
+        );
+        let document = with_parts(
+            &body,
+            &[(
+                "styles",
+                "styles.xml",
+                format!(r#"<w:styles xmlns:w="{W}">{styles}</w:styles>"#),
+            )],
+        );
+        let translation = translate(&document);
+        let margins = tables(&translation)[0].props().cell_margins();
+        let width = |of: &str| if of == side { Pt(0.0) } else { Pt(10.0) };
+        let expected = ir::CellMargins::default()
+            .with_top(width("top"))
+            .with_start(width("start"))
+            .with_bottom(width("bottom"))
+            .with_end(width("end"));
+        assert_eq!(margins, expected, "{side}");
+    }
 }
 
 #[test]

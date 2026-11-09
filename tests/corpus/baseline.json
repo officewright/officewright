@@ -1514,16 +1514,16 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-cell-margins-nil.docx": {
-      "line_agreement": 0.6,
-      "ssim_mean": 0.968,
-      "ssim_min": 0.968,
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9854,
+      "ssim_min": 0.9854,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-cell-margins.docx": {
-      "line_agreement": 0.1364,
-      "ssim_mean": 0.9663,
-      "ssim_min": 0.9663,
-      "text_score": 0.5754
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9913,
+      "ssim_min": 0.9913,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-float-align.docx": {
       "line_agreement": 0.8077,
