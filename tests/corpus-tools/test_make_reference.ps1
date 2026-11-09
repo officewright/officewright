@@ -121,6 +121,14 @@ try {
         Check 'a step that answers returns its output' ($done.Status -eq 'done' -and $done.Output[0] -eq 42) $done.Status
         $failed = Invoke-WordStep $worker "throw 'no such document'" @() 10 { @() } $progress
         Check 'a step that fails returns its message' ($failed.Status -eq 'error' -and $failed.Message -eq 'no such document') $failed.Message
+        # The step after a failed one, as closing Word after Word did not start: its output
+        # came back empty, and reading it hid the failure.
+        $after = Invoke-WordStep $worker "'closed'" @() 10 { @() } $progress
+        Check 'a step after a failed one returns its output' ($after.Status -eq 'done' -and $null -ne $after.Output -and @($after.Output).Count -eq 1 -and $after.Output[0] -eq 'closed') $after.Status
+        # The steps share the worker's session, where Word's objects stay.
+        $null = Invoke-WordStep $worker "`$global:kept = 'kept'" @() 10 { @() } $progress
+        $kept = Invoke-WordStep $worker '$global:kept' @() 10 { @() } $progress
+        Check 'steps share the worker''s session' ($kept.Status -eq 'done' -and $null -ne $kept.Output -and $kept.Output[0] -eq 'kept') $kept.Status
 
         # A call blocked until "Word" ends, as a COM call is: the time-out stops the process,
         # checks that it is gone, and the step ends with the step name in the message.
