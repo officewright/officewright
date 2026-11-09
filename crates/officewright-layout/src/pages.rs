@@ -4369,13 +4369,14 @@ mod tests {
             HorizontalPlacement, HorizontalReference, VerticalPlacement, VerticalReference,
         };
         // Issue #476: a paragraph of `A`, `B`, `W` (40 `A`s, 240 pt), `X` (10 `A`s), `V`
-        // (`AA`), `U` (5 `A`s) and `s` a space, `h` a soft hyphen, `b` a line break, `g` a page break, `c` a column
-        // break and `p` a floating picture placed from the top of its line, then a
-        // paragraph `Z`, in exact lines of 20 pt on pages with a body 260 pt wide: lines at
-        // 20, 40 and 60 down, their baselines at 36, 56 and 76. A picture at the end, or
-        // right after a break, adds no line, as Word adds none: the line shape that ends
-        // "Sinceramente," in `form-cfpb-credit-form-c3-es`, and the text box after a page
-        // break in `letter-dol-cobra-election-notice`, its heading first on its page.
+        // (`AA`), `U` (5 `A`s) and `s` a space, `h` a soft hyphen, `b` a line break, `g` a
+        // page break, `c` a column break and `p` a floating picture placed from the top of
+        // its line, then a paragraph `Z`, in exact lines of 20 pt on pages with a body
+        // 260 pt wide: lines at 20, 40 and 60 down, their baselines at 36, 56 and 76. A
+        // picture at the end, or right after a break, adds no line, as Word adds none: the
+        // line shape that ends "Sinceramente," in `form-cfpb-credit-form-c3-es`, and the
+        // text box after a page break in `letter-dol-cobra-election-notice`, its heading
+        // first on its page.
         type Texts<'a> = &'a [(usize, &'a str, f64)];
         type Pictures<'a> = &'a [(usize, f64)];
         let cases: [(&str, Texts<'_>, Pictures<'_>); 15] = [
