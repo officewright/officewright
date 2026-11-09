@@ -1,0 +1,327 @@
+{
+"format": 1,
+"document": "word-rules/E-footnote-beneath-settings.docx",
+"pdf_sha256": "c5628d5ce4821115271ad5e3040a69bed04ef099ade323f71a57a309329c0694",
+"made_with": "pdftotext 26.10.0 -bbox-layout",
+"units": "points, origin at the top left of the page, y downwards",
+"page_count": 1,
+"fonts_not_embedded": [],
+"fonts_rasterized_with": [],
+"compat_flags_dropped": [],
+"compat_flags_added": [
+"useWord2013TrackBottomHyphenation=1"
+],
+"styles_changed": [
+"- EndnoteText: pPr/spacing after=0",
+"- EndnoteText: pPr/spacing line=240",
+"- EndnoteText: pPr/spacing lineRule=auto",
+"- FootnoteText: pPr/spacing after=0",
+"- FootnoteText: pPr/spacing line=240",
+"- FootnoteText: pPr/spacing lineRule=auto",
+"- docDefaults: pPrDefault/pPr/spacing after=0",
+"- docDefaults: pPrDefault/pPr/spacing line=240",
+"- docDefaults: pPrDefault/pPr/spacing lineRule=auto",
+"- docDefaults: pPrDefault/pPr/widowControl"
+],
+"numbering_changed": [],
+"paragraph_styles_changed": [],
+"page_breaks": [],
+"pages": [
+{
+"number": 1,
+"width": 595.32,
+"height": 841.92,
+"lines": [
+{
+"text": "Case 01: w:pos beneathText in the settings only",
+"box": [
+72.024,
+73.32,
+284.908,
+84.36
+],
+"words": [
+{
+"text": "Case",
+"box": [
+72.024,
+73.32,
+93.011,
+84.36
+]
+},
+{
+"text": "01:",
+"box": [
+95.429,
+73.32,
+109.538,
+84.36
+]
+},
+{
+"text": "w:pos",
+"box": [
+112.066,
+73.32,
+138.838,
+84.36
+]
+},
+{
+"text": "beneathText",
+"box": [
+141.212,
+73.32,
+197.736,
+84.36
+]
+},
+{
+"text": "in",
+"box": [
+200.265,
+73.32,
+208.6,
+84.36
+]
+},
+{
+"text": "the",
+"box": [
+211.04,
+73.32,
+226.032,
+84.36
+]
+},
+{
+"text": "settings",
+"box": [
+228.45,
+73.32,
+263.358,
+84.36
+]
+},
+{
+"text": "only",
+"box": [
+265.853,
+73.32,
+284.908,
+84.36
+]
+}
+]
+},
+{
+"text": "Body line 2 holds the reference. 1",
+"box": [
+72.024,
+84.44,
+217.659,
+96.38
+],
+"words": [
+{
+"text": "Body",
+"box": [
+72.024,
+85.34,
+94.656,
+96.38
+]
+},
+{
+"text": "line",
+"box": [
+97.184,
+85.34,
+113.391,
+96.38
+]
+},
+{
+"text": "2",
+"box": [
+115.919,
+85.34,
+121.516,
+96.38
+]
+},
+{
+"text": "holds",
+"box": [
+123.934,
+85.34,
+148.189,
+96.38
+]
+},
+{
+"text": "the",
+"box": [
+150.596,
+85.34,
+165.588,
+96.38
+]
+},
+{
+"text": "reference.",
+"box": [
+168.083,
+85.34,
+214.186,
+96.38
+]
+},
+{
+"text": "1",
+"box": [
+214.13,
+84.44,
+217.659,
+91.4
+]
+}
+]
+},
+{
+"text": "Body line 3, the last line.",
+"box": [
+72.024,
+97.34,
+181.53,
+108.38
+],
+"words": [
+{
+"text": "Body",
+"box": [
+72.024,
+97.34,
+94.656,
+108.38
+]
+},
+{
+"text": "line",
+"box": [
+97.184,
+97.34,
+113.391,
+108.38
+]
+},
+{
+"text": "3,",
+"box": [
+115.919,
+97.34,
+124.309,
+108.38
+]
+},
+{
+"text": "the",
+"box": [
+126.683,
+97.34,
+141.675,
+108.38
+]
+},
+{
+"text": "last",
+"box": [
+144.071,
+97.34,
+159.913,
+108.38
+]
+},
+{
+"text": "line.",
+"box": [
+162.442,
+97.34,
+181.53,
+108.38
+]
+}
+]
+},
+{
+"text": "1",
+"box": [
+72.024,
+759.036,
+75.309,
+765.516
+],
+"words": [
+{
+"text": "1",
+"box": [
+72.024,
+759.036,
+75.309,
+765.516
+]
+}
+]
+},
+{
+"text": "Footnote 1, one line.",
+"box": [
+77.544,
+759.906,
+161.935,
+769.866
+],
+"words": [
+{
+"text": "Footnote",
+"box": [
+77.544,
+759.906,
+114.844,
+769.866
+]
+},
+{
+"text": "1,",
+"box": [
+117.095,
+759.906,
+124.635,
+769.866
+]
+},
+{
+"text": "one",
+"box": [
+126.906,
+759.906,
+142.433,
+769.866
+]
+},
+{
+"text": "line.",
+"box": [
+144.645,
+759.906,
+161.935,
+769.866
+]
+}
+]
+}
+]
+}
+]
+}
