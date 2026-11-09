@@ -366,7 +366,7 @@ impl Builder<'_, '_, '_> {
                                 let number = number.to_owned();
                                 self.text(&number, *style);
                             }
-                            None if !values.notes.ignored(*note) => self.unsupported(
+                            None if values.notes.framed(*note) => self.unsupported(
                                 "note references in headers and footers show no number",
                             ),
                             None => {}

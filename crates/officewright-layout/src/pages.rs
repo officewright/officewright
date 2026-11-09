@@ -4461,13 +4461,16 @@ mod tests {
         const FRAMES: &str = "note references in headers and footers show no number";
         // A section whose footnotes are numbered in a format the layout does not write and
         // start again on each page, with its one footnote referenced nowhere, in the
-        // body, in a text box of the body or in the header.
+        // body, in a text box of the body, in a field's result in that box, in the header,
+        // or in the header and the box.
         #[derive(Clone, Copy, PartialEq)]
         enum Place {
             Nowhere,
             Body,
             TextBox,
+            TextBoxField,
             Header,
+            HeaderAndTextBox,
         }
         let lay = |place: Place| {
             let mut document = Document::default();
@@ -4475,19 +4478,30 @@ mod tests {
                 .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
             let note = document.add_note(Note::new(NoteKind::Footnote, []));
             let reference = Inline::note_reference(note, false, style);
+            let in_box = |inline| {
+                Inline::Object(InlineObject::new(
+                    ObjectContent::text_box(text_box(vec![holding(
+                        style,
+                        vec![Inline::text("B", style), inline],
+                    )])),
+                    Size::new(Pt(40.0), Pt(30.0)),
+                ))
+            };
             let mut body = vec![Inline::text("A", style)];
             let mut header = vec![Inline::text("Z", style)];
             match place {
                 Place::Nowhere => {}
                 Place::Body => body.push(reference),
-                Place::TextBox => body.push(Inline::Object(InlineObject::new(
-                    ObjectContent::text_box(text_box(vec![holding(
-                        style,
-                        vec![Inline::text("B", style), reference],
-                    )])),
-                    Size::new(Pt(40.0), Pt(30.0)),
+                Place::TextBox => body.push(in_box(reference)),
+                Place::TextBoxField => body.push(in_box(Inline::Field(
+                    crate::ir::Field::new(crate::ir::FieldKind::Other("QUOTE".into()), style)
+                        .with_result(vec![reference]),
                 ))),
                 Place::Header => header.push(reference),
+                Place::HeaderAndTextBox => {
+                    body.push(in_box(reference.clone()));
+                    header.push(reference);
+                }
             }
             let footnotes = NoteProps::footnotes()
                 .with_format(NumberFormat::Other("hebrew1".into()))
@@ -4512,19 +4526,29 @@ mod tests {
             (vec!["A1".into(), "Z".into()], [true, true, false])
         );
         // A footnote referenced nowhere numbers nothing, and nothing is reported; nor is
-        // one in a text box, which Word ignores.
+        // one in a text box, which Word ignores, even in a field's result there.
         assert_eq!(
             lay(Place::Nowhere),
             (vec!["A".into(), "Z".into()], [false; 3])
         );
-        assert_eq!(
-            lay(Place::TextBox),
-            (vec!["A".into(), "B".into(), "Z".into()], [false; 3])
-        );
-        // One in the header shows no number, which is reported.
+        for place in [Place::TextBox, Place::TextBoxField] {
+            assert_eq!(
+                lay(place),
+                (vec!["A".into(), "B".into(), "Z".into()], [false; 3])
+            );
+        }
+        // One in the header shows no number, which is reported, also when a text box
+        // references the note too.
         assert_eq!(
             lay(Place::Header),
             (vec!["A".into(), "Z".into()], [false, false, true])
+        );
+        assert_eq!(
+            lay(Place::HeaderAndTextBox),
+            (
+                vec!["A".into(), "B".into(), "Z".into()],
+                [false, false, true]
+            )
         );
     }
 

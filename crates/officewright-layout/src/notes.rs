@@ -12,9 +12,8 @@ use crate::numbers::number_text;
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct NoteNumbers {
     numbers: HashMap<NoteId, String>,
-    /// The notes referenced in text boxes, where Word ignores references: one referenced
-    /// only there shows no number, as in Word.
-    ignored: HashSet<NoteId>,
+    /// The notes referenced in headers and footers, where a reference shows no number.
+    framed: HashSet<NoteId>,
     /// Whether a number's format is one the layout writes as decimal instead.
     pub(crate) decimal: bool,
     /// Whether a note is numbered in a section that starts the numbers of its kind again
@@ -31,8 +30,8 @@ impl NoteNumbers {
     /// count (§17.11.14); nor does one in a text box, which Word ignores (MS-OI29500
     /// 2.1.302 b and 2.1.305 a), nor a second reference to a note, nor one in the result
     /// of a field the layout computes, which is not laid out. One in hidden text is
-    /// numbered, a hypothesis until a Word render. References in headers and footers are
-    /// not walked: they show no number, which the itemizer reports.
+    /// numbered, a hypothesis until a Word render. References in headers and footers take
+    /// no number: they show none, which the itemizer reports.
     pub(crate) fn new(document: &Document) -> Self {
         let mut numbers = Self::default();
         let mut next = Counters::default();
@@ -52,8 +51,17 @@ impl NoteNumbers {
                 section,
                 numbers: &mut numbers,
                 next: &mut next,
+                frames: false,
             };
             walk.blocks(section.blocks(), 0);
+            walk.frames = true;
+            let sets = [section.headers(), section.footers()];
+            for blocks in sets
+                .iter()
+                .flat_map(|set| [set.primary(), set.first(), set.even()])
+            {
+                walk.blocks(blocks, 0);
+            }
         }
         numbers
     }
@@ -63,10 +71,10 @@ impl NoteNumbers {
         self.numbers.get(&note).map(String::as_str)
     }
 
-    /// Whether `note` is referenced only where Word ignores references, so that it shows
-    /// no number there, as in Word.
-    pub(crate) fn ignored(&self, note: NoteId) -> bool {
-        self.ignored.contains(&note)
+    /// Whether `note` is referenced in a header or footer, where its reference shows no
+    /// number.
+    pub(crate) fn framed(&self, note: NoteId) -> bool {
+        self.framed.contains(&note)
     }
 }
 
@@ -99,6 +107,9 @@ struct Walk<'a, 'd> {
     section: &'d crate::ir::Section,
     numbers: &'a mut NoteNumbers,
     next: &'a mut Counters,
+    /// Whether the blocks walked are a header's or footer's, whose references are marked
+    /// instead of numbered.
+    frames: bool,
 }
 
 impl Walk<'_, '_> {
@@ -120,44 +131,26 @@ impl Walk<'_, '_> {
         self.inlines(paragraph.inlines(), true);
     }
 
-    /// Numbers the references of `inlines`, those of the stored result of a field the
-    /// layout does not compute too, one field deep, as the itemizer lays results out.
+    /// Numbers the references of `inlines`, or marks them in headers and footers, those of
+    /// the stored result of a field the layout does not compute too, one field deep, as
+    /// the itemizer lays results out. A text box's references are passed over, as Word
+    /// ignores them.
     fn inlines(&mut self, inlines: &[Inline], results: bool) {
         for inline in inlines {
             match inline {
                 Inline::NoteReference {
                     note, custom_mark, ..
-                } if !custom_mark => self.reference(*note),
+                } if !custom_mark => {
+                    if self.frames {
+                        self.numbers.framed.insert(*note);
+                    } else {
+                        self.reference(*note);
+                    }
+                }
                 Inline::Field(field) if results && !crate::itemize::computed(field.kind()) => {
                     self.inlines(field.result(), false);
                 }
-                // A text box's references are ignored, as Word ignores them.
-                _ => {
-                    if let Some((text_box, _)) = crate::paragraph::text_box(inline) {
-                        self.ignore(text_box.blocks(), 0);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Marks the notes `blocks` reference as ignored, a text box's paragraphs and tables.
-    fn ignore(&mut self, blocks: &[Block], depth: usize) {
-        for block in blocks {
-            match block {
-                Block::Paragraph(paragraph) => {
-                    for inline in paragraph.inlines() {
-                        if let Inline::NoteReference { note, .. } = inline {
-                            self.numbers.ignored.insert(*note);
-                        }
-                    }
-                }
-                Block::Table(table) if depth < MAX_TABLE_DEPTH => {
-                    for cell in table.rows().iter().flat_map(|row| row.cells()) {
-                        self.ignore(cell.blocks(), depth + 1);
-                    }
-                }
-                Block::Table(_) => {}
+                _ => {}
             }
         }
     }
@@ -188,8 +181,8 @@ impl Walk<'_, '_> {
 mod tests {
     use super::*;
     use crate::ir::{
-        Cell, Field, FieldKind, InlineObject, Note, NoteProps, NumberFormat, ObjectContent,
-        PageSetup, Row, RunStyle, RunStyleId, Section, Size, Table, TextBox,
+        Cell, Field, FieldKind, HeaderFooterSet, InlineObject, Note, NoteProps, NumberFormat,
+        ObjectContent, PageSetup, Row, RunStyle, RunStyleId, Section, Size, Table, TextBox,
     };
     use officewright_core::Pt;
 
@@ -208,8 +201,12 @@ mod tests {
         let end = note(NoteKind::Endnote);
         let custom = note(NoteKind::Footnote);
         let boxed = note(NoteKind::Footnote);
-        let boxed_in_table = note(NoteKind::Footnote);
+        let boxed_in_field = note(NoteKind::Footnote);
         let paged = note(NoteKind::Footnote);
+        let headed = note(NoteKind::Footnote);
+        let headed_in_field = note(NoteKind::Footnote);
+        let headed_in_box = note(NoteKind::Footnote);
+        let footed = note(NoteKind::Endnote);
         let reference = |note, custom| Inline::note_reference(note, custom, style);
         // The second note's reference comes first, in a table; the third's in the stored
         // result of a field; a reference to the first again takes no number, nor does one
@@ -221,19 +218,18 @@ mod tests {
         let field = Field::new(FieldKind::Other("QUOTE".into()), style)
             .with_result(vec![reference(third, false)]);
         let page = Field::new(FieldKind::Page, style).with_result(vec![reference(paged, false)]);
-        let cell =
-            Cell::default().with_blocks([holding(style, vec![reference(boxed_in_table, false)])]);
-        let in_box = Inline::Object(InlineObject::new(
-            ObjectContent::text_box(
-                TextBox::new().with_blocks([
-                    holding(style, vec![reference(boxed, false)]),
-                    Table::default()
-                        .with_rows([Row::default().with_cells([cell])])
-                        .into(),
-                ]),
-            ),
-            Size::new(Pt(10.0), Pt(10.0)),
-        ));
+        let quoting =
+            |note| Field::new(FieldKind::Other("QUOTE".into()), style).with_result(vec![note]);
+        let in_box = |inlines| {
+            Inline::Object(InlineObject::new(
+                ObjectContent::text_box(TextBox::new().with_blocks([holding(style, inlines)])),
+                Size::new(Pt(10.0), Pt(10.0)),
+            ))
+        };
+        let boxes = in_box(vec![
+            reference(boxed, false),
+            Inline::Field(quoting(reference(boxed_in_field, false))),
+        ]);
         let paragraph = holding(
             style,
             vec![
@@ -242,25 +238,54 @@ mod tests {
                 Inline::Field(field),
                 reference(end, false),
                 reference(custom, true),
-                in_box,
+                boxes,
                 reference(first, false),
             ],
         );
-        document.add_section(Section::new(PageSetup::default()).with_blocks([table, paragraph]));
+        // References in a header, in a field's result there and in its text box, and in a
+        // footer.
+        let header = holding(
+            style,
+            vec![
+                reference(headed, false),
+                Inline::Field(quoting(reference(headed_in_field, false))),
+                in_box(vec![reference(headed_in_box, false)]),
+            ],
+        );
+        let footer = holding(style, vec![reference(footed, false)]);
+        document.add_section(
+            Section::new(PageSetup::default())
+                .with_headers(HeaderFooterSet::default().with_primary([header]))
+                .with_footers(HeaderFooterSet::default().with_first([footer]))
+                .with_blocks([table, paragraph]),
+        );
         let numbers = NoteNumbers::new(&document);
         // Footnotes 1, 2, 3 in text order; the endnote i, by its own default numbering; a
-        // custom mark and a reference in a text box take no number.
+        // custom mark, a reference in a text box and one in a header or footer take no
+        // number.
         assert_eq!(numbers.text(second), Some("1"));
         assert_eq!(numbers.text(first), Some("2"));
         assert_eq!(numbers.text(third), Some("3"));
         assert_eq!(numbers.text(end), Some("i"));
         assert_eq!(numbers.text(custom), None);
-        assert_eq!(numbers.text(boxed), None);
-        assert_eq!(numbers.text(boxed_in_table), None);
-        assert_eq!(numbers.text(paged), None);
-        // Only the references in the text box, its table's too, are ones Word ignores.
-        assert!(numbers.ignored(boxed) && numbers.ignored(boxed_in_table));
-        assert!(![first, custom, paged].iter().any(|&id| numbers.ignored(id)));
+        let unnumbered = [boxed, boxed_in_field, paged, headed, headed_in_field];
+        assert!(unnumbered.iter().all(|&id| numbers.text(id).is_none()));
+        assert_eq!(numbers.text(headed_in_box), None);
+        assert_eq!(numbers.text(footed), None);
+        // The references of headers and footers are marked, those of their fields' results
+        // too, but not those of their text boxes, nor any of the body's.
+        let framed = [headed, headed_in_field, footed];
+        assert!(framed.iter().all(|&id| numbers.framed(id)));
+        let unframed = [
+            first,
+            second,
+            end,
+            custom,
+            boxed,
+            boxed_in_field,
+            headed_in_box,
+        ];
+        assert!(!unframed.iter().any(|&id| numbers.framed(id)));
         assert!(!numbers.decimal && !numbers.each_page);
     }
 
