@@ -127,6 +127,56 @@ fn prefers_the_font_the_document_embeds_to_one_of_the_same_family_the_caller_giv
     assert!(names(&pdf, b"+OfficewrightUser"));
 }
 
+/// The test font with its glyph of "A", glyph 1, sent past the end of `glyf` by its
+/// `loca` entry: the font reads, but that glyph cannot be subset.
+fn with_damaged_a(program: &[u8]) -> Vec<u8> {
+    let table = |tag: &[u8]| {
+        let tables = usize::from(u16::from_be_bytes([program[4], program[5]]));
+        (0..tables)
+            .map(|i| 12 + 16 * i)
+            .find(|&at| &program[at..at + 4] == tag)
+            .map(|at| u32::from_be_bytes(program[at + 8..at + 12].try_into().unwrap()) as usize)
+            .unwrap()
+    };
+    let (head, loca) = (table(b"head"), table(b"loca"));
+    let mut damaged = program.to_vec();
+    // Glyph 1 ends where the entry of glyph 2 points.
+    if program[head + 50..head + 52] == [0, 0] {
+        damaged[loca + 4..loca + 6].copy_from_slice(&0xFFFF_u16.to_be_bytes());
+    } else {
+        damaged[loca + 8..loca + 12].copy_from_slice(&0x0100_0000_u32.to_be_bytes());
+    }
+    damaged
+}
+
+#[test]
+fn draws_the_text_of_an_embedded_font_whose_glyphs_cannot_be_embedded_in_another_font() {
+    // Issue #217: such a font made the whole PDF fail; its text is drawn in another font
+    // with the character, here the caller's sound copy, and the font is reported.
+    let program = test_font();
+    let document = Document::from_bytes(package_with_body_and_fonts(
+        &text_in_test_font("AAA"),
+        &font("Officewright Test", r#"<w:embedRegular r:id="rId1"/>"#),
+        &relationship("rId1", "fonts/font1.odttf"),
+        &[("word/fonts/font1.odttf", &with_damaged_a(&program))],
+    ))
+    .unwrap();
+    let options = without_system_fonts().with_font_data(renamed(&program));
+    let (pdf, report) = document.save_pdf_bytes(&options).unwrap();
+    assert!(names(&pdf, b"+OfficewrightUser"));
+    assert!(!names(&pdf, b"+OfficewrightTest"));
+    let embedding: Vec<String> = report
+        .iter()
+        .filter(|entry| entry.kind() == ReportKind::FontEmbedding)
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(embedding.len(), 1, "{embedding:?}");
+    assert!(
+        embedding[0].contains("some glyphs of Officewright Test cannot be embedded"),
+        "{embedding:?}"
+    );
+}
+
 #[test]
 fn reports_an_embedded_font_it_cannot_read_once_and_renders_without_it() {
     // A part that starts as a TrueType font, so the reader keeps it, but is none: the

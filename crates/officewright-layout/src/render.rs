@@ -2063,6 +2063,26 @@ mod tests {
     }
 
     #[test]
+    fn a_font_it_cannot_embed_is_not_reported_when_none_of_its_glyphs_reaches_the_page() {
+        let font = crate::testing::with_name_copies(crate::testing::minimal(), 32);
+        let (drawn, report) = painted(
+            &Document::default(),
+            font,
+            // Far below the page.
+            &[DisplayItem::Glyphs(run(10.0, 1_000.0, &[(0.0, 0.0)]))],
+        );
+        assert!(drawn.is_empty());
+        assert!(
+            report
+                .entries()
+                .iter()
+                .all(|entry| entry.kind() != ReportKind::FontEmbedding),
+            "{:?}",
+            report.entries()
+        );
+    }
+
+    #[test]
     fn options_show_the_lengths_of_fonts_in_memory() {
         let options = RenderOptions::new().with_font_data(vec![7_u8, 8, 9]);
         let shown = format!("{options:?}");
