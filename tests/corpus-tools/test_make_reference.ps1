@@ -430,11 +430,12 @@ Exit-Stuck 'test' ''
     $unresolved = @((Export-Formatting $document 600 $theme $progress).Unresolved)
     Check 'unresolved placeholders are reported apart' ($unresolved -contains '+Unbekannt' -and $unresolved -contains '+Kaputt' -and -not ($unresolved -contains '+Textkoerper'))
     # A header or footer type that only later sections have is read through the sections
-    # (#464). As Word reports them: StoryRanges holds the primary header of section 1, which
-    # has one, and no footer; section 1's primary header and footer exist (Word reports the
-    # primary ones as existing in every document), its footer an empty story the file does not
-    # have; section 2's are linked to section 1's; section 3 has its own primary, first-page
-    # and even-pages footers, and a primary header of its own of a type already read.
+    # (#464). The sections stand in for Word's where it matters here: StoryRanges holds the
+    # primary header of section 1, which has one, and no footer; section 1's primary header
+    # and footer exist (Word reports the primary ones as existing in every document), its
+    # footer an empty story the file does not have; section 2's are linked to section 1's;
+    # section 3 has its own primary, first-page and even-pages footers, and a primary header of
+    # its own of a type already read.
     function New-HeaderFooter($Story, [bool] $Exists = $true, [bool] $Linked = $false) {
         return New-Object PSObject -Property @{ Exists = $Exists; LinkToPrevious = $Linked; Range = $Story }
     }

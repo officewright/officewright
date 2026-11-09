@@ -2451,7 +2451,7 @@ class Formatting(Import):
                 self.add_v3(export, **changes)
                 self.assertIn(message.split(" (")[0], self.refused())
 
-    def test_a_complete_export_needs_every_header_and_footer_the_copy_shows(self):
+    def test_a_complete_export_needs_every_header_and_footer_story_it_reads(self):
         # E-header-tall's sections have a header and a footer of their own (#464).
         doc = next(d for d in rules.documents() if d.name == "E-header-tall")
         record = self.add_result(doc)

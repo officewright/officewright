@@ -1315,8 +1315,8 @@ def header_footer_stories(parts: dict[str, bytes]) -> set[str]:
     """The header and footer stories of a package that make-reference.ps1's formatting export
     reads, by its names: one for each kind of reference a section makes, a first-page one only
     in a section with w:titlePg, and an even-pages one only when the settings ask for
-    w:evenAndOddHeaders. A first-page or even-pages one that a later section only inherits is
-    not counted, since the export does not read it."""
+    w:evenAndOddHeaders. A first-page one that a later section only inherits is not counted,
+    since the export does not read it."""
     main = main_document(parts)
     if main is None:
         return set()

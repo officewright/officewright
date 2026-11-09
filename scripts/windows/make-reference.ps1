@@ -706,8 +706,8 @@ function Export-Formatting($Document, [int] $BudgetSeconds, $Themes, $Progress, 
     # order of the sections. The first section is left out: Word reports its primary header
     # and footer as existing even when the document has none ("exist in all new documents
     # by default"), and a type the first section has is in StoryRanges already. A first-page
-    # or even-pages header or footer that a later section only inherits, because the section
-    # that has it does not show it, is not read; corpus-import.py does not ask for it either.
+    # header or footer that a later section only inherits, because the section that has it
+    # has no title page, is not read; corpus-import.py does not ask for it either.
     $chained = @{}
     foreach ($story in $stories) { $chained[$story.story] = $true }
     $instances = @{}
