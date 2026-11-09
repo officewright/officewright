@@ -522,8 +522,8 @@ impl Painter<'_, '_, '_> {
         let mut runs = Vec::new();
         let mut font = None;
         let mut current: Option<OpenRun> = None;
-        // Glyph by glyph: a cluster may be many, such as the dots of a tab leader, of
-        // which only some are on the page.
+        // Glyph by glyph: a cluster may be many, such as a base and its marks, of which
+        // only some are on the page.
         for cluster in &run.clusters {
             let on: Vec<&DrawnGlyph> = cluster.glyphs.iter().filter(on_page).collect();
             let Some(&lead) = on.first() else {
@@ -1448,8 +1448,7 @@ mod tests {
 
     #[test]
     fn glyphs_off_the_page_are_left_out() {
-        // A tab leader: one cluster of dots every 3 pt from 300 pt left of the page to
-        // 90 pt into it.
+        // One cluster of dots every 3 pt from 300 pt left of the page to 90 pt into it.
         let mut leader = run(0.0, 70.0, &[]);
         leader.clusters = vec![Cluster {
             text: "\t".to_owned(),

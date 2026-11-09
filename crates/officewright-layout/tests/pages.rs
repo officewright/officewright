@@ -596,7 +596,14 @@ fn a_chain_that_moves_draws_its_leaders_once() -> TestResult {
     let glyphs: usize = second
         .text()
         .lines()
-        .filter(|line| line.starts_with("glyphs") && line.contains("\"\\t\""))
+        // A dot leader's glyphs stand for its periods.
+        .filter(|line| {
+            line.starts_with("glyphs")
+                && line
+                    .split('"')
+                    .nth(1)
+                    .is_some_and(|text| !text.is_empty() && text.chars().all(|ch| ch == '.'))
+        })
         .map(|line| {
             line.split(' ')
                 .filter(|word| word.contains('@') && !word.starts_with('@'))
