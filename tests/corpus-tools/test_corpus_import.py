@@ -1160,13 +1160,13 @@ class RenderedPageBreaks(unittest.TestCase):
     def test_a_row_start_inside_hidden_text_stays_the_start(self):
         # The mark sits inside a hidden run, after its hidden text.
         first = ("<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>x</w:t><w:lastRenderedPageBreak/>"
-                 "<w:t>Name</w:t></w:r></w:p>")
+                 "<w:t>y</w:t></w:r><w:r><w:t>Name</w:t></w:r></w:p>")
         table = ("<w:tbl>" + self.row(self.cell(first), self.cell(self.mid("ab", "cd")))
                  + "</w:tbl>")
         self.assertEqual(self.breaks(table), [(0, "Name"), (1, "cd")])
 
     def test_a_run_once_hidden_by_a_tracked_change_shows(self):
-        # Only the run's own w:vanish hides it, not the one its tracked change of properties
+        # The run's w:vanish hides it, not the one its tracked change of properties
         # (w:rPrChange) records: its text shows, the mark crosses a page, and the second
         # cell's crossing is the same page.
         first = ('<w:p><w:r><w:rPr><w:rPrChange w:id="1" w:author="A"><w:rPr><w:vanish/></w:rPr>'
@@ -1639,6 +1639,337 @@ class RenderedPageBreaks(unittest.TestCase):
     def test_marks_outside_tables_all_count(self):
         body = self.p("one", True) + self.mid("ab", "cd") + self.p("two", True)
         self.assertEqual(self.breaks(body), [(0, "one"), (1, "cd"), (2, "two")])
+
+    # Character and paragraph styles that hide their runs, directly or through w:basedOn.
+    STYLES = ('<w:style w:type="character" w:styleId="Hidden"><w:rPr><w:vanish/></w:rPr>'
+              "</w:style>"
+              '<w:style w:type="character" w:styleId="HiddenToo"><w:basedOn w:val="Hidden"/>'
+              "</w:style>"
+              '<w:style w:type="character" w:styleId="Shown"><w:basedOn w:val="Hidden"/>'
+              '<w:rPr><w:vanish w:val="0"/></w:rPr></w:style>'
+              '<w:style w:type="paragraph" w:styleId="HiddenPara"><w:rPr><w:vanish/></w:rPr>'
+              "</w:style>"
+              '<w:style w:type="paragraph" w:styleId="Plain"/>')
+
+    def styled(self, body: str, styles: str, defaults: str = "") -> dict:
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        parts = self.document(body)
+        parts["word/styles.xml"] = (f'<w:styles xmlns:w="{w}">{defaults}{styles}'
+                                    "</w:styles>").encode()
+        return parts
+
+    def run_hidden(self, run: str, paragraph_properties: str = "", styles: str = STYLES,
+                   defaults: str = "") -> bool:
+        parts = self.styled(f"<w:p>{paragraph_properties}{run}</w:p>", styles, defaults)
+        paragraph = next(importer.ElementTree.fromstring(parts["word/document.xml"])
+                         .iter(f"{importer.W}p"))
+        return importer.hiding(parts).hides(paragraph.find(f"{importer.W}r"), paragraph)
+
+    def test_a_run_is_hidden_by_its_own_vanish_then_its_styles_then_the_defaults(self):
+        hidden_para = '<w:pPr><w:pStyle w:val="HiddenPara"/></w:pPr>'
+        default_hidden = '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">' \
+                         "<w:rPr><w:vanish/></w:rPr></w:style>"
+        doc_defaults = "<w:docDefaults><w:rPrDefault><w:rPr><w:vanish/></w:rPr>" \
+                       "</w:rPrDefault></w:docDefaults>"
+        cases = {
+            "no formatting": ("<w:r><w:t>x</w:t></w:r>", "", self.STYLES, "", False),
+            "its own w:vanish": ("<w:r><w:rPr><w:vanish/></w:rPr></w:r>", "", self.STYLES, "",
+                                 True),
+            "its own w:vanish off over a hiding style":
+                ('<w:r><w:rPr><w:rStyle w:val="Hidden"/><w:vanish w:val="off"/></w:rPr></w:r>',
+                 "", self.STYLES, "", False),
+            "its character style": ('<w:r><w:rPr><w:rStyle w:val="Hidden"/></w:rPr></w:r>', "",
+                                    self.STYLES, "", True),
+            "the style its character style is based on":
+                ('<w:r><w:rPr><w:rStyle w:val="HiddenToo"/></w:rPr></w:r>', "", self.STYLES, "",
+                 True),
+            "a character style that sets w:vanish off over its base":
+                ('<w:r><w:rPr><w:rStyle w:val="Shown"/></w:rPr></w:r>', "", self.STYLES, "",
+                 False),
+            "its paragraph's style": ("<w:r/>", hidden_para, self.STYLES, "", True),
+            "its character style over its paragraph's style":
+                ('<w:r><w:rPr><w:rStyle w:val="Shown"/></w:rPr></w:r>', hidden_para,
+                 self.STYLES, "", False),
+            "a character style that sets none, over its paragraph's style":
+                ('<w:r><w:rPr><w:rStyle w:val="Missing"/></w:rPr></w:r>', hidden_para,
+                 self.STYLES, "", True),
+            "the default paragraph style": ("<w:r/>", "", self.STYLES + default_hidden, "",
+                                            True),
+            "a paragraph style named over the default one":
+                ("<w:r/>", '<w:pPr><w:pStyle w:val="Plain"/></w:pPr>',
+                 self.STYLES + default_hidden, "", False),
+            "the document's defaults": ("<w:r/>", "", self.STYLES, doc_defaults, True),
+            "a paragraph style that sets none, over the document's defaults":
+                ("<w:r/>", '<w:pPr><w:pStyle w:val="Plain"/></w:pPr>', self.STYLES,
+                 doc_defaults, True),
+            "styles based on each other":
+                ('<w:r><w:rPr><w:rStyle w:val="A"/></w:rPr></w:r>', "",
+                 '<w:style w:type="character" w:styleId="A"><w:basedOn w:val="B"/></w:style>'
+                 '<w:style w:type="character" w:styleId="B"><w:basedOn w:val="A"/></w:style>',
+                 "", False),
+        }
+        for case, (run, properties, styles, defaults, expected) in cases.items():
+            with self.subTest(case=case):
+                self.assertEqual(self.run_hidden(run, properties, styles, defaults), expected)
+        # Without word/styles.xml, only a run's own w:vanish hides it.
+        self.assertEqual(importer.hiding(self.document("")), importer.OWN_VANISH)
+
+    def test_the_text_a_paragraph_shows(self):
+        # Tab stops, moved-away, deleted and hidden text show no characters; a drop-down
+        # form field shows its entry.
+        paragraph = importer.ElementTree.fromstring(
+            f'<w:p xmlns:w="{importer.W[1:-1]}">'
+            '<w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr>'
+            "<w:r><w:t>a</w:t><w:tab/></w:r>"
+            "<w:moveFrom><w:r><w:t>moved</w:t></w:r></w:moveFrom>"
+            "<w:del><w:r><w:delText>gone</w:delText></w:r></w:del>"
+            "<w:r><w:rPr><w:vanish/></w:rPr><w:t>hidden</w:t><w:tab/></w:r>"
+            '<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:ddList>'
+            '<w:listEntry w:val="one"/></w:ddList></w:ffData></w:fldChar></w:r>'
+            "<w:r><w:lastRenderedPageBreak/><w:t>b</w:t></w:r></w:p>")
+        text, offsets = importer.paragraph_text(paragraph)
+        self.assertEqual(text, "a\toneb")
+        self.assertEqual(list(offsets.values()), [5])
+
+    def test_a_drop_down_shows_the_entry_it_names(self):
+        def field(choices: str) -> importer.ElementTree.Element:
+            return importer.ElementTree.fromstring(
+                f'<w:fldChar xmlns:w="{importer.W[1:-1]}" w:fldCharType="begin"><w:ffData>'
+                f'<w:ddList>{choices}<w:listEntry w:val="one"/><w:listEntry w:val="two"/>'
+                "</w:ddList></w:ffData></w:fldChar>")
+
+        cases = {
+            "": "one",
+            '<w:result w:val="1"/>': "two",
+            '<w:default w:val="1"/>': "two",
+            '<w:result w:val="0"/><w:default w:val="1"/>': "one",
+            '<w:result w:val="2"/>': "",
+            '<w:result w:val="-1"/>': "",
+            '<w:result w:val="x"/>': "one",
+        }
+        for choices, expected in cases.items():
+            with self.subTest(choices=choices):
+                self.assertEqual(importer.drop_down_text(field(choices)), expected)
+        check_box = importer.ElementTree.fromstring(
+            f'<w:fldChar xmlns:w="{importer.W[1:-1]}" w:fldCharType="begin"><w:ffData>'
+            "<w:checkBox/></w:ffData></w:fldChar>")
+        self.assertEqual(importer.drop_down_text(check_box), "")
+
+    def test_offsets_and_texts_count_what_the_paragraph_shows(self):
+        body = ('<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr>'
+                '<w:r><w:t>a</w:t></w:r><w:moveFrom><w:r><w:t>moved</w:t></w:r></w:moveFrom>'
+                '<w:r><w:rPr><w:rStyle w:val="Hidden"/></w:rPr><w:t>hidden</w:t></w:r>'
+                "<w:r><w:lastRenderedPageBreak/><w:t>b</w:t></w:r></w:p>")
+        breaks = importer.rendered_page_breaks(self.styled(body, self.STYLES))
+        self.assertEqual(breaks, [{"paragraph": 0, "offset": 1, "text_before": "a",
+                                   "text_after": "b"}])
+
+    def test_a_mark_inside_deleted_or_moved_away_text_starts_its_cell(self):
+        # word-rules/E-row-break-revisions: Word marks the second cell's start inside the
+        # text it deleted or moved away, which the reference does not show, so the second
+        # cell's crossing is the page the first cell crossed. Inserted text shows, and Word
+        # marks it the same way.
+        for name, start in (("del", "<w:del><w:r><w:lastRenderedPageBreak/>"
+                                    "<w:delText>Deleted </w:delText></w:r></w:del>"),
+                            ("moveFrom", "<w:moveFrom><w:r><w:lastRenderedPageBreak/>"
+                                         "<w:t>Moved </w:t></w:r></w:moveFrom>"),
+                            ("ins", "<w:ins><w:r><w:lastRenderedPageBreak/>"
+                                    "<w:t>Inserted </w:t></w:r></w:ins>")):
+            with self.subTest(name=name):
+                second = f"<w:p>{start}<w:r><w:t>Second</w:t></w:r></w:p>"
+                table = ("<w:tbl>"
+                         + self.row(self.cell(self.p("First 17"), self.p("First 18", True)),
+                                    self.cell(second, self.p("Second 17", True)))
+                         + "</w:tbl>")
+                self.assertEqual(self.breaks(table), [(1, "First 18")])
+
+    def test_text_a_style_hides_before_a_mark_shows_nothing(self):
+        # Hidden through a character style or the paragraph's style, the text before the
+        # second cell's mark shows nothing: the mark starts the cell and repeats the page.
+        for name, second in (
+            ("character style", '<w:p><w:r><w:rPr><w:rStyle w:val="Hidden"/></w:rPr>'
+                                "<w:t>x</w:t></w:r>" + self.MARK + "</w:p>"),
+            ("paragraph style", '<w:p><w:pPr><w:pStyle w:val="HiddenPara"/></w:pPr>'
+                                "<w:r><w:t>x</w:t></w:r>"
+                                "<w:r><w:lastRenderedPageBreak/></w:r></w:p>"),
+        ):
+            with self.subTest(name=name):
+                table = ("<w:tbl>"
+                         + self.row(self.cell(self.mid("ab", "cd")),
+                                    self.cell(second, self.mid("ef", "gh")))
+                         + "</w:tbl>")
+                breaks = importer.rendered_page_breaks(self.styled(table, self.STYLES))
+                self.assertEqual([(b["paragraph"], b["text_after"]) for b in breaks],
+                                 [(0, "cd")])
+        # Without the styles, the text shows: the mark is a crossing of the second cell.
+        table = ("<w:tbl>"
+                 + self.row(self.cell(self.mid("ab", "cd")),
+                            self.cell('<w:p><w:r><w:rPr><w:rStyle w:val="Hidden"/></w:rPr>'
+                                      "<w:t>x</w:t></w:r>" + self.MARK + "</w:p>",
+                                      self.mid("ef", "gh")))
+                 + "</w:tbl>")
+        self.assertEqual(self.breaks(table), [(0, "cd"), (2, "gh")])
+
+    def test_a_drop_down_before_a_mark_shows(self):
+        # A drop-down form field shows its entry: a mark after it is a crossing of the first
+        # cell, not the row's start, and the second cell's crossing is the same page; a check
+        # box shows nothing of the field's text, and the mark starts the row.
+        drop_down = ('<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:ddList>'
+                     '<w:listEntry w:val="First choice"/></w:ddList></w:ffData></w:fldChar></w:r>'
+                     "<w:r><w:instrText> FORMDROPDOWN </w:instrText></w:r>"
+                     '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+                     '<w:r><w:fldChar w:fldCharType="end"/></w:r>')
+        for content, expected in ((drop_down, [(0, "Name")]),
+                                  (self.FIELD_CODE.replace("PAGE", "FORMCHECKBOX"),
+                                   [(0, "Name"), (1, "cd")])):
+            with self.subTest(content=content[:40]):
+                table = ("<w:tbl>"
+                         + self.row(self.cell(f"<w:p>{content}{self.MARK}</w:p>"),
+                                    self.cell(self.mid("ab", "cd")))
+                         + "</w:tbl>")
+                self.assertEqual(self.breaks(table), expected)
+
+    # word-rules/E-row-break-fields, case 01: every cell of the row crosses page 1, and the
+    # next row goes on on page 2 below them. pdftotext reads page 1 across the cells, line by
+    # line, and page 2 down each cell in turn, the next row's first cell below the first.
+    EVERY_CELL = ("<w:tbl>"
+                  "<w:tr><w:tc>"
+                  "<w:p><w:r><w:t>First cell 16</w:t></w:r></w:p>"
+                  "<w:p><w:r><w:t>First cell 17</w:t></w:r></w:p>"
+                  "<w:p><w:r><w:lastRenderedPageBreak/><w:t>First cell 18</w:t></w:r></w:p>"
+                  "<w:p><w:r><w:t>First cell 19</w:t></w:r></w:p>"
+                  "</w:tc><w:tc>"
+                  "<w:p><w:r><w:lastRenderedPageBreak/><w:t>Second cell</w:t></w:r></w:p>"
+                  "<w:p><w:r><w:t>Second cell 17</w:t></w:r></w:p>"
+                  "<w:p><w:r><w:lastRenderedPageBreak/><w:t>Second cell 18</w:t></w:r></w:p>"
+                  "</w:tc></w:tr>"
+                  "<w:tr><w:tc>"
+                  "<w:p><w:r><w:lastRenderedPageBreak/><w:t>Next row</w:t></w:r></w:p>"
+                  "</w:tc><w:tc><w:p><w:r><w:t>Beside</w:t></w:r></w:p></w:tc></w:tr>"
+                  "</w:tbl>")
+    EVERY_CELL_PAGES = [["Case 01", "First cell 16", "Second cell", "First cell 17",
+                         "Second cell 17"],
+                        ["First cell 18", "First cell 19", "Next row", "Second cell 18",
+                         "Beside"]]
+
+    def test_the_next_row_may_follow_the_first_cell_when_every_cell_crosses(self):
+        # The last cell's crossing is a repeat of the first cell's page, yet it still crosses;
+        # the next row's text follows the first cell's lines, and its mark repeats the page.
+        self.assertEqual(self.breaks(self.EVERY_CELL, self.EVERY_CELL_PAGES),
+                         [(2, "First cell 18")])
+        # Without the reference, or with the next row on a page of its own, the mark stays.
+        self.assertEqual(self.breaks(self.EVERY_CELL),
+                         [(2, "First cell 18"), (7, "Next row")])
+        pages = [self.EVERY_CELL_PAGES[0], ["First cell 18", "First cell 19", "Second cell 18"],
+                 ["Next row", "Beside"]]
+        self.assertEqual(self.breaks(self.EVERY_CELL, pages),
+                         [(2, "First cell 18"), (7, "Next row")])
+
+    def test_a_next_row_mark_needs_the_last_cell_to_cross(self):
+        # Only the first cell crosses: Word marks the second cell's start, not the next
+        # row's, so a mark at the next row's start is a page of its own, whatever the pages.
+        table = self.EVERY_CELL.replace(
+            "<w:r><w:lastRenderedPageBreak/><w:t>Second cell 18</w:t>",
+            "<w:r><w:t>Second cell 18</w:t>")
+        self.assertEqual(self.breaks(table, self.EVERY_CELL_PAGES),
+                         [(2, "First cell 18"), (7, "Next row")])
+
+    def test_the_words_before_a_crossing_are_those_of_its_last_paragraph(self):
+        # Page 1 is read across the cells: "Second cell" comes between "First cell 16" and
+        # "First cell 17", so the four words before the first cell's crossing are not
+        # together on it, yet those of its last paragraph end a line.
+        self.assertEqual(self.breaks(self.EVERY_CELL, self.EVERY_CELL_PAGES),
+                         [(2, "First cell 18")])
+        # A page on which they end no line shows no crossing.
+        pages = [["Case 01", "First cell 16", "Second cell", "First cell 17 Second cell 17"],
+                 self.EVERY_CELL_PAGES[1]]
+        self.assertEqual(self.breaks(self.EVERY_CELL, pages),
+                         [(2, "First cell 18"), (7, "Next row")])
+
+    def test_the_next_row_s_text_is_what_its_first_cell_shows(self):
+        # word-rules/E-row-break-hidden and -revisions: the next row's first paragraph, or
+        # its first words, are hidden, deleted or moved away; the reference shows the rest.
+        starts = {
+            "hidden by a style": '<w:p><w:r><w:rPr><w:rStyle w:val="Hidden"/></w:rPr>'
+                                 "<w:lastRenderedPageBreak/><w:t>Hidden by a style </w:t></w:r>"
+                                 "<w:r><w:t>Next row</w:t></w:r></w:p>",
+            "a paragraph hidden by its style":
+                '<w:p><w:pPr><w:pStyle w:val="HiddenPara"/></w:pPr><w:r>'
+                "<w:lastRenderedPageBreak/><w:t>A paragraph hidden by its style</w:t></w:r></w:p>"
+                "<w:p><w:r><w:t>Next row</w:t></w:r></w:p>",
+            "moved away": "<w:p><w:moveFrom><w:r><w:lastRenderedPageBreak/><w:t>Moved words </w:t>"
+                          "</w:r></w:moveFrom><w:r><w:t>Next row</w:t></w:r></w:p>",
+        }
+        for case, start in starts.items():
+            with self.subTest(case=case):
+                table = self.EVERY_CELL.replace(
+                    "<w:p><w:r><w:lastRenderedPageBreak/><w:t>Next row</w:t></w:r></w:p>", start)
+                breaks = importer.rendered_page_breaks(
+                    self.styled(table, self.STYLES),
+                    [{"number": n, "lines": [{"text": text} for text in lines]}
+                     for n, lines in enumerate(self.EVERY_CELL_PAGES, 1)])
+                self.assertEqual([(b["paragraph"], b["text_after"]) for b in breaks],
+                                 [(2, "First cell 18")])
+
+    def test_each_copy_of_a_crossing_takes_its_own_pair_of_pages(self):
+        # word-rules/E-row-break-fields repeats its table for each case: the same crossing
+        # shows on two pairs of pages, and the first copy takes the first pair, the second
+        # the second, so both next rows' marks repeat their pages. The pages between the
+        # copies start with a case's label.
+        case = [*self.EVERY_CELL_PAGES[1], "After the case"]
+        pages = [self.EVERY_CELL_PAGES[0], case, ["Case 02", *self.EVERY_CELL_PAGES[0][1:]],
+                 case]
+        # The copies differ in the paragraph before the one that ends their pages, which
+        # the words before the crossing leave out.
+        body = (self.EVERY_CELL + self.p("Case 02", True)
+                + self.EVERY_CELL.replace("First cell 16", "First cell 15"))
+        pages[2][1] = "First cell 15"
+        self.assertEqual(self.breaks(body, pages),
+                         [(2, "First cell 18"), (9, "Case 02"), (12, "First cell 18")])
+        # The second copy's next row starts the page after: only the first copy's mark
+        # repeats a page.
+        pages = [*pages[:3], [*self.EVERY_CELL_PAGES[1][:2], "Second cell 18"],
+                 ["Next row", "Beside", "After the case"]]
+        self.assertEqual(self.breaks(body, pages),
+                         [(2, "First cell 18"), (9, "Case 02"), (12, "First cell 18"),
+                          (17, "Next row")])
+        # A third pair shows the crossing, where the document has two: nothing is shown.
+        pages = [*pages[:4], ["Next row", "Beside", "After the case"],
+                 self.EVERY_CELL_PAGES[0], case]
+        self.assertEqual(self.breaks(body, pages),
+                         [(2, "First cell 18"), (7, "Next row"), (9, "Case 02"),
+                          (12, "First cell 18"), (17, "Next row")])
+
+    def test_the_row_break_rule_documents_break_where_word_s_pages_start(self):
+        # The re-saved copies of batch 9 and their references: every mark left starts a
+        # page (#472).
+        expected = {
+            "E-row-break-fields": [(58, "First cell 18"), (105, "Case 02"),
+                                   (163, "First cell 18"), (210, "Case 03"),
+                                   (268, "First cell 18"), (315, "Case 04"),
+                                   (372, "First cell 17")],
+            "E-row-break-hidden": [(58, "First cell 18"), (105, "Case 02"),
+                                   (162, "First cell 17"), (212, "Case 03"),
+                                   (270, "First cell 18")],
+            "E-row-break-numbers": [(57, "First cell 17"), (105, "Case 02"),
+                                    (164, "First cell 16"), (213, "Case 03"),
+                                    (270, "First cell 17")],
+            "E-row-break-revisions": [(58, "First cell 18"), (105, "Case 02"),
+                                      (162, "First cell 17"), (210, "Case 03"),
+                                      (268, "First cell 18"), (315, "Case 04"),
+                                      (356, "Paragraph line 17")],
+        }
+        corpus = Path(__file__).resolve().parents[1] / "corpus"
+        for name, breaks in expected.items():
+            with self.subTest(name=name):
+                with zipfile.ZipFile(corpus / "resaved" / "word-rules" / f"{name}.docx") as z:
+                    parts = {n: z.read(n) for n in z.namelist() if n.endswith(".xml")}
+                geometry = json.loads((corpus / "reference" / "word-rules" / name
+                                       / "geometry.json").read_text(encoding="utf-8"))
+                found = importer.rendered_page_breaks(parts, geometry["pages"])
+                self.assertEqual([(b["paragraph"], b["text_after"][:len(start)])
+                                  for b, (_, start) in zip(found, breaks)], breaks)
+                self.assertEqual(len(found), len(geometry["pages"]) - 1)
 
 
 class GeometryText(unittest.TestCase):

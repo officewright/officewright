@@ -865,11 +865,12 @@ def page_geometry(bbox: str) -> list[dict]:
 # make-reference.ps1 exports without markup: properties; markers of ranges (bookmarks such as
 # the _Hlk ones Word writes before a mark, proofing errors, comments and the reference mark
 # Word writes after a comment's range, permissions, moves); the fldChar and instrText of a
-# field's code; and text deleted or moved away. leads also skips the runs their own w:vanish
-# hides, which Word prints only with its "Print hidden text" option, off by default. Nothing
-# else is taken for unshown, and a field is read by these names only: a field nested in
-# another field's code counts as shown, and a legacy form field's box, which has no result
-# runs, counts as unshown (#410).
+# field's code; and text deleted or moved away, which Word's references show without the
+# markup (word-rules/E-row-break-revisions). leads and paragraph_text also skip hidden runs
+# (Hiding), which Word prints only with its "Print hidden text" option, off by default.
+# Nothing else is taken for unshown, and a field is read by these names only: a field nested
+# in another field's code counts as shown, and a legacy form field's box, which has no
+# result runs, counts as unshown (#410).
 UNSHOWN = {
     "pPr", "rPr", "sdtPr", "sdtEndPr", "smartTagPr", "customXmlPr",
     "bookmarkStart", "bookmarkEnd", "proofErr", "commentRangeStart", "commentRangeEnd",
@@ -881,26 +882,113 @@ WRAPPERS = {"r", "hyperlink", "ins", "moveTo", "smartTag", "sdt", "sdtContent", 
             "fldSimple", "dir", "bdo"}
 
 
-def hidden_run(run: ElementTree.Element) -> bool:
-    """Whether the run's own formatting hides it (w:vanish in its w:rPr)."""
-    vanish = run.find(f"{W}rPr/{W}vanish")
-    return vanish is not None and vanish.get(f"{W}val", "true") not in ("0", "false", "off")
+def vanish(properties: ElementTree.Element | None) -> bool | None:
+    """The w:vanish of a w:rPr: True or False when it sets one, else None."""
+    element = properties.find(f"{W}vanish") if properties is not None else None
+    if element is None:
+        return None
+    return element.get(f"{W}val", "true") not in ("0", "false", "off")
 
 
-def leads(paragraph: ElementTree.Element, mark: ElementTree.Element) -> bool:
+@dataclass(frozen=True)
+class Hiding:
+    """Which runs hide their text: the first w:vanish found in the run's own w:rPr, in its
+    character style, in its paragraph's style (the first style marked as the default
+    paragraph style when it names none) and in the document's default run properties, a
+    style's own before those of the styles it is w:basedOn. Word toggles a w:vanish that
+    styles of two levels both set (ECMA-376 Part 1, §17.7.3); that case is taken for the
+    nearer level's value."""
+
+    # By style id (unique across the types of style): its w:vanish, through w:basedOn.
+    styles: dict[str, bool]
+    default_paragraph: str | None
+    default: bool
+
+    def hides(self, run: ElementTree.Element, paragraph: ElementTree.Element) -> bool:
+        own = vanish(run.find(f"{W}rPr"))
+        if own is not None:
+            return own
+        character = run.find(f"{W}rPr/{W}rStyle")
+        if character is not None and character.get(f"{W}val") in self.styles:
+            return self.styles[character.get(f"{W}val", "")]
+        style = paragraph.find(f"{W}pPr/{W}pStyle")
+        style_id = style.get(f"{W}val") if style is not None else self.default_paragraph
+        return self.styles.get(style_id or "", self.default)
+
+
+# Only a run's own w:vanish hides it: a document without styles.
+OWN_VANISH = Hiding({}, None, False)
+
+
+def hiding(parts: dict[str, bytes]) -> Hiding:
+    """The Hiding of a document's styles (word/styles.xml)."""
+    if "word/styles.xml" not in parts:
+        return OWN_VANISH
+    root = ElementTree.fromstring(parts["word/styles.xml"])
+    styles = {style.get(f"{W}styleId", ""): style for style in root.iter(f"{W}style")}
+
+    def resolved(style_id: str) -> bool | None:
+        seen = set()
+        while style_id in styles and style_id not in seen:
+            seen.add(style_id)
+            value = vanish(styles[style_id].find(f"{W}rPr"))
+            if value is not None:
+                return value
+            based_on = styles[style_id].find(f"{W}basedOn")
+            style_id = based_on.get(f"{W}val", "") if based_on is not None else ""
+        return None
+
+    found = {}
+    defaults = []
+    for style_id, style in styles.items():
+        value = resolved(style_id)
+        if value is not None:
+            found[style_id] = value
+        marked = style.get(f"{W}default") in ("1", "true", "on")
+        if style.get(f"{W}type") == "paragraph" and marked:
+            defaults.append(style_id)
+    default = vanish(root.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr"))
+    return Hiding(found, defaults[0] if defaults else None, bool(default))
+
+
+def drop_down_text(field: ElementTree.Element) -> str:
+    """The entry a legacy drop-down form field (FORMDROPDOWN) shows, given the w:fldChar
+    that begins it: the w:listEntry its w:ddList's w:result names, else its w:default, else
+    the first (ECMA-376 Part 1, §17.16.9 to §17.16.12). It has no result runs, yet Word's
+    reference shows the entry (word-rules/E-row-break-fields). Empty for any other
+    w:fldChar."""
+    choices = field.find(f"{W}ffData/{W}ddList")
+    if choices is None:
+        return ""
+    entries = [entry.get(f"{W}val", "") for entry in choices.findall(f"{W}listEntry")]
+    chosen = choices.find(f"{W}result")
+    if chosen is None:
+        chosen = choices.find(f"{W}default")
+    try:
+        index = int(chosen.get(f"{W}val", "0")) if chosen is not None else 0
+    except ValueError:
+        index = 0
+    return entries[index] if 0 <= index < len(entries) else ""
+
+
+def leads(
+    paragraph: ElementTree.Element, mark: ElementTree.Element, hidden: Hiding = OWN_VANISH
+) -> bool:
     """Whether the mark comes before everything the paragraph shows on the reference's
-    pages: only what UNSHOWN names and runs of hidden text (their own w:vanish) precede it,
-    within runs and what WRAPPERS names. Anything else a run holds (text, a tab, a break, a
-    picture, a symbol, a field's result) shows."""
+    pages: only what UNSHOWN names and hidden runs precede it, within runs and what WRAPPERS
+    names; a mark inside what UNSHOWN names or a hidden run leads when nothing shown comes
+    before it there (Word writes it inside deleted and moved-away text,
+    word-rules/E-row-break-revisions). Anything else a run holds (text, a tab, a break, a
+    picture, a symbol, a field's result, the entry of a drop-down form field) shows."""
 
     def walk(element: ElementTree.Element) -> bool | None:
         for child in element:
             if child is mark:
                 return True
             name = local_name(child.tag)
-            if name in UNSHOWN:
-                continue
-            if name == "r" and hidden_run(child):
+            if name == "fldChar" and drop_down_text(child):
+                return False
+            if name in UNSHOWN or (name == "r" and hidden.hides(child, paragraph)):
                 if any(element is mark for element in child.iter()):
                     return True
                 continue
@@ -914,7 +1002,7 @@ def leads(paragraph: ElementTree.Element, mark: ElementTree.Element) -> bool:
     return walk(paragraph) is True
 
 
-def row_repeats(root: ElementTree.Element) -> set[int]:
+def row_repeats(root: ElementTree.Element, hidden: Hiding = OWN_VANISH) -> set[int]:
     """The ids of the w:lastRenderedPageBreak marks that repeat a page a table row has
     already marked, so that within a row each page counts once (#410).
 
@@ -955,7 +1043,7 @@ def row_repeats(root: ElementTree.Element) -> set[int]:
         for cell in (c for c in row.iter(f"{W}tc") if rows_above(c)[0] is row):
             marks = [m for m in cell.iter(f"{W}lastRenderedPageBreak") if id(m) not in repeats]
             first = next(cell.iter(f"{W}p"), None)
-            if marks and first is not None and leads(first, marks[0]):
+            if marks and first is not None and leads(first, marks[0], hidden):
                 if marked:
                     repeats.add(id(marks[0]))
                 marked = True
@@ -968,19 +1056,32 @@ def row_repeats(root: ElementTree.Element) -> set[int]:
     return repeats
 
 
-def paragraph_text(paragraph: ElementTree.Element) -> tuple[str, dict[int, int]]:
-    """A paragraph's text (its w:t and w:tab) and, by id, how many of its characters come
-    before each of its w:lastRenderedPageBreak marks."""
+def paragraph_text(
+    paragraph: ElementTree.Element, hidden: Hiding = OWN_VANISH
+) -> tuple[str, dict[int, int]]:
+    """The text a paragraph shows (its w:t and w:tab, but in what UNSHOWN names and in hidden
+    runs, and the entries of its drop-down form fields, drop_down_text) and, by id, how many of
+    its characters come before each of its w:lastRenderedPageBreak marks."""
     text = ""
     offsets = {}
-    for element in paragraph.iter():
-        name = local_name(element.tag)
-        if name == "t":
-            text += element.text or ""
-        elif name == "tab":
-            text += "\t"
-        elif name == "lastRenderedPageBreak":
-            offsets[id(element)] = len(text)
+
+    def walk(element: ElementTree.Element, shown: bool) -> None:
+        nonlocal text
+        for child in element:
+            name = local_name(child.tag)
+            if name == "lastRenderedPageBreak":
+                offsets[id(child)] = len(text)
+            elif name == "t":
+                text += child.text or "" if shown else ""
+            elif name == "tab":
+                text += "\t" if shown else ""
+            elif name == "fldChar":
+                text += drop_down_text(child) if shown else ""
+            else:
+                walk(child, shown and name not in UNSHOWN
+                     and not (name == "r" and hidden.hides(child, paragraph)))
+
+    walk(paragraph, True)
     return text, offsets
 
 
@@ -1029,21 +1130,34 @@ def running_lines(pages: list[dict], end: int) -> set[tuple[str, ...]]:
     return {key for key, numbers in seen.items() if key and len(numbers) > 1}
 
 
-def follows_on_crossed_page(pages: list[dict], ended: str, crossing: str, after: str) -> bool:
-    """Whether the reference shows a cell crossing from one page to the next and, on that
-    next page, the next row's text right after the cell's.
+def last_paragraph(text: str) -> str:
+    """The last paragraph of a text whose paragraphs are joined by line feeds that has
+    words."""
+    return next((p for p in reversed(text.split("\n")) if words(p)), "")
 
-    The crossing must show on exactly one pair of pages: a line of the first ends with the
-    end of the text `ended`, and a line of the second starts with the text `crossing`; a form
-    that repeats its blocks shows it on more than one pair, and then nothing is shown. On
-    that second page a line must start with the text `after` right after the lines that end
-    with the end of `crossing`, below the crossing, and not be the page's last line when the
-    last line of another page repeats it, as a running footer's does. And the page after
-    must not start with the text `after`, past the lines that top it (the first lines that
-    recur on other pages, and the lines that lie above the crossing on its page, such as a
-    repeated header row): when it does, the next row may start there, and the line found
-    is not the next row's."""
-    ended_key = words(ended)[-KEY_WORDS:]
+
+def follows_on_crossed_page(
+    pages: list[dict], ended: str, crossing: str, after: str, occurrence: int = 0,
+    occurrences: int = 1,
+) -> bool:
+    """Whether the reference shows a cell crossing from one page to the next and, on that next
+    page, the next row's text right after the cell's.
+
+    The crossing shows on a pair of pages when a line of the first ends with the end of the last
+    paragraph of the text `ended` (paragraphs joined by line feeds; pdftotext may read the lines
+    of the cells beside it in between, word-rules/E-row-break-fields) and a line of the second
+    starts with the text `crossing`. The document has `occurrences` cells that cross with these
+    texts, and this one comes `occurrence`-th of them (from 0, in document order): the crossing
+    must show on as many pairs of pages, and the pair it shows on is the `occurrence`-th of them
+    (word-rules/E-row-break-fields repeats one table for each case). A form that repeats its
+    blocks without their crossing shows it on more pairs, and then nothing is shown. On that
+    second page a line must start with the text `after` right after the lines that end with the
+    end of `crossing`, below the crossing, and not be the page's last line when the last line of
+    another page repeats it, as a running footer's does. And the page after must not start with
+    the text `after`, past the lines that top it (the first lines that recur on other pages, and
+    the lines that lie above the crossing on its page, such as a repeated header row): when it
+    does, the next row may start there, and the line found is not the next row's."""
+    ended_key = words(last_paragraph(ended))[-KEY_WORDS:]
     head_key = words(crossing)[:KEY_WORDS]
     tail_key = words(crossing)[-KEY_WORDS:]
     after_key = words(after)[:KEY_WORDS]
@@ -1059,9 +1173,9 @@ def follows_on_crossed_page(pages: list[dict], ended: str, crossing: str, after:
             earlier[max(0, end - len(ended_key)) : end] == ended_key for end in line_ends
         ):
             shown.append((number, found, starts, crossed[0]))
-    if len(shown) != 1:
+    if len(shown) != occurrences or not 0 <= occurrence < occurrences:
         return False
-    number, found, starts, crossed = shown[0]
+    number, found, starts, crossed = shown[occurrence]
     lines = pages[number].get("lines", [])
     if number + 1 < len(pages):
         # What tops a page of the table: running headers, and the lines above the crossing
@@ -1088,8 +1202,37 @@ def follows_on_crossed_page(pages: list[dict], ended: str, crossing: str, after:
     return False
 
 
+def crossing_pieces(cell: ElementTree.Element, hidden: Hiding = OWN_VANISH) -> list[str]:
+    """The text a table cell shows (paragraph_text, its paragraphs joined by line feeds),
+    cut where it crosses a page: at each of its w:lastRenderedPageBreak marks but one that
+    leads its first paragraph, which marks the start of its row or repeats a page (#410). A
+    cell's crossing that row_repeats takes for a repeat still cuts its text. Empty when the
+    cell crosses no page."""
+    paragraphs = list(cell.iter(f"{W}p"))
+    marks = list(cell.iter(f"{W}lastRenderedPageBreak"))
+    if marks and paragraphs and leads(paragraphs[0], marks[0], hidden):
+        marks = marks[1:]
+    if not marks:
+        return []
+    crossing_ids = {id(mark) for mark in marks}
+    texts = []
+    for paragraph in paragraphs:
+        text, offsets = paragraph_text(paragraph, hidden)
+        cuts = sorted(offset for mark, offset in offsets.items() if mark in crossing_ids)
+        texts.append("\x00".join(text[a:b] for a, b in zip([0, *cuts], [*cuts, None])))
+    return "\n".join(texts).split("\x00")
+
+
+def crossing_key(pieces: list[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The words follows_on_crossed_page finds a cell's last crossing by: those that end the
+    text before it and those that start the text after it."""
+    return (tuple(words(last_paragraph(pieces[-2]))[-KEY_WORDS:]),
+            tuple(words(pieces[-1])[:KEY_WORDS]))
+
+
 def next_row_repeats(
-    root: ElementTree.Element, repeats: set[int], pages: list[dict]
+    root: ElementTree.Element, repeats: set[int], pages: list[dict],
+    hidden: Hiding = OWN_VANISH,
 ) -> set[int]:
     """The ids of the w:lastRenderedPageBreak marks at the start of a table row that repeat
     the page its row before crosses in its last cell (#410).
@@ -1098,14 +1241,20 @@ def next_row_repeats(
     order. After the last cell of a row, that is the next row's first cell, though the next
     row goes on on the same page: paragraph 71 of business/contract-hhs-teaming-agreement
     goes on the sixth line of page 4. The marks alone do not tell that repeat from a next row
-    that starts a page of its own, so the reference's pages decide: the mark repeats the
-    page when exactly one pair of pages shows the last cell crossing, a line of one page
-    ending with the cell's words before its last crossing and a line of the next starting
-    with its words after it; further down that next page the next row's text starts the
-    line right after the cell's, a line that is not the page's last when another page's
-    last line repeats it; and the page after does not start with the next row's text past
-    the lines that top it, where the next row may start instead (follows_on_crossed_page).
-    Every other such mark stays.
+    that starts a page of its own, so the reference's pages decide, for a row before whose
+    last cell crosses a page (crossing_pieces). The mark repeats the page when, for a cell of
+    that row that crosses a page, the pair of pages its last crossing shows on (a line of
+    one page ending with the cell's words before the crossing and a line of the next
+    starting with its words after it, follows_on_crossed_page) shows the next row's text
+    further down that next page, starting the line right after the cell's, a line that is
+    not the page's last when another page's last line repeats it; and the page after does
+    not start with the next row's text past the lines that top it, where the next row may
+    start instead. Any cell of the row may show it, since pdftotext reads the cells of a page
+    as columns, each with what lies below it: the next row's text follows the first cell's
+    lines (word-rules/E-row-break-fields). The next row's text is the text its first cell
+    shows from the mark on, without hidden, deleted and moved-away text
+    (word-rules/E-row-break-hidden, word-rules/E-row-break-revisions). Every other such mark
+    stays.
     """
     parents = {child: parent for parent in root.iter() for child in parent}
 
@@ -1116,42 +1265,36 @@ def next_row_repeats(
                 return element
         return None
 
+    # The cells of the document that cross a page, in document order, with their texts.
+    pieces = {id(cell): crossing_pieces(cell, hidden) for cell in root.iter(f"{W}tc")}
+    keys = [crossing_key(piece) for piece in pieces.values() if piece]
     found: set[int] = set()
     for table in root.iter(f"{W}tbl"):
         rows = [row for row in table.iter(f"{W}tr") if nearest(row, f"{W}tbl") is table]
         for previous, row in zip(rows, rows[1:]):
-            last = [c for c in previous.iter(f"{W}tc") if nearest(c, f"{W}tr") is previous]
+            cells = [c for c in previous.iter(f"{W}tc") if nearest(c, f"{W}tr") is previous]
             first = next((c for c in row.iter(f"{W}tc") if nearest(c, f"{W}tr") is row), None)
-            if not last or first is None:
+            if not cells or first is None or not pieces[id(cells[-1])]:
                 continue
-            start = next(first.iter(f"{W}p"), None)
+            paragraphs = list(first.iter(f"{W}p"))
             marks = [m for m in first.iter(f"{W}lastRenderedPageBreak") if id(m) not in repeats]
-            if start is None or not marks or not leads(start, marks[0]):
+            if not paragraphs or not marks or not leads(paragraphs[0], marks[0], hidden):
                 continue
-            # The marks where the previous row's last cell crosses a page. A mark that starts
-            # the cell, the row's own start, has no text before it, so no page can show it.
-            paragraphs = list(last[-1].iter(f"{W}p"))
-            crossings = [
-                (paragraph, mark)
-                for paragraph in paragraphs
-                for mark in paragraph.iter(f"{W}lastRenderedPageBreak")
-                if id(mark) not in repeats
-            ]
-            if not crossings:
-                continue
-            # The cell's text cut at its crossings: the piece on the page before its last
-            # crossing, and the piece from there to the cell's end.
-            crossing_ids = {id(mark) for _, mark in crossings}
-            cell_text = []
-            for paragraph in paragraphs:
-                text, offsets = paragraph_text(paragraph)
-                cuts = sorted(offset for mark, offset in offsets.items() if mark in crossing_ids)
-                cell_text.append("\x00".join(text[a:b] for a, b in zip([0, *cuts], [*cuts, None])))
-            pieces = "\n".join(cell_text).split("\x00")
-            start_text, start_offsets = paragraph_text(start)
-            after = start_text[start_offsets[id(marks[0])] :]
-            if follows_on_crossed_page(pages, pieces[-2], pieces[-1], after):
-                found.add(id(marks[0]))
+            start_text, start_offsets = paragraph_text(paragraphs[0], hidden)
+            after = "\n".join([start_text[start_offsets[id(marks[0])] :],
+                               *(paragraph_text(p, hidden)[0] for p in paragraphs[1:])])
+            for cell in cells:
+                piece = pieces[id(cell)]
+                if not piece:
+                    continue
+                key = crossing_key(piece)
+                order = list(pieces).index(id(cell))
+                occurrence = sum(1 for other in list(pieces.values())[:order]
+                                 if other and crossing_key(other) == key)
+                if follows_on_crossed_page(pages, piece[-2], piece[-1], after, occurrence,
+                                           keys.count(key)):
+                    found.add(id(marks[0]))
+                    break
     return found
 
 
@@ -1162,15 +1305,17 @@ def rendered_page_breaks(parts: dict[str, bytes], pages: list[dict] | None = Non
     next_row_repeats finds there.
 
     Paragraphs are counted in document order from 0, table cells included; the offset is
-    the number of characters of the paragraph's text before the mark.
+    the number of characters of the text the paragraph shows before the mark
+    (paragraph_text), and the texts around it are of that text too.
     """
     root = ElementTree.fromstring(parts["word/document.xml"])
-    repeats = row_repeats(root)
+    hidden = hiding(parts)
+    repeats = row_repeats(root, hidden)
     if pages is not None:
-        repeats |= next_row_repeats(root, repeats, pages)
+        repeats |= next_row_repeats(root, repeats, pages, hidden)
     breaks = []
     for index, paragraph in enumerate(root.iter(f"{W}p")):
-        text, offsets = paragraph_text(paragraph)
+        text, offsets = paragraph_text(paragraph, hidden)
         marks = [offset for mark, offset in offsets.items() if mark not in repeats]
         for offset in marks:
             breaks.append(
