@@ -1965,6 +1965,12 @@ class RenderedPageBreaks(unittest.TestCase):
             "<w:p><w:r><w:lastRenderedPageBreak/><w:t>Next row</w:t></w:r></w:p>", start)
         self.assertEqual(self.styled_breaks(table, self.EVERY_CELL_PAGES),
                          [(2, "First cell 18")])
+        # A first paragraph that shows only a tab shows no words (re-check of #533).
+        table = self.EVERY_CELL.replace(
+            "<w:p><w:r><w:lastRenderedPageBreak/><w:t>Next row</w:t></w:r></w:p>",
+            "<w:p><w:r><w:lastRenderedPageBreak/><w:tab/></w:r></w:p>"
+            "<w:p><w:r><w:t>Next row</w:t></w:r></w:p>")
+        self.assertEqual(self.breaks(table, self.EVERY_CELL_PAGES), [(2, "First cell 18")])
 
     def styled_breaks(self, body: str, pages: list[list[str]]) -> list[tuple[int, str]]:
         reference = [{"number": n, "lines": [{"text": text} for text in lines]}
@@ -1990,6 +1996,19 @@ class RenderedPageBreaks(unittest.TestCase):
                   "signed by each participating GSA Schedule"],
                  ["contractor", "Identify each member", "Schedule Contractors Input"]]
         self.assertEqual(self.breaks(outer, pages), [(2, "contractor")])
+        # The outer cell also crosses a page in its own text first: its last crossing is
+        # still the nested cell's, and counts once (re-check of #533).
+        outer = ("<w:tbl>"
+                 + self.row(self.cell(self.p("Outer intro"),
+                                      self.mid("Outer before the crossing ", "outer after it"),
+                                      inner, "<w:p/>"))
+                 + self.row(self.cell(self.p("Schedule Contractors Input", True)))
+                 + "</w:tbl>")
+        pages = [["Outer intro", "Outer before the crossing"],
+                 ["outer after it", "Helpful Instructions",
+                  "signed by each participating GSA Schedule"],
+                 ["contractor", "Identify each member", "Schedule Contractors Input"]]
+        self.assertEqual(self.breaks(outer, pages), [(1, "outer after it"), (3, "contractor")])
 
     def test_text_a_style_hides_counts_for_nothing_on_the_next_row_s_path(self):
         hidden = '<w:r><w:rPr><w:rStyle w:val="Hidden"/></w:rPr><w:t>Secret</w:t></w:r>'

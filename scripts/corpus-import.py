@@ -866,8 +866,9 @@ def page_geometry(bbox: str) -> list[dict]:
 # the _Hlk ones Word writes before a mark, proofing errors, comments and the reference mark
 # Word writes after a comment's range, permissions, moves); the fldChar and instrText of a
 # field's code; and text deleted or moved away, which Word's references do not show: they
-# show the text as it is without the markup (word-rules/E-row-break-revisions). leads and paragraph_text also skip hidden runs
-# (Hiding), which Word prints only with its "Print hidden text" option, off by default.
+# show the text as it is without the markup (word-rules/E-row-break-revisions). leads and
+# paragraph_text also skip hidden runs (Hiding), which Word prints only with its "Print
+# hidden text" option, off by default.
 # Nothing else is taken for unshown, and a field is read by these names only: a field nested
 # in another field's code counts as shown, and a legacy form field's box, which has no
 # result runs, counts as unshown (#410).
@@ -1146,8 +1147,9 @@ def follows_on_crossed_page(
     The crossing shows on a pair of pages when a line of the first ends with the end of the last
     paragraph of the text `ended` (paragraphs joined by line feeds; pdftotext may read the lines
     of the cells beside it in between, word-rules/E-row-break-fields) and a line of the second
-    starts with the text `crossing`. The document has `occurrences` cells that cross with these
-    texts, and this one comes `occurrence`-th of them (from 0, in document order): the crossing
+    starts with the text `crossing`. The document has `occurrences` crossings with these texts,
+    counted by their marks (one in a nested table is also one of the cell around it, and counts
+    once), and this one comes `occurrence`-th of them (from 0, in document order): the crossing
     must show on as many pairs of pages, and the pair it shows on is the `occurrence`-th of them
     (word-rules/E-row-break-fields repeats one table for each case). A form that repeats its
     blocks without their crossing shows it on more pairs, and then nothing is shown. On that
