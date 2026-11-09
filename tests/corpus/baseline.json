@@ -568,25 +568,25 @@
       "text_score": 0.9764
     },
     "tests/corpus/business/form-ec-state-aid-notification-bg.docx": {
-      "line_agreement": 0.7156,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.5573,
-      "ssim_min": 0.0,
-      "text_score": 0.2505
+      "line_agreement": 0.8374,
+      "page_break_agreement": 0.3333,
+      "ssim_mean": 0.7295,
+      "ssim_min": 0.5861,
+      "text_score": 0.7072
     },
     "tests/corpus/business/form-ec-state-aid-notification-de.docx": {
-      "line_agreement": 0.6556,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.5242,
+      "line_agreement": 0.7437,
+      "page_break_agreement": 0.3158,
+      "ssim_mean": 0.6477,
       "ssim_min": 0.0,
-      "text_score": 0.2414
+      "text_score": 0.6071
     },
     "tests/corpus/business/form-ec-state-aid-notification-el.docx": {
-      "line_agreement": 0.7076,
-      "page_break_agreement": 0.0,
-      "ssim_mean": 0.518,
-      "ssim_min": 0.0,
-      "text_score": 0.2135
+      "line_agreement": 0.7265,
+      "page_break_agreement": 0.0526,
+      "ssim_mean": 0.6609,
+      "ssim_min": 0.562,
+      "text_score": 0.5114
     },
     "tests/corpus/business/form-gsa-dira-dias-template.docx": {
       "line_agreement": 0.8922,
@@ -629,18 +629,18 @@
       "text_score": 0.0084
     },
     "tests/corpus/business/letter-dol-cobra-election-notice.docx": {
-      "line_agreement": 0.8669,
-      "page_break_agreement": 0.625,
-      "ssim_mean": 0.8507,
-      "ssim_min": 0.511,
-      "text_score": 0.8491
+      "line_agreement": 0.8799,
+      "page_break_agreement": 0.875,
+      "ssim_mean": 0.8809,
+      "ssim_min": 0.6745,
+      "text_score": 0.9436
     },
     "tests/corpus/business/letter-dol-cobra-general-notice.docx": {
-      "line_agreement": 0.8415,
-      "page_break_agreement": 0.75,
-      "ssim_mean": 0.8098,
+      "line_agreement": 0.8579,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.8434,
       "ssim_min": 0.5835,
-      "text_score": 0.9498
+      "text_score": 0.9582
     },
     "tests/corpus/business/letter-nara-ibr-request.docx": {
       "line_agreement": 1.0,
@@ -677,18 +677,18 @@
       "text_score": 0.9916
     },
     "tests/corpus/generated/contract-de-open.docx": {
-      "line_agreement": 0.74,
+      "line_agreement": 0.8,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.9788,
-      "ssim_min": 0.965,
-      "text_score": 0.5207
+      "ssim_mean": 0.9886,
+      "ssim_min": 0.9804,
+      "text_score": 0.6889
     },
     "tests/corpus/generated/contract-de.docx": {
-      "line_agreement": 0.74,
+      "line_agreement": 0.8,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.9741,
-      "ssim_min": 0.9556,
-      "text_score": 0.5207
+      "ssim_mean": 0.9838,
+      "ssim_min": 0.9707,
+      "text_score": 0.6889
     },
     "tests/corpus/generated/contract-ru-open.docx": {
       "line_agreement": 0.66,
@@ -722,16 +722,16 @@
       "text_score": 0.5575
     },
     "tests/corpus/generated/cv-en-academic-open.docx": {
-      "line_agreement": 0.8889,
-      "ssim_mean": 0.9395,
-      "ssim_min": 0.9395,
-      "text_score": 0.9562
+      "line_agreement": 0.9259,
+      "ssim_mean": 0.9479,
+      "ssim_min": 0.9479,
+      "text_score": 1.0
     },
     "tests/corpus/generated/cv-en-academic.docx": {
-      "line_agreement": 0.8889,
-      "ssim_mean": 0.9215,
-      "ssim_min": 0.9215,
-      "text_score": 0.9562
+      "line_agreement": 0.9259,
+      "ssim_mean": 0.9272,
+      "ssim_min": 0.9272,
+      "text_score": 1.0
     },
     "tests/corpus/generated/cv-en-classic-open.docx": {
       "line_agreement": 0.973,
@@ -796,16 +796,16 @@
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-en-decimal-open.docx": {
-      "line_agreement": 0.913,
-      "ssim_mean": 0.9847,
-      "ssim_min": 0.9847,
-      "text_score": 0.8698
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9932,
+      "ssim_min": 0.9932,
+      "text_score": 1.0
     },
     "tests/corpus/generated/invoice-en-decimal.docx": {
-      "line_agreement": 0.913,
-      "ssim_mean": 0.9829,
-      "ssim_min": 0.9829,
-      "text_score": 0.8698
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9912,
+      "ssim_min": 0.9912,
+      "text_score": 1.0
     },
     "tests/corpus/generated/invoice-en-long-open.docx": {
       "line_agreement": 0.9978,
