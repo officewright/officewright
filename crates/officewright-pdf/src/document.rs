@@ -2063,8 +2063,8 @@ mod tests {
 
     #[test]
     fn sorts_names_the_same_as_bytes_and_as_text() {
-        // Names whose UTF-8 forms sort otherwise than their keys, and keys that would sort
-        // otherwise as bytes than as text if they were text strings in UTF-16.
+        // Names whose UTF-8 forms sort otherwise than their keys, among them a character
+        // from U+E000 to U+FFFF and one outside the BMP.
         let names = [
             "Zeta",
             "Résumé",

@@ -338,9 +338,8 @@ fn percent_encode(text: &str, keep: impl Fn(u8) -> bool) -> Vec<u8> {
 
 /// `name` as a key of the name tree: printable ASCII as it is, but for `%`, and every
 /// other byte of its UTF-8 form as `%XX`. The keys are sorted by their bytes (7.9.6), and
-/// readers that compare them as text, as qpdf does, put printable ASCII in the same order,
-/// where text strings in UTF-16 would sort apart from the others. `%` itself is encoded,
-/// so that no two names share a key.
+/// readers that compare them as text, as qpdf does, put printable ASCII in the same order.
+/// `%` itself is encoded, so that no two names share a key.
 fn name_key(name: &str) -> Result<Vec<u8>> {
     let key = percent_encode(name, |byte| byte != b'%' && (b' '..=b'~').contains(&byte));
     check_length("destination name length in bytes", key.len())?;

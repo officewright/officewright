@@ -8,8 +8,9 @@
 //!   (72, 700), 120 by 14.5 pt, a link to the destination "Appendix" over the text
 //!   "Appendix" at (72, 680), 80 by 14 pt, and a link to "Résumé" over the text "Résumé" at
 //!   (72, 660), 80 by 14 pt; and the destinations "Start" at (72, 800), "Résumé" at
-//!   (72, 640), "Zeta" at (72, 620) and "_Toc123" at (72, 600), names whose UTF-8 forms
-//!   sort otherwise than the keys the file stores for them.
+//!   (72, 640), "Zeta" at (72, 620) and "_Toc123" at (72, 600): a name outside ASCII
+//!   among ASCII names, which qpdf --check finds sorted only when the keys sort the same
+//!   as bytes and as text.
 //! - Page 2 has the destinations "d000" to "d149", "dNNN" at (36, 800 − 5 × NNN), more
 //!   than one node of the name tree holds.
 //! - Page 3 has the destinations "Appendix" at (72, 770.25) and "Глава" at (0, 400), a
