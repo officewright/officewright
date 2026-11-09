@@ -2,7 +2,8 @@
 
 Every file under `tests/corpus/` is listed here with its origin and license. Only files
 whose license allows redistribution are committed; never personal, customer or
-copyrighted documents. Each file is under 1 MB and the whole corpus under 50 MB.
+copyrighted documents. Each file is at most 1 MB and the whole corpus at most 100 MB
+(`scripts/check-corpus-size.py`).
 
 ## Documents
 
@@ -651,8 +652,8 @@ Word rendered these documents too (Microsoft Word 16.0, build 16.0.17932, Window
 keeps Word's PDF, re-saved copy and record of each; the row gives the SHA-256 of the input
 Word rendered and of its PDF, Word's page count, the compatibility mode and the seconds
 Word's PDF export took. The six marked "size" are kept for measuring speed: their references
-would add about 53 MB to a corpus whose limit is 50 MB, and six `geometry.json` files over
-1 MB.
+would add about 53 MB, more than half of the corpus's limit of 100 MB, and six
+`geometry.json` files over 1 MB.
 
 | File | Why not committed | Pages | Mode | Word's export, s | Input SHA-256 | PDF SHA-256 |
 |------|-------------------|-------|------|------------------|---------------|-------------|

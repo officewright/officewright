@@ -121,8 +121,9 @@ pub(crate) struct GlyphItem {
 /// Glyphs that stand for some text together.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Cluster {
-    /// The text as the document has it, for copying and searching; empty when the
-    /// cluster before it stands for this one's text too.
+    /// The text the PDF gives for copying and searching: the source text of its
+    /// characters, or a tab leader's character; empty when the cluster before it stands
+    /// for this one's text too.
     pub(crate) text: String,
     pub(crate) glyphs: Vec<DrawnGlyph>,
 }
@@ -1077,11 +1078,17 @@ impl Painting<'_, '_, '_> {
         }
         let count = fit as usize;
         self.leaders.left -= count;
-        let glyphs = (0..count)
-            .map(|index| DrawnGlyph {
-                glyph,
-                x: Pt(index as f64 * pitch),
-                y: Pt(0.0),
+        // Each glyph stands for the leader's character, as in Word's PDF text, which reads
+        // the dots of a dot leader (E-tab-leader's reference); the tab itself has no text.
+        let text = character.to_string();
+        let clusters = (0..count)
+            .map(|index| Cluster {
+                text: text.clone(),
+                glyphs: vec![DrawnGlyph {
+                    glyph,
+                    x: Pt(index as f64 * pitch),
+                    y: Pt(0.0),
+                }],
             })
             .collect();
         out.push(DisplayItem::Glyphs(GlyphItem {
@@ -1095,10 +1102,7 @@ impl Painting<'_, '_, '_> {
                 x: Pt(first * pitch),
                 y: Pt(baseline),
             },
-            clusters: vec![Cluster {
-                text: "\t".to_owned(),
-                glyphs,
-            }],
+            clusters,
         }));
     }
 
@@ -1602,7 +1606,7 @@ mod tests {
     use crate::paragraph::lay_out;
     use crate::report::LayoutReport;
     use crate::shape::Shaper;
-    use crate::testing::{book, minimal, patched, renamed, with_period};
+    use crate::testing::{book, minimal, patched, renamed, with_hyphen, with_period};
 
     #[test]
     fn words_are_found_by_cluster_however_many_glyphs_a_cluster_has() {
@@ -1971,6 +1975,35 @@ mod tests {
     }
 
     #[test]
+    fn a_leader_stands_for_its_characters_in_the_pdf_s_text() {
+        // Word's PDF text of a leader is the characters it is drawn with: E-tab-leader's
+        // reference reads "....." for a dot leader and "-----" for a hyphen leader. The
+        // test font has neither character; copies of it with each stand in.
+        let dots = renamed(with_period(minimal()), "Officewright Dots");
+        let hyphens = renamed(with_hyphen(minimal()), "Officewright Dash");
+        for (leader, character) in [(TabLeader::Dot, "."), (TabLeader::Hyphen, "-")] {
+            let fonts = vec![minimal(), dots.clone(), hyphens.clone()];
+            let (items, _) = painted_with(fonts, &[RunStyle::default()], |ids, _| {
+                leader_paragraph(ids, leader, 0)
+            });
+            let runs = glyph_runs(&items);
+            let leader_run = runs
+                .iter()
+                .find(|run| run.clusters.iter().all(|c| c.text == character))
+                .unwrap_or_else(|| panic!("no leader of {character:?}: {runs:?}"));
+            let glyphs: usize = leader_run.clusters.iter().map(|c| c.glyphs.len()).sum();
+            assert!(glyphs > 2, "{leader_run:?}");
+            assert_eq!(glyphs, leader_run.clusters.len());
+            // No run stands for the tab.
+            assert!(
+                runs.iter()
+                    .flat_map(|run| &run.clusters)
+                    .all(|c| c.text != "\t")
+            );
+        }
+    }
+
+    #[test]
     fn a_leader_falls_back_to_a_font_with_its_character_and_takes_the_tab_s_scale() {
         // The test font has no period; its copy "Officewright Dots" has one instead of
         // `A`, with `A`'s glyph 2.
@@ -1991,7 +2024,13 @@ mod tests {
         let (full, report) = leader_of(0);
         let (half, _) = leader_of(1);
         for leader in [&full, &half] {
-            assert_eq!(leader.clusters.first().map(|c| c.text.as_str()), Some("\t"));
+            // Each glyph stands for a period, as Word's PDF text has the leader's dots.
+            assert!(
+                leader
+                    .clusters
+                    .iter()
+                    .all(|c| c.text == "." && c.glyphs.len() == 1)
+            );
             let glyphs: Vec<&DrawnGlyph> = leader.clusters.iter().flat_map(|c| &c.glyphs).collect();
             assert!(glyphs.len() > 2, "{leader:?}");
             assert!(glyphs.iter().all(|glyph| glyph.glyph == GlyphId::new(2)));

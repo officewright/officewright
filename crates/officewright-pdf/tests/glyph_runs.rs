@@ -418,7 +418,7 @@ fn text_a_glyph_cannot_map_gets_replacement_text() -> TestResult {
     run.push_cluster("a", [glyph(A, 6.0, 0.0)]);
     // A base and its mark for one character.
     run.push_cluster("Á", [glyph(A, 12.0, 0.0), glyph(ACUTE, 12.0, 1.0)]);
-    // Glyphs that stand for no text, such as tab leaders.
+    // Glyphs that stand for no text, such as the hyphen drawn at a soft hyphen.
     run.push_cluster("", [glyph(SPACE, 18.0, 0.0)]);
     // Long text: 32 UTF-16 code units fit in a ToUnicode entry; the next cluster's glyph
     // already has one, so its text is replaced.
