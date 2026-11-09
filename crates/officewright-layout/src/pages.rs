@@ -1486,7 +1486,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         };
         let left = page.body.left;
         // The notes of the lines go on the page first, so that what the paragraph draws
-        // below its last line stops above them.
+        // below its last line stops above them at the bottom of the page. Notes beneath the
+        // text start under its last line, and a bar tab reaching through the space after
+        // it crosses their separator: a hypothesis until a Word render, as no reference
+        // has both.
         self.add_footnotes((flowed.section, paragraph), layout, lines.clone())?;
         let bottom = self.text_bottom()?;
         let height: f64 = layout
@@ -9573,10 +9576,11 @@ mod tests {
     fn many_footnote_references_take_time_in_proportion() {
         use crate::ir::{Note, NoteKind, NotePosition};
         // References with a custom mark and no mark text take no room, so that one line
-        // holds them all: 40,000 on one line, and 10,000 on each of four lines of a page,
+        // holds them all: 80,000 on one line, and 16,000 on each of five lines of a page,
         // each to an empty footnote of its own, are placed in a few seconds in a debug
-        // build, where checking each against the notes before it took 40 s for each.
-        const COUNT: usize = 40_000;
+        // build, where checking each against the notes before it, on its line, in its run
+        // of lines or on its page, took from 14 s to minutes.
+        const COUNT: usize = 80_000;
         let document = |lines: usize| {
             with_notes(
                 setup(),
@@ -9596,9 +9600,12 @@ mod tests {
             )
         };
         let started = std::time::Instant::now();
-        for lines in [1, 4] {
+        for lines in [1, 5] {
             let (laid, _) = laid(&document(lines), 10);
-            assert_eq!(laid.expect("pages").pages.len(), 1);
+            let pages = laid.expect("pages").pages;
+            assert_eq!(pages.len(), 1);
+            // The notes are placed: their separator is drawn.
+            assert_eq!(separators_and_texts(&pages[0]).0.len(), 1);
             assert!(
                 started.elapsed() < LINEAR_NOTES,
                 "{COUNT} references on {lines} lines took {:?}: placing notes is no longer \
