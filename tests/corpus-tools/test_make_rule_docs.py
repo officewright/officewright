@@ -4239,6 +4239,12 @@ class Packages(unittest.TestCase):
                         # A note with a custom mark shows that mark, not its number.
                         self.assertIsNone(by_id[i].find(f".//{W}{kind}Ref"), doc.name)
                         self.assertEqual(first.find(f"{W}t").text, mark, doc.name)
+                    # One space follows the mark; no later line or paragraph of the note starts
+                    # with one, since Word draws a space at the start of a line.
+                    words = [t.text for t in by_id[i].iter(f"{W}t")][1 if mark else 0:]
+                    self.assertRegex(words[0], r"^ \S", f"{doc.name}: {i}")
+                    for word in words[1:]:
+                        self.assertNotRegex(word, r"^\s", f"{doc.name}: {i}")
         self.assertEqual(documents_with_notes, 14)
 
     def test_settings_follow_the_schema_order(self):
@@ -4333,6 +4339,30 @@ class Packages(unittest.TestCase):
             spacing = p.find(f"{W}pPr/{W}spacing")
             return spacing.get(f"{W}lineRule"), int(spacing.get(f"{W}line"))
 
+        def note_heights(name):
+            """The heights of the separator's line and of a line of the footnote text, from
+            the document: the separator's paragraph and the FootnoteText style are single
+            lines, the separator in the default size, the note in the style's size."""
+            parts = dict(rules.parts(by_name[name]))
+            styles = ElementTree.fromstring(parts["word/styles.xml"])
+            single = ("auto", 240)
+            by_id = {st.get(f"{W}styleId"): st for st in styles.iter(f"{W}style")}
+            default = styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr/{W}sz")
+            self.assertIsNone(by_id["Normal"].find(f"{W}rPr"), name)
+            self.assertEqual(line(styles.find(f"{W}docDefaults/{W}pPrDefault")), single, name)
+            text_style = by_id["FootnoteText"]
+            self.assertEqual(text_style.find(f"{W}basedOn").get(f"{W}val"), "Normal")
+            self.assertEqual(line(text_style), single, name)
+            separator = ElementTree.fromstring(parts["word/footnotes.xml"]).find(
+                f"{W}footnote[@{W}type='separator']/{W}p")
+            self.assertEqual(line(separator), single, name)
+            self.assertIsNone(separator.find(f"{W}r/{W}rPr"), name)
+            # Word's built-in note text is 10 pt (note_styles()), the rule documents' text 11 pt.
+            size = int(text_style.find(f"{W}rPr/{W}sz").get(f"{W}val")) / 2
+            self.assertEqual((int(default.get(f"{W}val")) / 2, size), (11, 10), name)
+            return (carlito_line_height(int(default.get(f"{W}val")) / 2),
+                    carlito_line_height(size))
+
         # E-footnote-separator: a note from line 2 of three, then one from Line 10 of a page of
         # 70 lines of 12 pt.
         body, settings, notes = load("E-footnote-separator")
@@ -4369,19 +4399,23 @@ class Packages(unittest.TestCase):
         self.assertEqual(len(notes["footnote"]["7"].findall(f"{W}p")), 2)
 
         # E-footnote-no-room: label, spacer, reference line and a line of 48 pt fill the body
-        # but for the room the label names; that room holds the separator (a line of 11 pt)
-        # and one line of the note (10 pt) at 32 pt, not two lines, and neither at 10 pt.
-        separator, note_line = carlito_line_height(11), carlito_line_height(10)
-        self.assertLess(separator + note_line, 32)
-        self.assertGreater(separator + 2 * note_line, 32)
-        self.assertGreater(separator + note_line, 10)
+        # but for the room the label names. Below the separator, that room holds as many lines
+        # of the note as the cases say: a part of each note but the one-line note, which fits
+        # whole, and nothing at 10 pt. Under widow control (on by default, ECMA-376 §17.3.1.44)
+        # a three-line note cannot be cut, a four-line one can be cut after two lines.
         body, settings, notes = load("E-footnote-no-room")
+        separator, note_line = note_heights("E-footnote-no-room")
+        self.assertIsNotNone(ElementTree.fromstring(dict(rules.parts(by_name["E-footnote-no-room"]))[
+            "word/styles.xml"]).find(f"{W}docDefaults/{W}pPrDefault/{W}pPr/{W}widowControl"))
         cases = pages(body.findall(f"{W}p"))
-        self.assertEqual(len(cases), 3)
+        self.assertEqual(len(cases), len(rules.NO_ROOM_CASES))
+        found = []
         for n, case in enumerate(cases, 1):
             label, room, reference, after = case[:4]
-            count, left = map(int, re.match(r"Case \d+: a (\d)-line note, (\d+) pt left",
-                                            texts(label)).groups())
+            count, widow, left = re.match(
+                r"Case \d+: a (\d)-line note, widow control (on|off), (\d+) pt left",
+                texts(label)).groups()
+            count, left = int(count), int(left)
             self.assertEqual([line(p) for p in (label, reference)], [("exact", 240)] * 2)
             self.assertEqual(texts(room), "")
             self.assertEqual(line(room)[0], "exact")
@@ -4389,21 +4423,35 @@ class Packages(unittest.TestCase):
             self.assertEqual(refs(reference), [str(n)])
             self.assertEqual(line(after), ("exact", 960))
             self.assertGreater(48, left)
-            self.assertEqual(note_lines(notes["footnote"][str(n)]), count)
+            footnote = notes["footnote"][str(n)]
+            self.assertEqual(note_lines(footnote), count)
+            control = footnote.find(f"{W}p/{W}pPr/{W}widowControl")
+            if widow == "on":
+                self.assertIsNone(control, texts(label))
+            else:
+                self.assertEqual(control.get(f"{W}val"), "0", texts(label))
+            # The lines of the note that fit below the separator.
+            fitting = max(0, int((left - separator) // note_line))
+            found.append((count, widow, min(fitting, count)))
+        self.assertEqual(found, [(3, "off", 1), (3, "on", 1), (4, "on", 2), (3, "off", 0),
+                                 (1, "on", 1)])
 
-        # E-footnote-long and -notice: a note of 40 lines, taller than half the body, from
-        # Line 03 of 60; the continuation notice in the second only.
-        half = (rules.PAGE_H - 2 * rules.MARGIN) / 40
+        # E-footnote-long and -notice: a note of 40 lines from Line 30 of 60, which cannot fit
+        # below its reference, though the separator and a part of it can; the continuation
+        # notice in the second only.
         for name, notice in (("E-footnote-long", False), ("E-footnote-long-notice", True)):
             body, settings, notes = load(name)
+            separator, note_line = note_heights(name)
             paragraphs = body.findall(f"{W}p")
             self.assertEqual([texts(p)[:7] for p in paragraphs[:60]],
                              [f"Line {k:02d}" for k in range(1, 61)])
-            self.assertEqual([k for k, p in enumerate(paragraphs, 1) if refs(p)], [3])
-            self.assertEqual(note_lines(notes["footnote"]["1"]), 40)
-            self.assertGreater(40 * carlito_line_height(10), half)
-            self.assertIn("a footnote of 40 lines, taller than half a page, from Line 03",
-                          texts(paragraphs[0]))
+            self.assertEqual({line(p) for p in paragraphs}, {("exact", 240)})
+            (at,) = [k for k, p in enumerate(paragraphs, 1) if refs(p)]
+            room = rules.BODY_HEIGHT - 12 * at
+            count = note_lines(notes["footnote"]["1"])
+            self.assertGreater(separator + count * note_line, room, name)
+            self.assertLessEqual(separator + note_line, room, name)
+            self.assertIn(f"a {count}-line footnote from Line {at}", texts(paragraphs[0]))
             self.assertEqual("continuation notice" in texts(paragraphs[0]), notice)
             self.assertEqual("2" in notes["footnote"], notice, name)
 
@@ -4478,9 +4526,11 @@ class Packages(unittest.TestCase):
         self.assertEqual([[sum(len(refs(p)) for p in page) for page in pages(paragraphs)]
                           for paragraphs in (first, second)], [[2, 1], [1, 1]])
 
-        # E-footnote-table: one reference in a table of one row, and one in line 3 and in
-        # line 18 of a row whose first 17 lines fit on page 1 after 41 lines.
+        # E-footnote-table: one reference in a table of one row, one in line 3 of a row that
+        # starts after 41 lines, which fits on page 1 with its note, and one in line 18 of
+        # such a row, past the 17 lines page 1 holds without a note.
         body, settings, notes = load("E-footnote-table")
+        separator, note_line = note_heights("E-footnote-table")
         tables = body.findall(f"{W}tbl")
         self.assertEqual([refs(t) for t in tables], [["1"], ["2"], ["3"]])
         self.assertEqual(refs(body), ["1", "2", "3"])
@@ -4501,8 +4551,13 @@ class Packages(unittest.TestCase):
             self.assertEqual([texts(p) for p in between],
                              [f"Filler {k:02d}" for k in range(1, 41)])
             self.assertEqual({line(p) for p in [elements[start], *between]}, {("exact", 240)})
-            self.assertEqual(rules.LINES_PER_PAGE - 41, 17)
-            self.assertEqual(at <= 17, at == 3)
+            before = (1 + len(between)) * 12
+            if at == 3:
+                self.assertLessEqual(before + at * 12 + separator + note_line, rules.BODY_HEIGHT)
+            else:
+                self.assertEqual(at, 18)
+                self.assertLessEqual(before + (at - 1) * 12, rules.BODY_HEIGHT)
+                self.assertGreater(before + at * 12, rules.BODY_HEIGHT)
 
         # E-endnote-doc-end: no placement anywhere (the end of the document), three endnotes,
         # the last of two lines, and no footnote.
@@ -4541,7 +4596,17 @@ class Packages(unittest.TestCase):
             self.assertEqual([len(refs(p, "endnote")) for p in body.findall(f"{W}p")
                               if refs(p, "endnote")], [1, 1, 1, 1])
             where = "the settings" if in_settings else "each section"
-            self.assertIn(f"by {where}", texts(found[0][0][0]))
+            self.assertIn(f"w:pos sectEnd for endnotes in {where}", texts(found[0][0][0]))
+
+        # A later section starts where its w:type says (the next page by default, continuous
+        # in E-endnote-section-end), never with a page break of its own; later pages of one
+        # section start with w:pageBreakBefore.
+        for name in by_name:
+            if name.startswith(("E-footnote-", "E-endnote-")):
+                body, _, _ = load(name)
+                for paragraphs, _ in sections(body)[1:]:
+                    self.assertIsNone(paragraphs[0].find(f"{W}pPr/{W}pageBreakBefore"),
+                                      f"{name}: {texts(paragraphs[0])}")
 
         # Every paragraph of these documents' bodies fits one line in Carlito, Calibri's twin,
         # so that the lines they count are the lines Word draws.

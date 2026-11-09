@@ -5488,47 +5488,61 @@ def footnote_two_notes() -> Doc:
 BODY_HEIGHT = (PAGE_H - 2 * MARGIN) / 20
 
 
+# The cases of E-footnote-no-room: (lines of the note, widow control of the note, room left
+# below the reference line in points). Below the reference line, 32 pt hold the separator (a
+# line of the 11 pt default text, about 13.4 pt) and one line of the 10 pt note text (about
+# 12.2 pt) but not two, 45 pt the separator and two lines but not three, and 10 pt neither.
+# Widow control keeps the first and the last two lines of a paragraph together, so it rules
+# out every cut of a three-line note, while a four-line one may be cut in the middle.
+NO_ROOM_CASES = [(3, False, 32), (3, True, 32), (4, True, 45), (3, False, 10), (1, True, 32)]
+
+
+def note_lines(prefix: str, count: int) -> str:
+    """count lines <prefix>, line 1 ... of a note, in one paragraph; the space that follows
+    the note's mark starts the first line only."""
+    values = [f"{prefix}, line {k}" for k in range(1, count + 1)]
+    return lines([" " + values[0], *values[1:]])
+
+
 def footnote_no_room() -> Doc:
-    # The reference is in the last line that fits: the line after it is 48 pt tall. Below
-    # the reference line, 32 pt hold the separator (one 11 pt line, about 13.4 pt) and one
-    # line of the note (10 pt, about 12.2 pt) but not two; 10 pt hold neither.
-    cases = [
-        ("a 3-line note, 32 pt left below the reference line", 32, 3),
-        ("a 3-line note, 10 pt left below the reference line", 10, 3),
-        ("a 1-line note, 32 pt left below the reference line", 32, 1),
-    ]
+    # The reference is in the last line that fits: the line after it is 48 pt tall.
     body, footnotes = "", []
-    for n, (label, left, count) in enumerate(cases, 1):
+    for n, (count, widow, left) in enumerate(NO_ROOM_CASES, 1):
+        label = f"a {count}-line note, widow control {'on' if widow else 'off'}, {left} pt left"
         body += (page_para(run(f"Case {n:02d}: {label}"), page_break_before=n > 1)
                  + spacer(BODY_HEIGHT - 12 - 12 - left)
                  + page_para(run(f"Case {n:02d}: the line that holds the reference")
                              + note_reference(n))
                  + para(run(f"Case {n:02d}: after the reference line, a line 48 pt tall"),
                         space=spacing(line=("exact", 48))))
-        footnotes.append(note(lines([f" Footnote {n}, line {k}" for k in range(1, count + 1)])))
+        footnotes.append(note(note_lines(f"Footnote {n}", count),
+                              widow_control=None if widow else False))
     return Doc(
         "E-footnote-no-room",
         "A footnote reference in the last line that fits on a page, with room below it for "
-        "the separator and one line of the note but not for its three lines, with room for "
-        "neither, and with room for a note of one line: whether the line moves to the next "
-        "page or the note is cut",
+        "the separator and one line of a three-line note, without and with widow control, "
+        "for two lines of a four-line note with widow control, for neither, and for a note "
+        "of one line: whether the line moves to the next page or the note is cut",
         body + page_para(run("End of the document.")),
         footnotes=tuple(footnotes),
     )
 
 
+# The note of E-footnote-long: 40 lines from Line 30, where 337.9 pt are left below the
+# reference line, room for the separator and 26 of its lines: it cannot fit on that page.
 LONG_NOTE_LINES = 40
+LONG_NOTE_REFERENCE = 30
 
 
 def long_note(name: str, notice: bool) -> Doc:
-    label = "Line 01: a footnote of 40 lines, taller than half a page, from Line 03"
-    if notice:
-        label += ", with a continuation notice"
-    body = page_para(run(label)) + numbered_with_refs("Line", 60, {3: note_reference(1)}, 2)
-    note_lines = [f"Footnote 1, line {k:02d}" for k in range(1, LONG_NOTE_LINES + 1)]
-    footnote = note(lines([" " + note_lines[0], *note_lines[1:]]))
-    purpose = ("A footnote taller than half a page, cut across pages: what Word leaves on the "
-               "page of its reference, and the continuation separator above the rest")
+    label = f"Line 01: a {LONG_NOTE_LINES}-line footnote from Line {LONG_NOTE_REFERENCE}"
+    label += ", with a continuation notice" if notice else " that cannot fit on this page"
+    body = page_para(run(label)) + numbered_with_refs(
+        "Line", 60, {LONG_NOTE_REFERENCE: note_reference(1)}, 2)
+    footnote = note(note_lines("Footnote 1", LONG_NOTE_LINES))
+    purpose = (f"A footnote of {LONG_NOTE_LINES} lines from Line {LONG_NOTE_REFERENCE}, too tall "
+               "for the room below its reference: what Word leaves on the page of its "
+               "reference, and the continuation separator above the rest")
     if notice:
         purpose += ", with a continuation notice under the part that is cut"
     return Doc(
@@ -5574,8 +5588,9 @@ def footnote_beneath_settings() -> Doc:
         "Body line 3, the last line."))
     return Doc(
         "E-footnote-beneath-settings",
-        "A footnote on a page whose text ends high, beneath the text by the document-wide "
-        "w:footnotePr of the settings and placed by no section",
+        "Whether the document-wide w:footnotePr of the settings alone (w:pos beneathText, "
+        "none in the section) places a footnote beneath the text on a page whose text ends "
+        "high, which MS-OI29500 2.1.309 a says Word takes from the section only",
         body,
         footnotes=(note(run(" Footnote 1, one line.")),),
         footnote_props=note_props(pos="beneathText"),
@@ -5660,8 +5675,10 @@ def note_table(first_cell: str, second_cell: str) -> str:
 
 
 def footnote_table() -> Doc:
-    # Cases 02 and 03 as crossing_case(): 41 lines before the row leave room for 17 of its
-    # 20 lines on page 1, so line 03 of the first cell is on page 1 and line 18 on page 2.
+    # Cases 02 and 03 as crossing_case(): the row starts after 41 lines of 12 pt. Line 03 of
+    # its first cell fits on page 1 with its note (the separator and one line), which leaves
+    # less room there for the row; without a note on page 1, the page holds 17 of the row's
+    # lines, so line 18 is on page 2.
     simple = note_table(page_para(run("First cell")),
                         page_para(run("Second cell holds the reference.") + note_reference(1)))
     cases = [(2, 3), (3, 18)]
@@ -5674,8 +5691,9 @@ def footnote_table() -> Doc:
                               crossing)
     return Doc(
         "E-footnote-table",
-        "Footnote references in table cells: in a table of one row, and in line 3 and line 18 "
-        "of a cell in a row that is cut across two pages after its 17th line",
+        "Footnote references in table cells: in a table of one row; in line 3 of a row cut "
+        "across two pages, whose note takes room on the first; and in line 18 of such a row, "
+        "past the 17 lines the first page holds",
         body + page_para(run("End of the document.")),
         footnotes=tuple(note(run(f" Footnote {n}, one line.")) for n in range(1, 4)),
     )
@@ -5720,7 +5738,7 @@ def endnote_section_end(name: str, in_settings: bool) -> Doc:
     where = "the settings" if in_settings else "each section"
     props = section_notes(endnotes=note_props(pos="sectEnd")) if not in_settings else ""
     pages = [
-        ([[run(f"Section 1: endnotes at the end of the section by {where}"),
+        ([[run(f"Section 1: w:pos sectEnd for endnotes in {where}"),
            run("Body line 2 holds a reference") + note_reference(1, "endnote"),
            run("Body line 3 holds a reference") + note_reference(2, "endnote"),
            run("Body line 4, the last line of section 1.")]], section(notes=props)),
@@ -5734,8 +5752,9 @@ def endnote_section_end(name: str, in_settings: bool) -> Doc:
     ]
     return Doc(
         name,
-        f"Endnotes at the end of each section (w:pos sectEnd in {where}), after a section "
-        "followed by a continuous section and after one followed by a section on the next page",
+        f"Whether w:pos sectEnd for endnotes in {where} alone puts the endnotes at the end "
+        "of each section: after a section followed by a continuous section and after one "
+        "followed by a section on the next page",
         note_pages(pages),
         endnotes=tuple(note(run(f" Endnote {n}, one line."), kind="endnote")
                        for n in range(1, 5)),
