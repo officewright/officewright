@@ -351,8 +351,8 @@ impl Formats<'_> {
         instance
     }
 
-    /// The start of each level of the definition `id` and the style it names, worked
-    /// out once and shared by every instance that uses it. The levels are parsed and
+    /// The start of each level of the definition `id`, worked out once and shared by
+    /// every instance that uses it. The levels are parsed and
     /// dropped: what a level gives to paragraphs and to their labels is kept only for
     /// the levels paragraphs use ([`level_gives`](Self::level_gives)).
     fn definition_levels(&mut self, id: i64) -> Arc<DefinitionLevels> {
