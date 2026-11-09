@@ -804,8 +804,29 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         while let Some(unit) = self.units.get(index).cloned() {
             match &unit.kind {
                 UnitKind::Break { kind, .. } => {
+                    // Floating objects that only the paragraph's end follows after a page or
+                    // column break stay on the break's line, as they take no line of their
+                    // own on the next page (#476; a hypothesis until a Word render). Those
+                    // before text go with it, as the heading after a page break and a text
+                    // box does in Word's render of `letter-dol-cobra-election-notice`. After
+                    // a line break the paragraph's mark has a line of its own, and they go
+                    // on it.
+                    let after = index + 1;
+                    let floats = self
+                        .units
+                        .get(after..)
+                        .unwrap_or_default()
+                        .iter()
+                        .take_while(|next| next.range.is_empty())
+                        .count();
+                    let page = matches!(kind, BreakKind::Page | BreakKind::Column);
+                    let end = if page && after + floats == self.units.len() {
+                        self.units.len()
+                    } else {
+                        after
+                    };
                     return Fit {
-                        end: index + 1,
+                        end,
                         end_kind: line_end(*kind),
                         hyphen: false,
                         overflow,
@@ -851,6 +872,16 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 }
             }
             index += 1;
+            // A floating object takes no room in the text: the place to break at it is the
+            // one after the unit before it, weighed there (#476). A line that may end right
+            // before it ends after it instead, with that place's soft hyphen, so that it
+            // stays on the line before a wrap.
+            if unit.range.is_empty() {
+                if let Some((end, hyphen)) = candidate.filter(|&(end, _)| end + 1 == index) {
+                    candidate = Some((end + 1, hyphen));
+                }
+                continue;
+            }
             let at = unit.range.end;
             match self.breaks.at(at) {
                 Some(Opportunity::Allowed) if index < self.units.len() => {
@@ -860,13 +891,26 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     }
                 }
                 Some(Opportunity::Mandatory) if index < self.units.len() => {
-                    return Fit {
-                        end: index,
-                        end_kind: LineEnd::Break,
-                        hyphen: false,
-                        overflow,
-                        hanging_tab,
-                    };
+                    // The floating objects at the break stay on the line it ends, as Word
+                    // gives them no line of their own (#476): a line shape that ends
+                    // "Sinceramente," in Word's render of `form-cfpb-credit-form-c3-es`.
+                    // After them, the paragraph may end.
+                    while self
+                        .units
+                        .get(index)
+                        .is_some_and(|next| next.range.is_empty())
+                    {
+                        index += 1;
+                    }
+                    if index < self.units.len() {
+                        return Fit {
+                            end: index,
+                            end_kind: LineEnd::Break,
+                            hyphen: false,
+                            overflow,
+                            hanging_tab,
+                        };
+                    }
                 }
                 _ => {}
             }
@@ -1183,9 +1227,12 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         ) {
             content_end = Pt(origin + offset);
         }
-        // The hyphen of a line that ends at a soft hyphen.
-        if fit.hyphen && end > start && self.ends_in_soft_hyphen(end - 1) {
-            if let Some((item, run)) = self.hyphen(end - 1) {
+        // The hyphen of a line that ends at a soft hyphen, or at floating objects after one.
+        let last_text = (start..end)
+            .rev()
+            .find(|&i| self.units.get(i).is_some_and(|unit| !unit.range.is_empty()));
+        if let Some(last) = last_text.filter(|&last| fit.hyphen && self.ends_in_soft_hyphen(last)) {
+            if let Some((item, run)) = self.hyphen(last) {
                 let width = self.run_width(item, &run);
                 let scale = self.scales.get(item).copied().flatten().unwrap_or_default();
                 pieces.push(Piece {

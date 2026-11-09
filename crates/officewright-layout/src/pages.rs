@@ -4363,6 +4363,170 @@ mod tests {
         ))
     }
 
+    #[test]
+    fn a_floating_object_takes_no_line_of_its_own() {
+        use crate::ir::{
+            HorizontalPlacement, HorizontalReference, VerticalPlacement, VerticalReference,
+        };
+        // Issue #476: a paragraph of `A`, `B`, `W` (40 `A`s, 240 pt), `X` (10 `A`s), `V`
+        // (`AA`), `U` (5 `A`s) and `s` a space, `h` a soft hyphen, `b` a line break, `g` a
+        // page break, `c` a column break and `p` a floating picture placed from the top of
+        // its line, then a paragraph `Z`, in exact lines of 20 pt on pages with a body
+        // 260 pt wide: lines at 20, 40 and 60 down, their baselines at 36, 56 and 76. A
+        // picture at the end, or right after a break, adds no line, as Word adds none: the
+        // line shape that ends "Sinceramente," in `form-cfpb-credit-form-c3-es`, and the
+        // text box after a page break in `letter-dol-cobra-election-notice`, its heading
+        // first on its page.
+        type Texts<'a> = &'a [(usize, &'a str, f64)];
+        type Pictures<'a> = &'a [(usize, f64)];
+        let cases: [(&str, Texts<'_>, Pictures<'_>); 15] = [
+            ("Ap", &[(0, "A", 36.0), (0, "Z", 56.0)], &[(0, 20.0)]),
+            (
+                "App",
+                &[(0, "A", 36.0), (0, "Z", 56.0)],
+                &[(0, 20.0), (0, 20.0)],
+            ),
+            (
+                "AbpB",
+                &[(0, "A", 36.0), (0, "B", 56.0), (0, "Z", 76.0)],
+                &[(0, 40.0)],
+            ),
+            (
+                "AbppB",
+                &[(0, "A", 36.0), (0, "B", 56.0), (0, "Z", 76.0)],
+                &[(0, 40.0), (0, 40.0)],
+            ),
+            (
+                "AbBp",
+                &[(0, "A", 36.0), (0, "B", 56.0), (0, "Z", 76.0)],
+                &[(0, 40.0)],
+            ),
+            (
+                "AgpB",
+                &[(0, "A", 36.0), (1, "B", 36.0), (1, "Z", 56.0)],
+                &[(1, 20.0)],
+            ),
+            // Only the paragraph's end after the page or column break: the picture stays
+            // on the break's line, and the next paragraph starts the next page.
+            ("Agp", &[(0, "A", 36.0), (1, "Z", 36.0)], &[(0, 20.0)]),
+            ("Acp", &[(0, "A", 36.0), (1, "Z", 36.0)], &[(0, 20.0)]),
+            // After a line break the paragraph's mark has a line of its own, and the picture
+            // at the end goes on it.
+            ("Abp", &[(0, "A", 36.0), (0, "Z", 76.0)], &[(0, 40.0)]),
+            ("pA", &[(0, "A", 36.0), (0, "Z", 56.0)], &[(0, 20.0)]),
+            (
+                "ApB",
+                &[(0, "A", 36.0), (0, "B", 36.0), (0, "Z", 56.0)],
+                &[(0, 20.0)],
+            ),
+            // Where a line wraps, at a space or a soft hyphen, the picture stays at the end
+            // of the line before, and the soft hyphen draws its hyphen.
+            ("WspX", WRAPPED, &[(0, 20.0)]),
+            ("WhpX", HYPHENATED, &[(0, 20.0)]),
+            // A soft hyphen whose hyphen does not fit, then a picture: the line wraps at the
+            // spaces before, as it does with no picture, and `AA` goes to line 2 with it.
+            ("WssVhpX", AT_THE_SPACES, &[(0, 40.0)]),
+            // A wrap at a space, then a picture inside the next word: the word is not broken
+            // at the picture, and the picture goes to line 2 with it.
+            ("WsVpU", IN_A_WORD, &[(0, 40.0)]),
+        ];
+        const WRAPPED: &[(usize, &str, f64)] = &[
+            (0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 36.0),
+            (0, " ", 36.0),
+            (0, "AAAAAAAAAA", 56.0),
+            (0, "Z", 76.0),
+        ];
+        // The soft hyphen's own glyphs, then the hyphen drawn for it, which stands for no
+        // text.
+        const HYPHENATED: &[(usize, &str, f64)] = &[
+            (0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 36.0),
+            (0, "\u{ad}", 36.0),
+            (0, "", 36.0),
+            (0, "AAAAAAAAAA", 56.0),
+            (0, "Z", 76.0),
+        ];
+        const AT_THE_SPACES: &[(usize, &str, f64)] = &[
+            (0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 36.0),
+            (0, "  ", 36.0),
+            (0, "AA\u{ad}", 56.0),
+            (0, "AAAAAAAAAA", 56.0),
+            (0, "Z", 76.0),
+        ];
+        const IN_A_WORD: &[(usize, &str, f64)] = &[
+            (0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 36.0),
+            (0, " ", 36.0),
+            (0, "AA", 56.0),
+            (0, "AAAAA", 56.0),
+            (0, "Z", 76.0),
+        ];
+        for (paragraph, texts, pictures) in cases {
+            let mut document = Document::default();
+            let style = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0)),
+            );
+            let mut inlines = Vec::new();
+            for code in paragraph.chars() {
+                inlines.push(match code {
+                    'b' => Inline::line_break(BreakClear::None, style),
+                    'g' => Inline::page_break(style),
+                    'c' => Inline::column_break(style),
+                    'p' => anchored_picture(
+                        &mut document,
+                        (
+                            HorizontalReference::Page,
+                            HorizontalPlacement::Offset(Pt(200.0)),
+                        ),
+                        (VerticalReference::Line, VerticalPlacement::Offset(Pt(0.0))),
+                    ),
+                    'W' => Inline::text("A".repeat(40), style),
+                    'X' => Inline::text("A".repeat(10), style),
+                    'V' => Inline::text("AA", style),
+                    'U' => Inline::text("AAAAA", style),
+                    's' => Inline::text(" ", style),
+                    'h' => Inline::soft_hyphen(style),
+                    text => Inline::text(text.to_string(), style),
+                });
+            }
+            document.add_section(Section::new(setup()).with_blocks(vec![
+                holding(style, inlines),
+                text_paragraph(style, "Z", spacing(0.0, 0.0)),
+            ]));
+            let (laid, _) = laid(&document, 10);
+            let pages = laid.expect("pages").pages;
+            let drawn: Vec<(usize, String, f64)> = pages
+                .iter()
+                .enumerate()
+                .flat_map(|(number, page)| {
+                    drawing(page).into_iter().filter_map(move |item| {
+                        // `text TEXT X Y`, the text perhaps a space.
+                        let rest = item.strip_prefix("text ")?;
+                        let mut words = rest.rsplitn(3, ' ');
+                        let y = words.next().and_then(|y| y.parse().ok())?;
+                        let _x = words.next()?;
+                        Some((number, words.next().unwrap_or_default().to_owned(), y))
+                    })
+                })
+                .collect();
+            let placed: Vec<(usize, f64)> = pages
+                .iter()
+                .enumerate()
+                .flat_map(|(number, page)| {
+                    picture_places(page)
+                        .into_iter()
+                        .map(move |(_, y)| (number, y))
+                })
+                .collect();
+            let texts: Vec<(usize, String, f64)> = texts
+                .iter()
+                .map(|(page, text, y)| (*page, (*text).to_owned(), *y))
+                .collect();
+            assert_eq!(drawn, texts, "{paragraph}");
+            assert_eq!(placed, pictures, "{paragraph}");
+        }
+    }
+
     /// Where the pictures `page` draws are, in drawing order.
     fn picture_places(page: &Page) -> Vec<(f64, f64)> {
         page.items
