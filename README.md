@@ -65,9 +65,9 @@ merged cells, borders and shading, and their rows are cut across pages with the 
 rows repeated. It draws inline PNG and JPEG pictures and floating ones where they are
 anchored, text boxes in the line and floating with their paragraphs, insets, fill and
 line, the numbers of references to footnotes and endnotes, footnotes under their
-separator at the bottom of the page of their reference, or beneath its text where the
-section places them so (a line whose notes do not fit below it moves to the next page
-with them), and underlines, strikethrough, highlight and shading.
+separator at the bottom of the page of their reference, or beneath the page's text
+where the section places them so (a line whose notes do not fit below it moves to the
+next page with them), and underlines, strikethrough, highlight and shading.
 Much of what it shows otherwise than Word would, such as a substituted font or something
 not laid out yet, it reports: the command line prints it as notes, and the C library and
 Rust return it as a report.
@@ -81,8 +81,7 @@ The main things not laid out yet:
   rows of such a table are not repeated);
 - list numbers in formats such as Hebrew letters or Chinese counting, which are written in
   decimal, and picture bullets, for which the level's text stands in;
-- endnotes, the notes of references in table cells and in headers and footers (where
-  references show no number), and footnotes cut across pages;
+- endnotes, the notes of references in table cells, and footnotes cut across pages;
 - text wrapping around floating pictures and text boxes (it runs over or under them),
   floating pictures and text boxes in table cells, and shapes, charts, SmartArt, VML
   shapes other than pictures and text boxes, and equations;
@@ -107,13 +106,14 @@ The main things not laid out yet:
   row cut across pages, which show the number of one page.
 
 Of this list, the report names everything but links
-([#303](https://github.com/officewright/officewright/issues/303)) and the rows of a table
-in a table cell that move whole to the next page. It also names smaller differences that
-the list leaves out, such as absolute position tabs. Comments are left out and tracked
-changes are shown as accepted, as in Word's PDF of a document without markup, except that
-deleted paragraph marks, table rows and table cells stay, so a deleted paragraph leaves an
-empty line; the report names those. DOC and RTF files, and files that need a password to
-open, cannot be opened yet.
+([#303](https://github.com/officewright/officewright/issues/303)), the rows of a table
+in a table cell that move whole to the next page, and a footnote that Word would cut
+across pages, whose line moves to the next page with it. It also names smaller
+differences that the list leaves out, such as absolute position tabs. Comments are left
+out and tracked changes are shown as accepted, as in Word's PDF of a document without
+markup, except that deleted paragraph marks, table rows and table cells stay, so a
+deleted paragraph leaves an empty line; the report names those. DOC and RTF files, and
+files that need a password to open, cannot be opened yet.
 
 From the command line:
 
