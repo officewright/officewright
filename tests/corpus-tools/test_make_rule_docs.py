@@ -4339,23 +4339,40 @@ class Packages(unittest.TestCase):
             spacing = p.find(f"{W}pPr/{W}spacing")
             return spacing.get(f"{W}lineRule"), int(spacing.get(f"{W}line"))
 
+        def no_space(element, name):
+            """The w:spacing of a paragraph, a style or w:pPrDefault adds no space before or
+            after."""
+            spacing = element.find(f"{W}pPr/{W}spacing")
+            for attribute in ("before", "after", "beforeLines", "afterLines"):
+                self.assertIn(spacing.get(f"{W}{attribute}"), (None, "0"), f"{name}: {attribute}")
+            for attribute in ("beforeAutospacing", "afterAutospacing"):
+                self.assertIn(spacing.get(f"{W}{attribute}"), (None, "0", "false", "off"), name)
+
         def note_heights(name):
             """The heights of the separator's line and of a line of the footnote text, from
             the document: the separator's paragraph and the FootnoteText style are single
-            lines, the separator in the default size, the note in the style's size."""
+            lines without space before or after, through Normal, which adds nothing to the
+            defaults; the separator in the default size, the note in the style's size."""
             parts = dict(rules.parts(by_name[name]))
             styles = ElementTree.fromstring(parts["word/styles.xml"])
             single = ("auto", 240)
             by_id = {st.get(f"{W}styleId"): st for st in styles.iter(f"{W}style")}
             default = styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr/{W}sz")
             self.assertIsNone(by_id["Normal"].find(f"{W}rPr"), name)
-            self.assertEqual(line(styles.find(f"{W}docDefaults/{W}pPrDefault")), single, name)
+            self.assertIsNone(by_id["Normal"].find(f"{W}pPr"), name)
+            defaults = styles.find(f"{W}docDefaults/{W}pPrDefault")
+            self.assertEqual(line(defaults), single, name)
+            no_space(defaults, name)
             text_style = by_id["FootnoteText"]
             self.assertEqual(text_style.find(f"{W}basedOn").get(f"{W}val"), "Normal")
             self.assertEqual(line(text_style), single, name)
+            no_space(text_style, name)
             separator = ElementTree.fromstring(parts["word/footnotes.xml"]).find(
                 f"{W}footnote[@{W}type='separator']/{W}p")
+            # The separator's paragraph is in Normal: no style of its own, no run properties.
+            self.assertIsNone(separator.find(f"{W}pPr/{W}pStyle"), name)
             self.assertEqual(line(separator), single, name)
+            no_space(separator, name)
             self.assertIsNone(separator.find(f"{W}r/{W}rPr"), name)
             # Word's built-in note text is 10 pt (note_styles()), the rule documents' text 11 pt.
             size = int(text_style.find(f"{W}rPr/{W}sz").get(f"{W}val")) / 2
@@ -4405,8 +4422,16 @@ class Packages(unittest.TestCase):
         # a three-line note cannot be cut, a four-line one can be cut after two lines.
         body, settings, notes = load("E-footnote-no-room")
         separator, note_line = note_heights("E-footnote-no-room")
-        self.assertIsNotNone(ElementTree.fromstring(dict(rules.parts(by_name["E-footnote-no-room"]))[
-            "word/styles.xml"]).find(f"{W}docDefaults/{W}pPrDefault/{W}pPr/{W}widowControl"))
+        # Widow control is on for a note that does not set it: the defaults turn it on (no
+        # w:val, or a true one), and neither Normal nor FootnoteText sets it.
+        styles = ElementTree.fromstring(dict(rules.parts(by_name["E-footnote-no-room"]))[
+            "word/styles.xml"])
+        control = styles.find(f"{W}docDefaults/{W}pPrDefault/{W}pPr/{W}widowControl")
+        self.assertIsNotNone(control)
+        self.assertIn(control.get(f"{W}val"), (None, "1", "true", "on"))
+        for st in styles.iter(f"{W}style"):
+            if st.get(f"{W}styleId") in ("Normal", "FootnoteText"):
+                self.assertIsNone(st.find(f"{W}pPr/{W}widowControl"), st.get(f"{W}styleId"))
         cases = pages(body.findall(f"{W}p"))
         self.assertEqual(len(cases), len(rules.NO_ROOM_CASES))
         found = []
