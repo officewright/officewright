@@ -712,18 +712,11 @@ impl Painting<'_, '_, '_> {
             y: Pt(baseline - rise),
         };
         let itemized = &self.layout.itemized;
-        // Word's PDF text of small capitals is the capitals it draws, not the lower case
-        // typed (E-smallcaps-15's reference: "HAMBURG" for "hamburg").
-        let text_of = if style.small_caps() {
-            ClusterText::Drawn
-        } else {
-            ClusterText::Source
-        };
         let clusters = if run.sources.is_empty() {
             let tables = tables.of(item, itemized, run);
-            clusters(itemized, run, &placed, piece, text_of, Some(tables))
+            clusters(itemized, run, &placed, piece, Some(tables))
         } else {
-            clusters(itemized, run, &placed, piece, text_of, None)
+            clusters(itemized, run, &placed, piece, None)
         };
         Some(GlyphItem {
             face,
@@ -1237,28 +1230,17 @@ fn rise_at(style: &RunStyle, size: f64) -> f64 {
     style.position().0 + vertical
 }
 
-/// What the text of a cluster is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClusterText {
-    /// The source characters of its drawn characters.
-    Source,
-    /// Its drawn characters.
-    Drawn,
-}
-
 /// The glyphs `placed` of `piece` in clusters, each with the text it stands for: the
 /// source characters of its drawn characters, each source character with the cluster
 /// that draws the first character drawn for it (`ß` in capitals, `SS`, goes with the
-/// first `S`), or with `text_of` [`ClusterText::Drawn`] its drawn characters. A cluster's
-/// text runs to the next cluster's start in the text, whichever order the glyphs are in
-/// (right-to-left text has them backwards). `tables` are the run's when its characters
-/// correspond one to one.
+/// first `S`). A cluster's text runs to the next cluster's start in the text, whichever
+/// order the glyphs are in (right-to-left text has them backwards). `tables` are the run's
+/// when its characters correspond one to one.
 fn clusters(
     itemized: &Itemized,
     run: &TextRun,
     placed: &[PlacedGlyph],
     piece: &Piece,
-    text_of: ClusterText,
     tables: Option<&SourceTables>,
 ) -> Vec<(String, Vec<PlacedGlyph>)> {
     let hyphen = matches!(piece.kind, PieceKind::Hyphen { .. });
@@ -1287,16 +1269,13 @@ fn clusters(
             end += 1;
         }
         let glyphs = placed.get(index..end).unwrap_or(&[]).to_vec();
-        let drawn = first.cluster..text_end(first.cluster);
         let text = if hyphen {
             // The hyphen drawn at a soft hyphen stands for no text of its own.
             String::new()
-        } else if text_of == ClusterText::Drawn {
-            itemized.text.get(drawn).unwrap_or("").to_owned()
         } else if let Some(tables) = tables.filter(|_| run.sources.is_empty()) {
-            tables.source_of(itemized, run, drawn)
+            tables.source_of(itemized, run, first.cluster..text_end(first.cluster))
         } else {
-            expanded_source(itemized, run, drawn)
+            expanded_source(itemized, run, first.cluster..text_end(first.cluster))
         };
         out.push((text, glyphs));
         index = end;
@@ -2474,10 +2453,11 @@ mod tests {
     #[test]
     fn small_capitals_stand_for_the_capitals_they_draw() {
         // Word's PDF text of small capitals is the capitals it draws: "HAMBURG" for
-        // "hamburg" in E-smallcaps-15's reference. Other text stands for its source.
-        let text_of = |style: RunStyle| {
+        // "hamburg" in E-smallcaps-15's reference. Other text stands for what the document
+        // has: capitals typed, `w:caps` (with or without `w:smallCaps`), and symbols.
+        let text_of = |style: RunStyle, inlines: &dyn Fn(crate::ir::RunStyleId) -> Vec<Inline>| {
             let (items, _) = painted(&[style], |ids, _| {
-                (ParagraphProps::default(), vec![Inline::text("aAa", ids[0])])
+                (ParagraphProps::default(), inlines(ids[0]))
             });
             glyph_runs(&items)
                 .iter()
@@ -2485,8 +2465,24 @@ mod tests {
                 .map(|cluster| cluster.text.clone())
                 .collect::<String>()
         };
-        assert_eq!(text_of(RunStyle::default().with_small_caps(true)), "AAA");
-        assert_eq!(text_of(RunStyle::default()), "aAa");
+        let text = |id| vec![Inline::text("aA\u{DF}\u{E9}a", id)];
+        let small = RunStyle::default().with_small_caps(true);
+        assert_eq!(text_of(small.clone(), &text), "AASS\u{C9}A");
+        assert_eq!(text_of(RunStyle::default(), &text), "aA\u{DF}\u{E9}a");
+        let both = RunStyle::default().with_caps(true).with_small_caps(true);
+        assert_eq!(text_of(both, &text), "aA\u{DF}\u{E9}a");
+        assert_eq!(
+            text_of(RunStyle::default().with_caps(true), &text),
+            "aA\u{DF}\u{E9}a"
+        );
+        // A symbol is not a letter small capitals change: it keeps its character.
+        let symbol = |id| {
+            vec![
+                Inline::symbol("Officewright Test", 0x0062, id),
+                Inline::text("a", id),
+            ]
+        };
+        assert_eq!(text_of(small, &symbol), "bA");
     }
 
     #[test]
