@@ -7,9 +7,12 @@
 //! stacked as the paragraphs of a header are, with the space between them and the space
 //! after the last, as Word's render of `E-footnote-two-notes.docx` shows (case 03: two
 //! notes of 6 pt before and after end 6 pt above the bottom of the body, 6 pt apart and 6
-//! pt under the separator); the space before the separator is not counted, a hypothesis.
-//! A note is never cut yet, which Word does where a note does not fit
-//! (`E-footnote-long.docx`, plan 15c).
+//! pt under the separator). The space after the last note is kept only as far as the text
+//! leaves room for it: like the space after the last paragraph of a page's text, it never
+//! moves a line to the next page, and where the text takes it the notes end at the bottom
+//! of the body. That, and that the space before the separator is not counted, are
+//! hypotheses until a Word render. A note is never cut yet, which Word does where a note
+//! does not fit (`E-footnote-long.docx`, plan 15c).
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -66,11 +69,17 @@ pub(super) struct PageNotes<'d> {
 }
 
 impl PageNotes<'_> {
-    /// The room the notes take, the separator's included; none without notes.
+    /// The room the notes take, the separator's included, and the space after the last;
+    /// none without notes.
     pub(super) fn room(&self) -> f64 {
         self.notes
             .last()
             .map_or(0.0, |note| note.bottom + note.after)
+    }
+
+    /// The room the notes need: their room without the space after the last.
+    pub(super) fn needed(&self) -> f64 {
+        self.notes.last().map_or(0.0, |note| note.bottom)
     }
 
     /// How many notes it holds.
@@ -129,10 +138,10 @@ fn references_footnote(document: &crate::ir::Document, inlines: &[Inline], resul
 
 impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// The bottom of what the body text of the current page may take: its body's bottom,
-    /// less the room its footnotes take.
+    /// less the room its footnotes need, without the space after the last.
     pub(super) fn text_bottom(&self) -> Result<f64> {
-        let room = self.footnotes.last().map_or(0.0, PageNotes::room);
-        Ok(self.body()?.bottom.0 - room)
+        let needed = self.footnotes.last().map_or(0.0, PageNotes::needed);
+        Ok(self.body()?.bottom.0 - needed)
     }
 
     /// The footnotes that line `line` of `layout`, the layout of `paragraph`, references
@@ -181,12 +190,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         top: f64,
     ) -> Result<(usize, bool)> {
         let bottom = self.body()?.bottom.0;
-        // The bottom of the last note in the notes' room, and that note.
+        // The bottom of the last note in the notes' room, which is what they need, and that
+        // note.
         let (mut end, mut tail) = match self.footnotes.last().and_then(|page| page.notes.last()) {
             Some(last) => (last.bottom, Some(Rc::clone(&last.layout))),
             None => (0.0, None),
         };
-        let mut room = self.footnotes.last().map_or(0.0, PageNotes::room);
         let mut taken: HashSet<NoteId> = HashSet::new();
         let mut y = top;
         let mut count = 0;
@@ -197,10 +206,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 }
                 let laid = self.note_layout(note, section)?;
                 end = self.room_after(end, tail.as_deref(), &laid, section)?.1;
-                room = end + self.space_after(&laid);
                 tail = Some(laid);
             }
-            if y + line.height.0 > bottom - room + EPSILON {
+            if y + line.height.0 > bottom - end + EPSILON {
                 break;
             }
             y += line.height.0;
@@ -390,8 +398,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
 
     /// Adds to `page` what its footnotes `notes` draw: at the bottom of its body, or
     /// beneath its text where its section places them so, under the separator; never
-    /// above its text, so that notes too tall for the page run past the bottom of the
-    /// body, where the pager reported them.
+    /// above its text, so that the space after the last note gives way to the text, and
+    /// notes too tall for the page run past the bottom of the body, where the pager
+    /// reported them.
     pub(super) fn paint_footnotes(&mut self, page: &mut Page, notes: &PageNotes<'d>) {
         if notes.notes.is_empty() {
             return;

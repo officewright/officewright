@@ -8941,8 +8941,11 @@ mod tests {
         );
     }
 
+    /// Where a page's separators are drawn, and its texts with their baselines.
+    type Separated = (Vec<f64>, Vec<(String, f64)>);
+
     /// The tops of the separators that `page` draws, and the baselines of its texts.
-    fn separators_and_texts(page: &Page) -> (Vec<f64>, Vec<(String, f64)>) {
+    fn separators_and_texts(page: &Page) -> Separated {
         let mut separators = Vec::new();
         let mut texts = Vec::new();
         for item in &page.items {
@@ -9124,19 +9127,28 @@ mod tests {
             1,
             "{report:?}"
         );
-        // A note that fits is not reported.
-        let document = with_notes(
-            setup(),
-            NotePosition::PageBottom,
-            Inline::separator,
-            |document, style, mark| {
-                let note = footnote(document, (style, mark), 6, spacing(0.0, 0.0));
-                vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
-            },
-        );
-        let (laid, report) = laid(&document, 10);
-        assert_eq!(laid.expect("pages").pages.len(), 1);
-        assert!(!messages(&report).iter().any(|m| m == PAST), "{report:?}");
+        // A note that fits is not reported, nor is one that fits but for its space after
+        // (six lines with 10 pt after, under its separator 140 pt from the line at 40 to the
+        // bottom): it ends at the bottom of the body.
+        for after in [0.0, 10.0] {
+            let document = with_notes(
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let note = footnote(document, (style, mark), 6, spacing(0.0, after));
+                    vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+                },
+            );
+            let (result, report) = laid(&document, 10);
+            let pages = result.expect("pages").pages;
+            assert_eq!(pages.len(), 1);
+            assert_eq!(
+                separators_and_texts(&pages[0]).1.last(),
+                Some(&("N".to_owned(), 176.0))
+            );
+            assert!(!messages(&report).iter().any(|m| m == PAST), "{report:?}");
+        }
     }
 
     #[test]
@@ -9205,29 +9217,36 @@ mod tests {
     fn a_table_after_a_footnote_s_line_ends_its_page_above_the_notes() {
         use crate::ir::NotePosition;
         // A line referencing a note (20 to 40), then a table of rows of 20 pt: five rows
-        // fit above the note's room (140), the other three go to the next page.
-        let document = with_notes(
-            setup(),
-            NotePosition::PageBottom,
-            Inline::separator,
-            |document, style, mark| {
-                let note = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
-                vec![
-                    referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
-                    table_of(style, 8, false),
-                ]
-            },
-        );
-        let (laid, _) = laid(&document, 10);
-        let pages = laid.expect("pages").pages;
-        let rows = |page: &Page| {
-            separators_and_texts(page)
-                .1
-                .iter()
-                .filter(|(text, _)| text == "A")
-                .count()
-        };
-        assert_eq!(pages.iter().map(rows).collect::<Vec<_>>(), [5, 3]);
+        // fit above the note's room (140), the other three go to the next page. With 10 pt
+        // after the note, the same: the space after gives way to the rows.
+        for after in [0.0, 10.0] {
+            let document = with_notes(
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let note = footnote(document, (style, mark), 1, spacing(0.0, after));
+                    vec![
+                        referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                        table_of(style, 8, false),
+                    ]
+                },
+            );
+            let (laid, _) = laid(&document, 10);
+            let pages = laid.expect("pages").pages;
+            let rows = |page: &Page| {
+                separators_and_texts(page)
+                    .1
+                    .iter()
+                    .filter(|(text, _)| text == "A")
+                    .count()
+            };
+            assert_eq!(
+                pages.iter().map(rows).collect::<Vec<_>>(),
+                [5, 3],
+                "{after}"
+            );
+        }
     }
 
     #[test]
@@ -9539,19 +9558,28 @@ mod tests {
         // A note of one line with 10 pt after it: the notes' room is 50 pt, the separator
         // (130 to 150), the note (150 to 170) and its space after, as Word's render of
         // E-footnote-two-notes case 03 ends its notes the 6 pt after the last above the
-        // bottom of the body. Under four lines its line (100 to 120) fits above that room;
-        // under five, the line (120 to 140) leaves only 40 pt, and moves.
-        let lay = |filler: usize| {
+        // bottom of the body. Under four lines its line (100 to 120) leaves the whole room.
+        // Under five, the line (120 to 140) leaves 40 pt: the line stays, and the space
+        // after gives way, the notes ending at the bottom. So does it to the lines after:
+        // a paragraph of six lines under the referencing line puts five on the page, down
+        // to 140, as far as the note itself leaves room.
+        let lay = |filler: usize, after: usize| {
             let document = with_notes(
                 setup(),
                 NotePosition::PageBottom,
                 Inline::separator,
                 |document, style, mark| {
                     let note = footnote(document, (style, mark), 1, spacing(0.0, 10.0));
-                    vec![
-                        lines(style, filler, spacing(0.0, 0.0)),
-                        referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
-                    ]
+                    let mut blocks = Vec::new();
+                    if filler > 0 {
+                        blocks.push(lines(style, filler, spacing(0.0, 0.0)));
+                    }
+                    blocks.push(referencing(style, (0, 0), &[note], spacing(0.0, 0.0)));
+                    if after > 0 {
+                        let props = spacing(0.0, 0.0).with_widow_control(false);
+                        blocks.push(lines(style, after, props));
+                    }
+                    blocks
                 },
             );
             let (laid, _) = laid(&document, 10);
@@ -9561,11 +9589,29 @@ mod tests {
                 .map(separators_and_texts)
                 .collect::<Vec<_>>()
         };
-        let pages = lay(4);
+        let note_at = |pages: &[Separated]| {
+            let (separators, texts) = &pages[0];
+            (separators.clone(), texts.last().cloned())
+        };
+        let pages = lay(4, 0);
         assert_eq!(pages.len(), 1);
-        assert_eq!(pages[0].0, [143.75]);
-        assert_eq!(pages[0].1.last(), Some(&("N".to_owned(), 166.0)));
-        assert_eq!(lay(5).len(), 2);
+        assert_eq!(
+            note_at(&pages),
+            (vec![143.75], Some(("N".to_owned(), 166.0)))
+        );
+        let pages = lay(5, 0);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(
+            note_at(&pages),
+            (vec![153.75], Some(("N".to_owned(), 176.0)))
+        );
+        let pages = lay(0, 6);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].1.len(), 1 + 5 + 2);
+        assert_eq!(
+            note_at(&pages),
+            (vec![153.75], Some(("N".to_owned(), 176.0)))
+        );
     }
 
     #[test]
