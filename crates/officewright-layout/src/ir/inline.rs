@@ -69,8 +69,9 @@ pub enum Inline {
     /// A floating object anchored here. It takes no room in the line.
     Anchored(Box<AnchoredObject>),
     /// The reference to a footnote or an endnote: its number in the text. Word ignores
-    /// one in a comment or a text box (MS-OI29500 2.1.305 a), which shows no number; one
-    /// in a header or footer shows no number either, which the layout reports.
+    /// one in a comment or a text box (MS-OI29500 2.1.302 b and 2.1.305 a), which shows
+    /// no number; one in a header or footer shows no number either, which the layout
+    /// reports.
     #[non_exhaustive]
     NoteReference {
         /// The note.

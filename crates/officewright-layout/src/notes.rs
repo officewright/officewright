@@ -12,8 +12,8 @@ use crate::numbers::number_text;
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct NoteNumbers {
     numbers: HashMap<NoteId, String>,
-    /// The notes referenced only where Word ignores references, in text boxes: they show
-    /// no number, as in Word.
+    /// The notes referenced in text boxes, where Word ignores references: one referenced
+    /// only there shows no number, as in Word.
     ignored: HashSet<NoteId>,
     /// Whether a number's format is one the layout writes as decimal instead.
     pub(crate) decimal: bool,
@@ -29,10 +29,10 @@ impl NoteNumbers {
     /// §17.11): from its start, again at each section for those that restart there. A
     /// reference with a custom mark (`w:customMarkFollows`) takes no number and does not
     /// count (§17.11.14); nor does one in a text box, which Word ignores (MS-OI29500
-    /// 2.1.305 a), nor a second reference to a note, nor one in the result of a field the
-    /// layout computes, which is not laid out. One in hidden text is numbered, a
-    /// hypothesis until a Word render. References in headers and footers are not walked:
-    /// they show no number, which the itemizer reports.
+    /// 2.1.302 b and 2.1.305 a), nor a second reference to a note, nor one in the result
+    /// of a field the layout computes, which is not laid out. One in hidden text is
+    /// numbered, a hypothesis until a Word render. References in headers and footers are
+    /// not walked: they show no number, which the itemizer reports.
     pub(crate) fn new(document: &Document) -> Self {
         let mut numbers = Self::default();
         let mut next = Counters::default();
