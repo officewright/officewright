@@ -1323,6 +1323,9 @@ impl Reading<'_, '_, '_> {
         if text_boxes {
             self.report_unseen_text_boxes(element, offset);
         }
+        if matches!(kind, ShapeKind::Vml(_)) {
+            self.register_shape_types(element);
+        }
         let names = &self.names;
         let document = &*self.c.document;
         let embed = match kind {
@@ -1341,8 +1344,12 @@ impl Reading<'_, '_, '_> {
                 ShapeKind::Vml(VmlKind::Drawing) => {
                     vml::check(element, names, report);
                     text_box::check(element, names, report);
+                    text_box::check_shape_types(element, names, report);
                 }
-                ShapeKind::Vml(VmlKind::Object) => vml::check(element, names, report),
+                ShapeKind::Vml(VmlKind::Object) => {
+                    vml::check(element, names, report);
+                    text_box::check_shape_types(element, names, report);
+                }
             });
         let image = match embed {
             Some(id) => self.image(&id, offset)?,
@@ -1362,6 +1369,31 @@ impl Reading<'_, '_, '_> {
             ShapeKind::Vml(VmlKind::Object) => RunItem::Object { element, image },
         };
         self.push_item(run, item)
+    }
+
+    /// Registers the values of the VML shape types (`v:shapetype`) of the drawing of
+    /// `element` by their ids, the first of each, for the shapes that name them anywhere in
+    /// the document.
+    fn register_shape_types(&mut self, element: Span) {
+        let document = &mut *self.c.document;
+        let names = document.names;
+        let found: Vec<(Box<str>, Span)> = document
+            .element(element)
+            .children_through_alternates(names.mc)
+            .filter(|child| child.is(&names.v, "shapetype"))
+            .filter_map(|shape_type| {
+                Some((
+                    shape_type.attribute(&[None], "id")?.into(),
+                    shape_type.span(),
+                ))
+            })
+            .collect();
+        for (id, span) in found {
+            if !document.vml_shape_types.contains_key(&id) {
+                let values = text_box::shape_type_values(document.element(span), &names);
+                document.vml_shape_types.insert(id, values);
+            }
+        }
     }
 
     /// Reports each text box content read in the shape of `element` that none of its text

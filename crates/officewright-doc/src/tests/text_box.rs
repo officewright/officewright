@@ -741,3 +741,1214 @@ fn finds_the_text_boxes_of_vml_drawings_through_markup_compatibility() {
         document.diagnostics()
     );
 }
+
+/// A theme whose accent 1 is 4F81BD, with a format scheme of the fills and lines styles
+/// name: the first fill and the first background fill are the style's colour, the second
+/// fill a gradient; the lines are 6,350, 12,700 and 19,050 EMU in the style's colour, the
+/// third dashed and double; the three effect styles Office writes come before the background
+/// fill.
+fn shape_theme() -> (&'static str, &'static str, String) {
+    (
+        "theme",
+        "theme/theme1.xml",
+        r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="T"><a:themeElements><a:clrScheme name="C"><a:dk1><a:sysClr val="windowText" lastClr="101010"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="1F497D"/></a:dk2><a:lt2><a:srgbClr val="EEECE1"/></a:lt2><a:accent1><a:srgbClr val="4F81BD"/></a:accent1><a:accent2><a:srgbClr val="C0504D"/></a:accent2><a:accent3><a:srgbClr val="9BBB59"/></a:accent3><a:accent4><a:srgbClr val="8064A2"/></a:accent4><a:accent5><a:srgbClr val="4BACC6"/></a:accent5><a:accent6><a:srgbClr val="F79646"/></a:accent6><a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink></a:clrScheme><a:fontScheme name="F"><a:majorFont><a:latin typeface="Cambria"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="S"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:gradFill><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="50000"/></a:schemeClr></a:gs></a:gsLst></a:gradFill><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln><a:ln w="19050" cmpd="dbl"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="dash"/></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"><a:alpha val="50000"/></a:schemeClr></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"#.to_owned(),
+    )
+}
+
+/// Settings that map background 1 to dark 1 and text 1 to light 1, as a dark page does.
+fn dark_mapping() -> (&'static str, &'static str, String) {
+    (
+        "settings",
+        "settings.xml",
+        format!(
+            r#"<w:settings xmlns:w="{W}"><w:clrSchemeMapping w:bg1="dark1" w:t1="light1" w:bg2="light2" w:t2="dark2" w:accent1="accent1" w:accent2="accent2" w:accent3="accent3" w:accent4="accent4" w:accent5="accent5" w:accent6="accent6" w:hyperlink="hyperlink" w:followedHyperlink="followedHyperlink"/></w:settings>"#
+        ),
+    )
+}
+
+/// A DrawingML text box whose `wps:spPr` holds `properties`, with this `wps:style`.
+fn styled_box(properties: &str, style: &str) -> String {
+    format!(
+        "<w:r>{}</w:r>",
+        drawing(&format!(
+            r#"<wps:spPr>{properties}</wps:spPr>{}<wps:style>{style}</wps:style><wps:bodyPr/>"#,
+            txbx(&p("Box"))
+        ))
+    )
+}
+
+/// A fill's kind, colour and opacity.
+type FillValues = (FillKind, Option<(u8, u8, u8)>, f64);
+
+/// A line's width, colour, dashes and lines.
+type OutlineValues = (Pt, Option<(u8, u8, u8)>, LineDash, CompoundLine);
+
+fn fill_of(text_box: TextBox<'_>) -> Option<FillValues> {
+    text_box
+        .fill()
+        .map(|fill| (fill.kind(), fill.color(), fill.opacity()))
+}
+
+fn outline_of(text_box: TextBox<'_>) -> Option<OutlineValues> {
+    text_box
+        .outline()
+        .map(|line| (line.width(), line.color(), line.dash(), line.compound()))
+}
+
+#[test]
+fn reads_the_fill_of_drawing_text_boxes_from_the_shape_or_its_style() {
+    let boxes = [
+        // Its own fills, which come before its style's.
+        styled_box(
+            r#"<a:solidFill><a:srgbClr val="FF8000"><a:alpha val="40000"/></a:srgbClr></a:solidFill>"#,
+            r#"<a:fillRef idx="1"><a:schemeClr val="accent2"/></a:fillRef>"#,
+        ),
+        styled_box(
+            "<a:noFill/>",
+            r#"<a:fillRef idx="1"><a:schemeClr val="accent2"/></a:fillRef>"#,
+        ),
+        styled_box(
+            r#"<a:gradFill><a:gsLst><a:gs pos="0"><a:prstClr val="red"/></a:gs><a:gs pos="100000"><a:prstClr val="blue"/></a:gs></a:gsLst></a:gradFill>"#,
+            "",
+        ),
+        styled_box(
+            r#"<a:pattFill prst="pct5"><a:fgClr><a:srgbClr val="112233"/></a:fgClr><a:bgClr><a:srgbClr val="FFFFFF"/></a:bgClr></a:pattFill>"#,
+            "",
+        ),
+        styled_box(r#"<a:blipFill><a:blip/></a:blipFill>"#, ""),
+        styled_box("<a:grpFill/>", ""),
+        // The style's fills: the first and second fills of the theme, its first background
+        // fill, and none.
+        styled_box(
+            "",
+            r#"<a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>"#,
+        ),
+        styled_box(
+            "",
+            r#"<a:fillRef idx="2"><a:schemeClr val="accent1"/></a:fillRef>"#,
+        ),
+        styled_box(
+            "",
+            r#"<a:fillRef idx="1001"><a:schemeClr val="accent2"/></a:fillRef>"#,
+        ),
+        styled_box(
+            "",
+            r#"<a:fillRef idx="0"><a:schemeClr val="accent1"/></a:fillRef>"#,
+        ),
+        // An entry the theme does not have, and no style at all.
+        styled_box(
+            "",
+            r#"<a:fillRef idx="9"><a:schemeClr val="accent1"/></a:fillRef>"#,
+        ),
+        format!(
+            "<w:r>{}</w:r>",
+            drawing(&format!("{}<wps:bodyPr/>", txbx(&p("Bare"))))
+        ),
+    ];
+    let body = format!("<w:p>{}</w:p>", boxes.concat());
+    let document = with_parts(&body, &[shape_theme(), dark_mapping()]);
+    let fills: Vec<_> = drawings(&document)
+        .into_iter()
+        .map(|drawing| fill_of(drawing.text_box().unwrap()))
+        .collect();
+    assert_eq!(
+        fills,
+        [
+            Some((FillKind::Solid, Some((0xFF, 0x80, 0x00)), 0.4)),
+            None,
+            Some((FillKind::Gradient, Some((0xFF, 0x00, 0x00)), 1.0)),
+            Some((FillKind::Pattern, Some((0x11, 0x22, 0x33)), 1.0)),
+            Some((FillKind::Picture, None, 1.0)),
+            None,
+            Some((FillKind::Solid, Some((0x4F, 0x81, 0xBD)), 1.0)),
+            // 4F81BD tinted 50 % in linear light.
+            Some((FillKind::Gradient, Some((0xC2, 0xCD, 0xE1)), 1.0)),
+            Some((FillKind::Solid, Some((0xC0, 0x50, 0x4D)), 0.5)),
+            None,
+            None,
+            None,
+        ]
+    );
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+}
+
+#[test]
+fn reads_the_outline_of_drawing_text_boxes_value_by_value() {
+    let boxes = [
+        // Its own line, whole.
+        styled_box(
+            r#"<a:ln w="25400" cmpd="thickThin"><a:solidFill><a:srgbClr val="4F81BD"><a:shade val="50000"/></a:srgbClr></a:solidFill><a:prstDash val="lgDashDot"/></a:ln>"#,
+            r#"<a:lnRef idx="3"><a:schemeClr val="accent2"/></a:lnRef>"#,
+        ),
+        // Its own width over the style's line, whose colour is the reference's, shaded.
+        styled_box(
+            r#"<a:ln w="38100"/>"#,
+            r#"<a:lnRef idx="3"><a:schemeClr val="accent1"><a:shade val="50000"/></a:schemeClr></a:lnRef>"#,
+        ),
+        // The style's line alone.
+        styled_box(
+            "",
+            r#"<a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef>"#,
+        ),
+        // No line: its own, the style's index 0, and none at all.
+        styled_box(
+            "<a:ln><a:noFill/></a:ln>",
+            r#"<a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef>"#,
+        ),
+        styled_box(
+            "",
+            r#"<a:lnRef idx="0"><a:schemeClr val="accent1"/></a:lnRef>"#,
+        ),
+        styled_box(r#"<a:ln w="9525"/>"#, ""),
+        // Dashes of its own lengths, a gradient and colours of every kind.
+        styled_box(
+            r#"<a:ln><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="000000"/></a:gs></a:gsLst></a:gradFill><a:custDash><a:ds d="100000" sp="100000"/></a:custDash></a:ln>"#,
+            "",
+        ),
+        styled_box(
+            r#"<a:ln><a:solidFill><a:schemeClr val="bg1"/></a:solidFill></a:ln>"#,
+            "",
+        ),
+        styled_box(
+            r#"<a:ln><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:ln>"#,
+            "",
+        ),
+        styled_box(
+            r#"<a:ln><a:solidFill><a:sysClr val="windowText" lastClr="ABCDEF"/></a:solidFill></a:ln>"#,
+            "",
+        ),
+        styled_box(
+            r#"<a:ln><a:solidFill><a:hslClr hue="7200000" sat="100000" lum="50000"/></a:solidFill></a:ln>"#,
+            "",
+        ),
+        styled_box(
+            r#"<a:ln><a:solidFill><a:scrgbClr r="21404" g="100000" b="0"/></a:solidFill></a:ln>"#,
+            "",
+        ),
+        styled_box(
+            r#"<a:ln><a:solidFill><a:srgbClr val="FFFFFF"><a:lumMod val="75000"/></a:srgbClr></a:solidFill></a:ln>"#,
+            "",
+        ),
+        styled_box(
+            r#"<a:ln><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill></a:ln>"#,
+            "",
+        ),
+    ];
+    let body = format!("<w:p>{}</w:p>", boxes.concat());
+    let document = with_parts(&body, &[shape_theme(), dark_mapping()]);
+    let lines: Vec<_> = drawings(&document)
+        .into_iter()
+        .map(|drawing| outline_of(drawing.text_box().unwrap()))
+        .collect();
+    let solid =
+        |width: f64, rgb| Some((Pt(width), Some(rgb), LineDash::Solid, CompoundLine::Single));
+    assert_eq!(
+        lines,
+        [
+            // An RGB colour is shaded in linear light.
+            Some((
+                Pt(2.0),
+                Some((0x38, 0x5D, 0x8A)),
+                LineDash::LongDashDot,
+                CompoundLine::ThickThin
+            )),
+            // A colour of the scheme too: 385D8A, the outline of Office 2010's default shape.
+            Some((
+                Pt(3.0),
+                Some((0x38, 0x5D, 0x8A)),
+                LineDash::Dash,
+                CompoundLine::Double
+            )),
+            solid(1.0, (0x4F, 0x81, 0xBD)),
+            None,
+            None,
+            None,
+            Some((Pt(0.0), None, LineDash::Custom, CompoundLine::Single)),
+            // Background 1 and text 1 through the document's colour mapping.
+            solid(0.0, (0x10, 0x10, 0x10)),
+            solid(0.0, (0xFF, 0xFF, 0xFF)),
+            solid(0.0, (0xAB, 0xCD, 0xEF)),
+            solid(0.0, (0x00, 0xFF, 0x00)),
+            solid(0.0, (0x7F, 0xFF, 0x00)),
+            solid(0.0, (0xBF, 0xBF, 0xBF)),
+            // 4F81BD lightened by 40 %, as Word writes it for its "lighter 40 %" (95B3D7).
+            solid(0.0, (0x95, 0xB3, 0xD7)),
+        ]
+    );
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+}
+
+#[test]
+fn reads_the_fill_and_outline_of_vml_text_boxes() {
+    let shape = |attributes: &str, children: &str| {
+        format!(
+            r#"<v:shape style="width:10pt;height:10pt" {attributes}>{children}<v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape>"#,
+            p("Box")
+        )
+    };
+    let body = format!(
+        "<w:p><w:r>{}</w:r></w:p>",
+        pict(&[
+            // VML's defaults: white, with a black line of 0.75 pt.
+            shape("", ""),
+            shape(r##"fillcolor="#ffc [3201]" strokecolor="navy" strokeweight="2pt""##, ""),
+            shape(r#"filled="f" stroked="false""#, ""),
+            // The child's values come before the shape's.
+            shape(
+                r##"fillcolor="red" strokecolor="red""##,
+                r##"<v:fill on="t" color="#00FF00" opacity="32768f" type="gradient"/><v:stroke color="#0000ff" weight="1.5pt" dashstyle="longdashdot" linestyle="thickBetweenThin" opacity=".25"/>"##,
+            ),
+            shape("", r#"<v:fill on="false" type="frame"/><v:stroke on="f"/>"#),
+            shape(
+                "",
+                r#"<v:fill type="tile"/><v:stroke dashstyle="4 2 1 2" linestyle="thinThin"/>"#,
+            ),
+            // The shape type's values stand for those the shape does not write.
+            r##"<v:shapetype id="_x0000_t202" filled="f" strokecolor="#123456"/>"##.to_owned(),
+            shape(r##"type="#_x0000_t202""##, ""),
+            shape(r##"type="#_x0000_t202" filled="t""##, ""),
+            // The forms Office takes besides RGB (MS-OI29500 2.1.1893): no colour, a colour
+            // of the system or of the shape, one changed, and rgb(); a width in EMUs.
+            shape(r#"fillcolor="none" strokecolor="none""#, ""),
+            shape(
+                r#"fillcolor="Window" strokecolor="rgb(95, 39, 38)""#,
+                r#"<v:stroke weight="25400"/>"#,
+            ),
+            shape(
+                r#"fillcolor="fill darken(50)" strokecolor="lineOrFill""#,
+                r#"<v:stroke weight="20116800"/>"#,
+            ),
+            shape(r#"fillcolor="wincolor(5)" strokecolor="fill invert""#, ""),
+        ]
+        .concat()),
+    );
+    let document = open(&body);
+    let boxes = vml_text_boxes(&document);
+    let fills: Vec<_> = boxes.iter().map(|text_box| fill_of(*text_box)).collect();
+    assert_eq!(
+        fills,
+        [
+            Some((FillKind::Solid, Some((0xFF, 0xFF, 0xFF)), 1.0)),
+            Some((FillKind::Solid, Some((0xFF, 0xFF, 0xCC)), 1.0)),
+            None,
+            Some((FillKind::Gradient, Some((0x00, 0xFF, 0x00)), 0.5)),
+            None,
+            Some((FillKind::Picture, None, 1.0)),
+            None,
+            Some((FillKind::Solid, Some((0xFF, 0xFF, 0xFF)), 1.0)),
+            None,
+            Some((FillKind::Solid, None, 1.0)),
+            Some((FillKind::Solid, None, 1.0)),
+            Some((FillKind::Solid, None, 1.0)),
+        ]
+    );
+    let lines: Vec<_> = boxes
+        .iter()
+        .map(|text_box| {
+            text_box.outline().map(|line| {
+                (
+                    line.width(),
+                    line.color(),
+                    line.dash(),
+                    line.compound(),
+                    line.opacity(),
+                )
+            })
+        })
+        .collect();
+    let black = Some((0, 0, 0));
+    assert_eq!(
+        lines,
+        [
+            Some((Pt(0.75), black, LineDash::Solid, CompoundLine::Single, 1.0)),
+            Some((
+                Pt(2.0),
+                Some((0, 0, 0x80)),
+                LineDash::Solid,
+                CompoundLine::Single,
+                1.0
+            )),
+            None,
+            Some((
+                Pt(1.5),
+                Some((0, 0, 0xFF)),
+                LineDash::LongDashDot,
+                CompoundLine::Triple,
+                0.25
+            )),
+            None,
+            Some((Pt(0.75), black, LineDash::Custom, CompoundLine::Double, 1.0)),
+            Some((
+                Pt(0.75),
+                Some((0x12, 0x34, 0x56)),
+                LineDash::Solid,
+                CompoundLine::Single,
+                1.0
+            )),
+            Some((
+                Pt(0.75),
+                Some((0x12, 0x34, 0x56)),
+                LineDash::Solid,
+                CompoundLine::Single,
+                1.0
+            )),
+            None,
+            Some((
+                Pt(2.0),
+                Some((95, 39, 38)),
+                LineDash::Solid,
+                CompoundLine::Single,
+                1.0
+            )),
+            Some((Pt(1584.0), None, LineDash::Solid, CompoundLine::Single, 1.0)),
+            Some((Pt(0.75), None, LineDash::Solid, CompoundLine::Single, 1.0)),
+        ]
+    );
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+}
+
+#[test]
+fn reports_the_colours_and_lines_of_text_boxes_the_readers_do_not_take() {
+    let body = format!(
+        "<w:p>{}<w:r>{}</w:r></w:p>",
+        styled_box(
+            r#"<a:solidFill><a:srgbClr val="12345G"/></a:solidFill><a:ln w="20116801" cmpd="quad"><a:solidFill><a:schemeClr val="accent9"/></a:solidFill><a:prstDash val="wavy"/></a:ln>"#,
+            r#"<a:lnRef idx="x"><a:prstClr val="blurple"/></a:lnRef>"#,
+        ),
+        pict(&format!(
+            r#"<v:shape style="width:10pt;height:10pt" fillcolor="blurple" strokecolor="fill frobnicate(3)" strokeweight="2em"><v:fill opacity="lots" type="hatch" color="rgb(1,2)"/><v:stroke dashstyle="dotty" linestyle="fat" weight="20116801"/><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape>"#,
+            p("Box")
+        )),
+    );
+    let document = with_parts(&body, &[shape_theme()]);
+    let reported = reported(&document);
+    for message in [
+        r#"a:srgbClr val="12345G" is not valid; it is ignored"#,
+        r#"a:ln w="20116801" is not valid; it is ignored"#,
+        r#"a:ln cmpd="quad" is not valid; it is ignored"#,
+        r#"a:prstDash val="wavy" is not valid; it is ignored"#,
+        r#"a:schemeClr val="accent9" is not valid; it is ignored"#,
+        r#"a:lnRef idx="x" is not valid; it is ignored"#,
+        r#"v:shape fillcolor="blurple" is not valid; it is ignored"#,
+        r#"v:shape strokeweight="2em" is not valid; it is ignored"#,
+        r#"v:shape strokecolor="fill frobnicate(3)" is not valid; it is ignored"#,
+        r#"v:fill color="rgb(1,2)" is not valid; it is ignored"#,
+        r#"v:stroke weight="20116801" is not valid; it is ignored"#,
+        r#"v:fill opacity="lots" is not valid; it is ignored"#,
+        r#"v:fill type="hatch" is not valid; it is ignored"#,
+        r#"v:stroke dashstyle="dotty" is not valid; it is ignored"#,
+        r#"v:stroke linestyle="fat" is not valid; it is ignored"#,
+    ] {
+        assert!(
+            reported.iter().any(|line| line == message),
+            "{message}: {reported:?}"
+        );
+    }
+    // Each is read as not written: a fill and a line of no colour.
+    let text_box = drawings(&document)[0].text_box().unwrap();
+    assert_eq!(fill_of(text_box), Some((FillKind::Solid, None, 1.0)));
+    assert_eq!(
+        outline_of(text_box),
+        Some((Pt(0.0), None, LineDash::Solid, CompoundLine::Single))
+    );
+    let vml = vml_text_boxes(&document)[0];
+    assert_eq!(
+        fill_of(vml),
+        Some((FillKind::Solid, Some((0xFF, 0xFF, 0xFF)), 1.0))
+    );
+    assert_eq!(
+        outline_of(vml),
+        Some((
+            Pt(0.75),
+            Some((0, 0, 0)),
+            LineDash::Solid,
+            CompoundLine::Single
+        ))
+    );
+}
+
+#[test]
+fn applies_the_transforms_of_a_colour_in_their_order() {
+    let line = |color: &str| {
+        styled_box(
+            &format!("<a:ln><a:solidFill>{color}</a:solidFill></a:ln>"),
+            "",
+        )
+    };
+    let red = |transforms: &str| {
+        line(&format!(
+            r#"<a:srgbClr val="FF0000">{transforms}</a:srgbClr>"#
+        ))
+    };
+    let boxes = [
+        red("<a:comp/>"),
+        red("<a:inv/>"),
+        red("<a:gray/>"),
+        red(r#"<a:hueOff val="7200000"/>"#),
+        line(r#"<a:srgbClr val="00FF00"><a:hueMod val="50000"/></a:srgbClr>"#),
+        red(r#"<a:hue val="14400000"/>"#),
+        red(r#"<a:sat val="0"/>"#),
+        red(r#"<a:satMod val="50000"/>"#),
+        red(r#"<a:satOff val="-50000"/>"#),
+        red(r#"<a:lum val="25000"/>"#),
+        // In linear light, as a:shade.
+        line(r#"<a:srgbClr val="000000"><a:tint val="50000"/></a:srgbClr>"#),
+        // Each in its turn: shaded, then inverted, is not inverted, then shaded.
+        line(r#"<a:srgbClr val="FFFFFF"><a:shade val="50000"/><a:inv/></a:srgbClr>"#),
+        red(r#"<a:alpha val="50000"/><a:alphaMod val="50000"/><a:alphaOff val="10000"/>"#),
+        // An offset of hue adds to the colour's own hue; the complement of a grey is that
+        // grey, its inverse another; an amount keeps its thousandths of a per cent.
+        line(r#"<a:srgbClr val="00FF00"><a:hueOff val="7200000"/></a:srgbClr>"#),
+        line(r#"<a:srgbClr val="404040"><a:comp/></a:srgbClr>"#),
+        red(r#"<a:alpha val="12345"/>"#),
+    ];
+    let body = format!("<w:p>{}</w:p>", boxes.concat());
+    let document = open(&body);
+    let lines: Vec<_> = drawings(&document)
+        .into_iter()
+        .map(|drawing| {
+            let line = drawing.text_box().unwrap().outline().unwrap();
+            (line.color(), line.opacity())
+        })
+        .collect();
+    let opaque = |rgb| (Some(rgb), 1.0);
+    assert_eq!(
+        lines,
+        [
+            opaque((0x00, 0xFF, 0xFF)),
+            opaque((0x00, 0xFF, 0xFF)),
+            opaque((0x4D, 0x4D, 0x4D)),
+            opaque((0x00, 0xFF, 0x00)),
+            opaque((0xFF, 0xFF, 0x00)),
+            opaque((0x00, 0x00, 0xFF)),
+            opaque((0x80, 0x80, 0x80)),
+            opaque((0xBF, 0x40, 0x40)),
+            opaque((0xBF, 0x40, 0x40)),
+            opaque((0x80, 0x00, 0x00)),
+            opaque((0xBC, 0xBC, 0xBC)),
+            opaque((0x43, 0x43, 0x43)),
+            (Some((0xFF, 0x00, 0x00)), 0.35),
+            opaque((0x00, 0x00, 0xFF)),
+            opaque((0x40, 0x40, 0x40)),
+            (Some((0xFF, 0x00, 0x00)), 0.12345),
+        ]
+    );
+}
+
+/// A theme as [`shape_theme`] gives, with these entries in place of its fills.
+fn theme_with_fills(fills: &str) -> (&'static str, &'static str, String) {
+    let (kind, target, xml) = shape_theme();
+    let start = xml.find("<a:fillStyleLst>").unwrap() + "<a:fillStyleLst>".len();
+    let end = xml.find("</a:fillStyleLst>").unwrap();
+    (
+        kind,
+        target,
+        format!("{}{fills}{}", &xml[..start], &xml[end..]),
+    )
+}
+
+#[test]
+fn finds_shape_types_and_style_entries_in_time_in_proportion_to_the_document() {
+    // From the review of #471: each VML shape searched its drawing for its shape type, and
+    // each box walked the theme's list to its entry and applied its colour's transforms
+    // again: 30,000 shapes took over 30 s to open, and 8,000 boxes 20 s to 42 s.
+    let n = 20_000;
+    let body = |n: usize| {
+        format!(
+            "<w:p><w:r>{}</w:r></w:p>",
+            pict(&format!(
+                r#"{}<v:shapetype id="t" fillcolor="red"/>"#,
+                r##"<v:shape type="#t" style="width:1pt;height:1pt"><v:textbox/></v:shape>"##
+                    .repeat(n)
+            ))
+        )
+    };
+    let document = super::open_in_linear_time(body, n);
+    let boxes = vml_text_boxes(&document);
+    assert_eq!(boxes.len(), n);
+    crate::model::xml::STEPS.set(0);
+    let red = boxes
+        .iter()
+        .filter(|text_box| text_box.fill().and_then(|fill| fill.color()) == Some((0xFF, 0, 0)))
+        .count();
+    let steps = crate::model::xml::STEPS.get();
+    assert_eq!(red, n);
+    assert!(steps <= 20 * n, "{steps} steps for {n} shapes");
+    // Boxes whose style names the last of many background fills (from 1001 on; the fills
+    // themselves reach to 999), whose colour has many transforms.
+    let (entries, transforms, count) = (20_000, 10_000, 100);
+    let last = format!(
+        r#"<a:solidFill><a:schemeClr val="phClr">{}</a:schemeClr></a:solidFill>"#,
+        r#"<a:alpha val="100000"/>"#.repeat(transforms)
+    );
+    let fills = format!(
+        "{}{last}",
+        r#"<a:solidFill><a:srgbClr val="00FF00"/></a:solidFill>"#.repeat(entries - 1)
+    );
+    let styled = styled_box(
+        "",
+        &format!(
+            r#"<a:fillRef idx="{}"><a:schemeClr val="accent1"/></a:fillRef>"#,
+            1000 + entries
+        ),
+    );
+    let body = format!("<w:p>{}</w:p>", styled.repeat(count));
+    let (kind, target, theme) = shape_theme();
+    let start = theme.find("<a:bgFillStyleLst>").unwrap() + "<a:bgFillStyleLst>".len();
+    let end = theme.find("</a:bgFillStyleLst>").unwrap();
+    let theme = format!("{}{fills}{}", &theme[..start], &theme[end..]);
+    let document = with_parts(&body, &[(kind, target, theme)]);
+    let boxes = drawings(&document);
+    crate::model::xml::STEPS.set(0);
+    let fills: Vec<_> = boxes
+        .iter()
+        .map(|drawing| fill_of(drawing.text_box().unwrap()))
+        .collect();
+    let steps = crate::model::xml::STEPS.get();
+    assert!(
+        fills
+            .iter()
+            .all(|fill| *fill == Some((FillKind::Solid, Some((0x4F, 0x81, 0xBD)), 1.0))),
+        "{:?}",
+        fills.first()
+    );
+    assert!(steps <= 1_000 * count, "{steps} steps for {count} boxes");
+}
+
+#[test]
+fn applies_at_most_64_transforms_to_a_colour_of_the_theme_s_format_scheme_and_reports_more() {
+    // 70 steps of 1 % of luminance from black: the first 64 make 64 %, A3A3A3.
+    let fill = format!(
+        r#"<a:solidFill><a:srgbClr val="000000">{}</a:srgbClr></a:solidFill>"#,
+        r#"<a:lumOff val="1000"/>"#.repeat(70)
+    );
+    let body = format!(
+        "<w:p>{}</w:p>",
+        styled_box(
+            "",
+            r#"<a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>"#
+        )
+    );
+    let document = with_parts(&body, &[theme_with_fills(&fill)]);
+    let text_box = drawings(&document)[0].text_box().unwrap();
+    assert_eq!(
+        fill_of(text_box),
+        Some((FillKind::Solid, Some((0xA3, 0xA3, 0xA3)), 1.0))
+    );
+    let messages: Vec<&str> = document.diagnostics().iter().map(|d| d.message()).collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(
+        messages[0].starts_with("/word/theme/theme1.xml")
+            && messages[0].ends_with(
+                "a colour of a:fmtScheme has more than 64 transforms; those after are left out"
+            ),
+        "{messages:?}"
+    );
+    // A shape's own colour keeps all of them: 70 %, B3B3B3.
+    let body = format!("<w:p>{}</w:p>", styled_box(&fill, ""));
+    let document = open(&body);
+    let text_box = drawings(&document)[0].text_box().unwrap();
+    assert_eq!(
+        fill_of(text_box),
+        Some((FillKind::Solid, Some((0xB3, 0xB3, 0xB3)), 1.0))
+    );
+}
+
+#[test]
+fn reads_the_values_the_review_of_471_found_refused_or_unreported() {
+    let (kind, target, theme) = shape_theme();
+    let theme = theme.replace(
+        r#"<a:solidFill><a:srgbClr val="00FF00"/></a:solidFill>"#,
+        r#"<a:solidFill><a:srgbClr val="zz"/></a:solidFill>"#,
+    );
+    let body = format!(
+        "<w:p>{}{}{}{}<w:r>{}</w:r></w:p>",
+        // Index 1000 of the fills is no fill (§20.1.4.2.10).
+        styled_box(
+            "",
+            r#"<a:fillRef idx="1000"><a:schemeClr val="accent1"/></a:fillRef>"#
+        ),
+        // A colour above full opacity is opaque; a width at its bound is taken.
+        styled_box(
+            r#"<a:solidFill><a:srgbClr val="FF0000"><a:alpha val="150000"/></a:srgbClr></a:solidFill><a:ln w="20116800"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>"#,
+            "",
+        ),
+        // A transform of a colour of the scheme is checked as the document opens, before
+        // the theme is read.
+        styled_box(
+            r#"<a:solidFill><a:schemeClr val="accent1"><a:lumMod val="much"/></a:schemeClr></a:solidFill>"#,
+            "",
+        ),
+        styled_box(
+            "",
+            r#"<a:fillRef idx="3"><a:schemeClr val="accent1"/></a:fillRef>"#
+        ),
+        pict(&format!(
+            r##"<v:shapetype id="t" filled="maybe"/>{}{}"##,
+            // Word's names of dashes, in its own case, and recoloured colours.
+            r##"<v:shape type="#t" style="width:1pt;height:1pt" fillcolor="#808080 darken(128)" strokecolor="rgb(95, 39, 38) lighten(128)"><v:stroke dashstyle="longDashDot"/><v:textbox/></v:shape>"##,
+            r##"<v:shape type="#t" style="width:1pt;height:1pt" fillcolor="blurple darken(50)"><v:fill type="gradient" colors="0 #936545;.5 #d49366;1 #fdaf7b" opacity="2"/><v:textbox/></v:shape><v:shape type="#t" style="width:1pt;height:1pt"><v:textbox/></v:shape>"##,
+        )),
+    );
+    let document = with_parts(&body, &[(kind, target, theme)]);
+    let boxes = drawings(&document);
+    assert_eq!(fill_of(boxes[0].text_box().unwrap()), None);
+    let opaque = boxes[1].text_box().unwrap();
+    assert_eq!(
+        fill_of(opaque),
+        Some((FillKind::Solid, Some((0xFF, 0, 0)), 1.0))
+    );
+    assert_eq!(opaque.outline().unwrap().width(), Pt(1584.0));
+    assert_eq!(
+        fill_of(boxes[2].text_box().unwrap()),
+        Some((FillKind::Solid, Some((0x4F, 0x81, 0xBD)), 1.0))
+    );
+    let vml = vml_text_boxes(&document);
+    let first = vml[0];
+    assert_eq!(
+        fill_of(first),
+        Some((FillKind::Solid, Some((0x40, 0x40, 0x40)), 1.0))
+    );
+    let line = first.outline().unwrap();
+    // 255 - (255 - c) · 128 / 256 for each channel of 5F2726.
+    assert_eq!(
+        (line.color(), line.dash()),
+        (Some((0xAF, 0x93, 0x93)), LineDash::LongDashDot)
+    );
+    // A gradient gives its first stop; an opacity above 1 is opaque.
+    assert_eq!(
+        fill_of(vml[1]),
+        Some((FillKind::Gradient, Some((0x93, 0x65, 0x45)), 1.0))
+    );
+    let reported: Vec<&str> = document.diagnostics().iter().map(|d| d.message()).collect();
+    let ends = |end: &str| reported.iter().filter(|line| line.ends_with(end)).count();
+    assert_eq!(
+        ends(r#"a:lumMod val="much" is not valid; it is ignored"#),
+        1,
+        "{reported:?}"
+    );
+    assert_eq!(
+        ends(r#"v:fill opacity="2" is not valid; it is ignored"#),
+        0,
+        "{reported:?}"
+    );
+    // A shape type's value is reported once, where it is defined, not for each of its
+    // three shapes.
+    assert_eq!(
+        ends(r#"v:shapetype filled="maybe" is not valid; it is ignored"#),
+        1,
+        "{reported:?}"
+    );
+    assert_eq!(
+        ends(r#"v:shape fillcolor="blurple darken(50)" is not valid; it is ignored"#),
+        1,
+        "{reported:?}"
+    );
+    // The theme's format scheme is checked as the theme is read.
+    assert!(
+        reported
+            .iter()
+            .any(|line| line.starts_with("/word/theme/theme1.xml")
+                && line.ends_with(r#"a:srgbClr val="zz" is not valid; it is ignored"#)),
+        "{reported:?}"
+    );
+    assert_eq!(reported.len(), 4, "{reported:?}");
+}
+
+#[test]
+fn takes_index_1000_as_no_fill_and_darkens_by_a_256th() {
+    // From the mutations of the review of #471: index 1000 is no fill even in a theme of a
+    // thousand fills (§20.1.4.2.10), and VML's darken scales by its amount / 256
+    // (MS-OI29500 2.1.1893(h)): white darkened by 255 is FEFEFE.
+    let fills = r#"<a:solidFill><a:srgbClr val="00FF00"/></a:solidFill>"#.repeat(1_000);
+    let body = format!(
+        "<w:p>{}{}<w:r>{}</w:r></w:p>",
+        styled_box(
+            "",
+            r#"<a:fillRef idx="1000"><a:schemeClr val="accent1"/></a:fillRef>"#
+        ),
+        styled_box(
+            "",
+            r#"<a:fillRef idx="999"><a:schemeClr val="accent1"/></a:fillRef>"#
+        ),
+        pict(&vml_box("width:1pt;height:1pt", "", &p("Dark"),).replace(
+            "<v:shape ",
+            r##"<v:shape fillcolor="#ffffff darken(255)" "##
+        )),
+    );
+    let document = with_parts(&body, &[theme_with_fills(&fills)]);
+    let boxes = drawings(&document);
+    assert_eq!(fill_of(boxes[0].text_box().unwrap()), None);
+    assert_eq!(
+        fill_of(boxes[1].text_box().unwrap()),
+        Some((FillKind::Solid, Some((0, 0xFF, 0)), 1.0))
+    );
+    assert_eq!(
+        fill_of(vml_text_boxes(&document)[0]),
+        Some((FillKind::Solid, Some((0xFE, 0xFE, 0xFE)), 1.0))
+    );
+}
+
+/// `xml` with `from` replaced by `to` where it occurs, which it must.
+fn replaced(xml: &str, from: &str, to: &str) -> String {
+    assert!(xml.contains(from), "{from}");
+    xml.replacen(from, to, 1)
+}
+
+#[test]
+fn resolves_the_colours_of_theme_styles_without_reading_the_theme_again() {
+    // From the re-check of #471: a colour of the theme's format scheme with many children
+    // of another namespace, or content inside a transform, cost every box whose style
+    // names it the size of the colour (8,000 boxes took 56 s); also for a line and a
+    // background fill.
+    let (junk, count) = (20_000, 50);
+    let foreign = "<x:j/>".repeat(junk);
+    let fills = format!(
+        r#"<a:solidFill><a:schemeClr val="phClr"><a:lumMod val="50000"/>{foreign}</a:schemeClr></a:solidFill><a:solidFill><a:schemeClr val="phClr"><a:lumMod val="50000">{}</a:lumMod></a:schemeClr></a:solidFill>"#,
+        "<a:j/>".repeat(junk)
+    );
+    let (kind, target, theme) = theme_with_fills(&fills);
+    let theme = replaced(
+        &theme,
+        r#" name="T">"#,
+        r#" xmlns:x="urn:example:junk" name="T">"#,
+    );
+    let theme = replaced(
+        &theme,
+        r#"<a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/>"#,
+        &format!(
+            r#"<a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"><a:shade val="50000"/>{foreign}</a:schemeClr>"#
+        ),
+    );
+    let theme = replaced(
+        &theme,
+        r#"<a:alpha val="50000"/></a:schemeClr></a:solidFill></a:bgFillStyleLst>"#,
+        &format!(
+            r#"<a:tint val="50000"/>{foreign}</a:schemeClr></a:solidFill></a:bgFillStyleLst>"#
+        ),
+    );
+    let style = |references: &str| styled_box("", references);
+    let body = format!(
+        "<w:p>{}{}{}{}{}</w:p>",
+        // The same colours as the shapes' own.
+        styled_box(
+            r#"<a:solidFill><a:schemeClr val="accent1"><a:lumMod val="50000"/></a:schemeClr></a:solidFill><a:ln w="6350"><a:solidFill><a:schemeClr val="accent1"><a:shade val="50000"/></a:schemeClr></a:solidFill></a:ln>"#,
+            ""
+        ),
+        styled_box(
+            r#"<a:solidFill><a:schemeClr val="accent1"><a:tint val="50000"/></a:schemeClr></a:solidFill>"#,
+            ""
+        ),
+        style(
+            r#"<a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>"#
+        )
+        .repeat(count),
+        style(r#"<a:fillRef idx="2"><a:schemeClr val="accent1"/></a:fillRef>"#).repeat(count),
+        style(r#"<a:fillRef idx="1001"><a:schemeClr val="accent1"/></a:fillRef>"#).repeat(count),
+    );
+    let document = with_parts(&body, &[(kind, target, theme)]);
+    let drawings = drawings(&document);
+    let own = drawings[0].text_box().unwrap();
+    let (darker, shaded) = (fill_of(own), outline_of(own).map(|line| line.1));
+    let lighter = fill_of(drawings[1].text_box().unwrap());
+    assert_eq!(shaded, Some(Some((0x38, 0x5D, 0x8A))));
+    assert_eq!(
+        lighter,
+        Some((FillKind::Solid, Some((0xC2, 0xCD, 0xE1)), 1.0))
+    );
+    crate::model::xml::STEPS.set(0);
+    let styled: Vec<_> = drawings[2..]
+        .iter()
+        .map(|drawing| {
+            let text_box = drawing.text_box().unwrap();
+            (fill_of(text_box), outline_of(text_box).map(|line| line.1))
+        })
+        .collect();
+    let steps = crate::model::xml::STEPS.get();
+    let expected: Vec<_> = [(darker, shaded), (darker, None), (lighter, None)]
+        .into_iter()
+        .flat_map(|values| std::iter::repeat_n(values, count))
+        .collect();
+    assert_eq!(styled, expected);
+    assert!(
+        steps <= 1_000 * 3 * count,
+        "{steps} steps for {} boxes",
+        3 * count
+    );
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+}
+
+#[test]
+fn reports_a_vml_colour_of_several_recolouring_instructions_without_recursion() {
+    // From the re-check of #471: each instruction was read by a call of its own, with a copy
+    // of the rest of the value, so that 10,000 of them (a value of 110 KB) overflowed the
+    // stack. One instruction follows the colour it changes (MS-OI29500 2.1.1893(l)).
+    let many = format!("#ffffff{}", " darken(255)".repeat(10_000));
+    let value = many.clone();
+    let read = std::thread::Builder::new()
+        .stack_size(64 * 1024)
+        .spawn(move || crate::model::color::vml_color(&value))
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(read, None);
+    let shape = |color: &str| {
+        format!(
+            r#"<v:shape style="width:1pt;height:1pt" fillcolor="{color}"><v:textbox/></v:shape>"#
+        )
+    };
+    let body = format!(
+        "<w:p><w:r>{}</w:r></w:p>",
+        pict(
+            &[
+                shape(&many),
+                shape("#808080 darken(128) darken(128)"),
+                shape("none darken(50)"),
+                shape("#808080 darken(128)"),
+            ]
+            .concat()
+        )
+    );
+    let document = open(&body);
+    let fills: Vec<_> = vml_text_boxes(&document).into_iter().map(fill_of).collect();
+    // A value not taken is read as not written: white.
+    let white = Some((FillKind::Solid, Some((0xFF, 0xFF, 0xFF)), 1.0));
+    assert_eq!(
+        fills,
+        [
+            white,
+            white,
+            white,
+            Some((FillKind::Solid, Some((0x40, 0x40, 0x40)), 1.0))
+        ]
+    );
+    let reported = reported(&document);
+    assert_eq!(reported.len(), 3, "{reported:?}");
+    assert!(
+        reported[0].starts_with(r##"v:shape fillcolor="#ffffff darken(255) darken(255)"##)
+            && reported[0].ends_with("is not valid; it is ignored"),
+        "{reported:?}"
+    );
+    assert_eq!(
+        reported[1..],
+        [
+            r##"v:shape fillcolor="#808080 darken(128) darken(128)" is not valid; it is ignored"##,
+            r#"v:shape fillcolor="none darken(50)" is not valid; it is ignored"#,
+        ]
+    );
+}
+
+#[test]
+fn names_the_background_fills_from_1001_after_the_effect_styles() {
+    // From the re-check of #471: the effect styles, which come between the lines and the
+    // background fills, were taken for background fills.
+    let (kind, target, theme) = shape_theme();
+    let background = format!(
+        "{}<a:noFill/>",
+        ["FF0000", "00FF00", "0000FF"]
+            .map(|rgb| format!(r#"<a:solidFill><a:srgbClr val="{rgb}"/></a:solidFill>"#))
+            .concat()
+    );
+    let theme = replaced(
+        &theme,
+        r#"<a:solidFill><a:schemeClr val="phClr"><a:alpha val="50000"/></a:schemeClr></a:solidFill></a:bgFillStyleLst>"#,
+        &format!("{background}</a:bgFillStyleLst>"),
+    );
+    let body = format!(
+        "<w:p>{}</w:p>",
+        (1001..=1005)
+            .map(|index| styled_box(
+                "",
+                &format!(r#"<a:fillRef idx="{index}"><a:schemeClr val="accent1"/></a:fillRef>"#)
+            ))
+            .collect::<String>()
+    );
+    let document = with_parts(&body, &[(kind, target, theme)]);
+    let fills: Vec<_> = drawings(&document)
+        .iter()
+        .map(|drawing| fill_of(drawing.text_box().unwrap()))
+        .collect();
+    let solid = |rgb| Some((FillKind::Solid, Some(rgb), 1.0));
+    assert_eq!(
+        fills,
+        [
+            solid((0xFF, 0, 0)),
+            solid((0, 0xFF, 0)),
+            solid((0, 0, 0xFF)),
+            None,
+            None
+        ]
+    );
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+}
+
+#[test]
+fn bounds_the_transforms_of_theme_lines_and_reports_the_colours_cut_once() {
+    // 70 steps of 1 % of luminance from black: the first 64 make A3A3A3.
+    let fill = format!(
+        r#"<a:solidFill><a:srgbClr val="000000">{}</a:srgbClr></a:solidFill>"#,
+        r#"<a:lumOff val="1000"/>"#.repeat(70)
+    );
+    let (kind, target, theme) = theme_with_fills(&fill.repeat(2));
+    let theme = replaced(
+        &theme,
+        r#"<a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>"#,
+        &format!(r#"<a:ln w="6350">{fill}</a:ln>"#),
+    );
+    let body = format!(
+        "<w:p>{}</w:p>",
+        styled_box(
+            "",
+            r#"<a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef>"#
+        )
+    );
+    let document = with_parts(&body, &[(kind, target, theme)]);
+    let line = drawings(&document)[0]
+        .text_box()
+        .unwrap()
+        .outline()
+        .unwrap();
+    assert_eq!(line.color(), Some((0xA3, 0xA3, 0xA3)));
+    let messages: Vec<&str> = document.diagnostics().iter().map(|d| d.message()).collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(
+        messages[0].starts_with("/word/theme/theme1.xml")
+            && messages[0].ends_with(
+                "3 colours of a:fmtScheme have more than 64 transforms; those after are left out"
+            ),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn takes_the_first_shape_type_of_an_id_and_reports_those_of_embedded_objects() {
+    // Word defines a shape type once, in the first drawing that names it; a later
+    // definition of the same id does not change it.
+    let drawing = |rgb: &str| {
+        format!(
+            "<w:r>{}</w:r>",
+            pict(&format!(
+                r##"<v:shapetype id="t" fillcolor="#{rgb}"/><v:shape type="#t" style="width:1pt;height:1pt"><v:textbox/></v:shape>"##
+            ))
+        )
+    };
+    let body = format!(
+        r##"<w:p>{}{}<w:r><w:object {SHAPES} w:dxaOrig="200" w:dyaOrig="200"><v:shapetype id="o" filled="maybe"/><v:shape type="#o" style="width:10pt;height:10pt"/></w:object></w:r></w:p>"##,
+        drawing("ff0000"),
+        drawing("0000ff")
+    );
+    let document = open(&body);
+    let fills: Vec<_> = vml_text_boxes(&document).into_iter().map(fill_of).collect();
+    let red = Some((FillKind::Solid, Some((0xFF, 0, 0)), 1.0));
+    assert_eq!(fills, [red, red]);
+    // The values of an embedded object's shape types are reported too.
+    assert_eq!(
+        reported(&document),
+        [r#"v:shapetype filled="maybe" is not valid; it is ignored"#]
+    );
+}
+
+#[test]
+fn reads_vml_dash_lengths_of_a_preset_s_pattern_as_that_preset() {
+    // Word writes sysDot and sysDash in VML as lengths (`1 1`, `3 1`).
+    let shapes: String = [
+        "1 3",
+        "4 3",
+        "8 3",
+        "4 3 1 3",
+        "8 3 1 3",
+        "8 3 1 3 1 3",
+        "3 1",
+        "1 1",
+        "3 1 1 1",
+        "3 1 1 1 1 1",
+        "2 2",
+        "1 x",
+        "",
+    ]
+        .map(|dashes| {
+            format!(
+                r#"<v:shape style="width:1pt;height:1pt"><v:stroke dashstyle="{dashes}"/><v:textbox/></v:shape>"#
+            )
+        })
+        .concat();
+    let document = open(&format!("<w:p><w:r>{}</w:r></w:p>", pict(&shapes)));
+    let dashes: Vec<_> = vml_text_boxes(&document)
+        .into_iter()
+        .map(|text_box| text_box.outline().unwrap().dash())
+        .collect();
+    assert_eq!(
+        dashes,
+        [
+            LineDash::Dot,
+            LineDash::Dash,
+            LineDash::LongDash,
+            LineDash::DashDot,
+            LineDash::LongDashDot,
+            LineDash::LongDashDotDot,
+            LineDash::SystemDash,
+            LineDash::SystemDot,
+            LineDash::SystemDashDot,
+            LineDash::SystemDashDotDot,
+            LineDash::Custom,
+            LineDash::Solid,
+            LineDash::Solid
+        ]
+    );
+    assert_eq!(
+        reported(&document),
+        [
+            r#"v:stroke dashstyle="1 x" is not valid; it is ignored"#,
+            r#"v:stroke dashstyle="" is not valid; it is ignored"#
+        ]
+    );
+}
+
+#[test]
+fn takes_a_gradient_s_first_stop_only_with_its_position() {
+    let body = format!(
+        "<w:p><w:r>{}</w:r></w:p>",
+        pict(
+            r##"<v:shape style="width:1pt;height:1pt" fillcolor="#0000ff"><v:fill type="gradient" colors="x #ff0000;1 #00ff00"/><v:textbox/></v:shape>"##
+        )
+    );
+    let document = open(&body);
+    assert_eq!(
+        fill_of(vml_text_boxes(&document)[0]),
+        Some((FillKind::Gradient, Some((0, 0, 0xFF)), 1.0))
+    );
+    assert_eq!(
+        reported(&document),
+        [r##"v:fill colors="x #ff0000;1 #00ff00" is not valid; it is ignored"##]
+    );
+}
+
+#[test]
+fn reads_a_shape_type_s_values_once_however_many_shapes_name_it() {
+    // From the re-check of #471: each shape read its shape type's values again, so that a
+    // type whose colours were 2 MB long, named by 50,000 shapes, took 31 s to read.
+    let (n, long) = (2_000, 200_000);
+    let color = format!("#ff0000{}", " ".repeat(long));
+    let body = format!(
+        "<w:p><w:r>{}</w:r></w:p>",
+        pict(&format!(
+            r##"<v:shapetype id="t" fillcolor="{color}" strokecolor="{color}"/>{}"##,
+            r##"<v:shape type="#t" style="width:1pt;height:1pt"><v:textbox/></v:shape>"##.repeat(n)
+        ))
+    );
+    let document = open(&body);
+    let boxes = vml_text_boxes(&document);
+    assert_eq!(boxes.len(), n);
+    crate::model::drawing::VALUE_BYTES.set(0);
+    let red = boxes
+        .iter()
+        .filter(|text_box| {
+            fill_of(**text_box).and_then(|fill| fill.1) == Some((0xFF, 0, 0))
+                && text_box.outline().and_then(|line| line.color()) == Some((0xFF, 0, 0))
+        })
+        .count();
+    let read = crate::model::drawing::VALUE_BYTES.get();
+    assert_eq!(red, n);
+    // Read again for each shape, the type's values would be 400 KB a shape.
+    assert!(
+        read <= 100 * n,
+        "{read} bytes of values read for {n} shapes"
+    );
+}
+
+#[test]
+fn reports_the_values_of_transforms_not_applied() {
+    // The transforms of single channels are not applied, but a damaged value of theirs is
+    // reported, in a shape and in the theme.
+    let (kind, target, theme) = theme_with_fills(
+        r#"<a:solidFill><a:srgbClr val="00FF00"><a:redMod val="much"/></a:srgbClr></a:solidFill>"#,
+    );
+    let body = format!(
+        "<w:p>{}{}</w:p>",
+        styled_box(
+            r#"<a:solidFill><a:srgbClr val="0000FF"><a:red val="zz"/><a:greenMod val="50000"/><a:gamma/></a:srgbClr></a:solidFill>"#,
+            ""
+        ),
+        styled_box(
+            "",
+            r#"<a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>"#
+        )
+    );
+    let document = with_parts(&body, &[(kind, target, theme)]);
+    let boxes = drawings(&document);
+    assert_eq!(
+        fill_of(boxes[0].text_box().unwrap()),
+        Some((FillKind::Solid, Some((0, 0, 0xFF)), 1.0))
+    );
+    assert_eq!(
+        fill_of(boxes[1].text_box().unwrap()),
+        Some((FillKind::Solid, Some((0, 0xFF, 0)), 1.0))
+    );
+    let messages: Vec<&str> = document.diagnostics().iter().map(|d| d.message()).collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        messages.iter().any(|m| m.starts_with("/word/document.xml")
+            && m.ends_with(r#"a:red val="zz" is not valid; it is ignored"#)),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.starts_with("/word/theme/theme1.xml")
+                && m.ends_with(r#"redMod val="much" is not valid; it is ignored"#)),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn takes_the_line_values_of_a_shape_type() {
+    // From the re-check of #471: a shape type's `stroked` and `strokeweight` are read as it
+    // is registered, as its colours are; a width without a unit is in EMUs (MS-OI29500
+    // 2.1.1810(f)).
+    let typed = |id: &str, values: &str| {
+        format!(
+            r##"<v:shapetype id="{id}" {values}/><v:shape type="#{id}" style="width:1pt;height:1pt"><v:textbox/></v:shape>"##
+        )
+    };
+    let body = format!(
+        "<w:p><w:r>{}</w:r></w:p>",
+        pict(
+            &[
+                typed("off", r#"stroked="f""#),
+                typed("points", r#"strokeweight="2pt""#),
+                typed("emus", r#"strokeweight="25400""#),
+            ]
+            .concat()
+        )
+    );
+    let document = open(&body);
+    let boxes = vml_text_boxes(&document);
+    assert!(boxes[0].outline().is_none());
+    assert_eq!(boxes[1].outline().unwrap().width(), Pt(2.0));
+    assert_eq!(boxes[2].outline().unwrap().width(), Pt(2.0));
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+}

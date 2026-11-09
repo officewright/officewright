@@ -587,6 +587,13 @@ pub(crate) fn check(drawing: Element<'_>, names: &Names, report: Report<'_>) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The bytes of the attribute values [`attribute`] has given its readers on this
+    /// thread, for tests of their cost.
+    pub(crate) static VALUE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The value of `element`'s unqualified attribute `name` as `read` takes it; one it does
 /// not take is reported and read as not written.
 pub(super) fn value<'a, T>(
@@ -611,6 +618,8 @@ pub(super) fn attribute<'a, T>(
     report: Report<'_>,
 ) -> Option<T> {
     let value = element.attribute(namespaces, name)?;
+    #[cfg(test)]
+    VALUE_BYTES.set(VALUE_BYTES.get() + value.len());
     let taken = read(value);
     if taken.is_none() {
         report(
@@ -956,7 +965,7 @@ fn measure_number(value: &str) -> Option<f64> {
 
 /// A share of DrawingML (ST_Percentage): thousandths of a percent, or in Strict a number
 /// of percent with `%`; 0.5 for a half.
-fn percentage(value: &str) -> Option<f64> {
+pub(super) fn percentage(value: &str) -> Option<f64> {
     if let Some(percent) = value.strip_suffix('%') {
         return measure_number(percent).map(|percent| percent / 100.0);
     }

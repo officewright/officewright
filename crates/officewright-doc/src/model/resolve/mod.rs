@@ -7,6 +7,7 @@ mod character;
 mod paragraph;
 mod table;
 
+pub(crate) use character::theme_color;
 pub(crate) use paragraph::list_level;
 
 use std::collections::{HashMap, HashSet};

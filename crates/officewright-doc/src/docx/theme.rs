@@ -19,7 +19,8 @@ use super::{A, A_STRICT, R, R_STRICT, shorten};
 use crate::diagnostic::Diagnostics;
 use crate::model::settings::ColorSchemeIndex;
 use crate::model::theme::{
-    ColorScheme, FontCollection, FontScheme, SchemeColor, SystemColor, Theme, position,
+    ColorScheme, FontCollection, FontScheme, FormatScheme, SchemeColor, SystemColor, Theme,
+    position,
 };
 use crate::model::xml::Element;
 use crate::model::{Document, Names};
@@ -119,6 +120,47 @@ fn once<'d>(
     children
 }
 
+/// The fills and lines of a format scheme (`a:fmtScheme`), each list the first of its name,
+/// each entry read once, and its values not taken reported; with how many of their colours
+/// have more transforms than shapes apply, after which they are left out.
+fn format_scheme(
+    element: Element<'_>,
+    names: &Names,
+    report: Report<'_>,
+    notes: &mut Notes,
+) -> (FormatScheme, usize) {
+    use crate::model::text_box::{style_fill_entry, style_line_entry};
+    let mut scheme = FormatScheme::default();
+    let mut cut = 0;
+    let lists = ["fillStyleLst", "lnStyleLst", "bgFillStyleLst"];
+    for (local, list) in once(element, names, &lists, notes) {
+        let entries = list
+            .children_through_alternates(names.mc)
+            .filter(|entry| entry.local_in(&names.a).is_some());
+        // The effects (`a:effectStyleLst`) and anything else are not read.
+        for entry in entries {
+            match local {
+                "lnStyleLst" => {
+                    let (line, over) = style_line_entry(entry, names, report);
+                    scheme.lines.push(line);
+                    cut += usize::from(over);
+                }
+                "fillStyleLst" | "bgFillStyleLst" => {
+                    let (fill, over) = style_fill_entry(entry, names, report);
+                    cut += usize::from(over);
+                    if local == "fillStyleLst" {
+                        scheme.fills.push(fill);
+                    } else {
+                        scheme.background_fills.push(fill);
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+    (scheme, cut)
+}
+
 fn theme_elements(
     theme: &mut Theme,
     element: Element<'_>,
@@ -126,8 +168,36 @@ fn theme_elements(
     report: Report<'_>,
     notes: &mut Notes,
 ) {
-    for (local, child) in once(element, names, &["clrScheme", "fontScheme"], notes) {
+    for (local, child) in once(
+        element,
+        names,
+        &["clrScheme", "fontScheme", "fmtScheme"],
+        notes,
+    ) {
         match local {
+            "fmtScheme" => {
+                // This part's reports name the elements of DrawingML without their prefix.
+                let report = &mut |element: &str, attribute: &str, value: &str| {
+                    report(
+                        element.strip_prefix("a:").unwrap_or(element),
+                        attribute,
+                        value,
+                    );
+                };
+                let (scheme, cut) = format_scheme(child, names, report, notes);
+                theme.format_scheme = scheme;
+                if cut > 0 {
+                    let max = crate::model::text_box::MAX_SCHEME_TRANSFORMS;
+                    notes.add(|| match cut {
+                        1 => format!(
+                            "a colour of a:fmtScheme has more than {max} transforms; those after are left out"
+                        ),
+                        _ => format!(
+                            "{cut} colours of a:fmtScheme have more than {max} transforms; those after are left out"
+                        ),
+                    });
+                }
+            }
             "clrScheme" => theme.colors = Some(color_scheme(child, names, report, notes)),
             "fontScheme" => {
                 let mut scheme = FontScheme {

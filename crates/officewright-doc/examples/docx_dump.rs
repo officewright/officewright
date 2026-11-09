@@ -523,6 +523,31 @@ fn describe_text_box(text_box: TextBox<'_>) -> String {
     if text_box.columns() > 1 {
         out.push_str(&format!(", {} columns", text_box.columns()));
     }
+    let hex = |color: Option<(u8, u8, u8)>| {
+        color.map_or("none".to_owned(), |(r, g, b)| {
+            format!("#{r:02X}{g:02X}{b:02X}")
+        })
+    };
+    match text_box.fill() {
+        Some(fill) => out.push_str(&format!(
+            ", fill {:?} {} opacity {}",
+            fill.kind(),
+            hex(fill.color()),
+            fill.opacity()
+        )),
+        None => out.push_str(", no fill"),
+    }
+    match text_box.outline() {
+        Some(line) => out.push_str(&format!(
+            ", outline {} pt {} {:?} {:?} opacity {}",
+            line.width().0,
+            hex(line.color()),
+            line.dash(),
+            line.compound(),
+            line.opacity()
+        )),
+        None => out.push_str(", no outline"),
+    }
     out
 }
 
