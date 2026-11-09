@@ -172,14 +172,14 @@ impl<'a> Destinations<'a> {
         // A stable sort keeps the destinations of one name in the order of their pages.
         entries.sort_by(|a, b| a.0.key.cmp(&b.0.key));
         for pair in entries.windows(2) {
-            if let [(first, first_page), (second, second_page)] = pair
-                && first.key == second.key
-            {
-                return Err(Error::DuplicateDestination {
-                    name: second.name.clone(),
-                    first: *first_page,
-                    second: *second_page,
-                });
+            if let [(first, first_page), (second, second_page)] = pair {
+                if first.key == second.key {
+                    return Err(Error::DuplicateDestination {
+                        name: second.name.clone(),
+                        first: *first_page,
+                        second: *second_page,
+                    });
+                }
             }
         }
         for (page, (_, links)) in pages.into_iter().enumerate() {
