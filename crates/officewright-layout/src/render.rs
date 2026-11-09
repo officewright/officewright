@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use officewright_core::{Color, PageSize, Pt};
-use officewright_font::{FaceId, FontBook, FontOrigin};
+use officewright_font::{FaceId, FontBook, FontOrigin, GlyphId};
 use officewright_pdf as pdf;
 
 use crate::display::{DisplayItem, DrawnGlyph, GlyphItem, ImageItem, LineItem, LineStyle, Point};
@@ -522,10 +522,40 @@ impl Painter<'_, '_, '_> {
         let mut runs = Vec::new();
         let mut font = None;
         let mut current: Option<OpenRun> = None;
+        let face = self.fonts.face(run.face);
         // Glyph by glyph: a cluster may be many, such as a base and its marks, of which
-        // only some are on the page.
+        // only some are on the page. A glyph the face cannot embed, which shaping chose
+        // past the character map the itemizer checked (a ligature, a composed letter) or
+        // which no other font has, is drawn as the face's missing-glyph shape, or left out
+        // when the face cannot embed that either; the face is reported, and the rest of
+        // the document still makes a PDF (#217).
         for cluster in &run.clusters {
             let on: Vec<&DrawnGlyph> = cluster.glyphs.iter().filter(on_page).collect();
+            if on.is_empty() {
+                continue;
+            }
+            // A face that cannot be embedded at all is reported as such, once.
+            if font.is_none() {
+                match self.font(run.face) {
+                    Some(made) => font = Some(made),
+                    None => return Vec::new(),
+                }
+            }
+            let mut kept: Vec<DrawnGlyph> = Vec::with_capacity(on.len());
+            for glyph in on {
+                let Some(face) = &face else {
+                    continue;
+                };
+                if self.fonts.embeddable(run.face, face, glyph.glyph) {
+                    kept.push(*glyph);
+                } else if self.fonts.embeddable(run.face, face, GlyphId::NOTDEF) {
+                    kept.push(DrawnGlyph {
+                        glyph: GlyphId::NOTDEF,
+                        ..*glyph
+                    });
+                }
+            }
+            let on: Vec<&DrawnGlyph> = kept.iter().collect();
             let Some(&lead) = on.first() else {
                 continue;
             };
@@ -540,12 +570,9 @@ impl Painter<'_, '_, '_> {
                 if !holds(start, (0.0, 0.0)) {
                     continue;
                 }
-                let font = match &font {
-                    Some(font) => font,
-                    None => match self.font(run.face) {
-                        Some(made) => font.insert(made),
-                        None => return Vec::new(),
-                    },
+                // Made above, for the cluster's first glyph on the page.
+                let Some(font) = &font else {
+                    return Vec::new();
                 };
                 let mut glyphs = pdf::GlyphRun::new(font, run.size, Pt(start.0), Pt(start.1))
                     .with_color(run.color)
@@ -2032,6 +2059,26 @@ mod tests {
               'name' is past a limit of the library: the name records to keep point at \
               1048584 bytes of strings, more than the 1048576 read before subsetting"
             ]
+        );
+    }
+
+    #[test]
+    fn a_font_it_cannot_embed_is_not_reported_when_none_of_its_glyphs_reaches_the_page() {
+        let font = crate::testing::with_name_copies(crate::testing::minimal(), 32);
+        let (drawn, report) = painted(
+            &Document::default(),
+            font,
+            // Far below the page.
+            &[DisplayItem::Glyphs(run(10.0, 1_000.0, &[(0.0, 0.0)]))],
+        );
+        assert!(drawn.is_empty());
+        assert!(
+            report
+                .entries()
+                .iter()
+                .all(|entry| entry.kind() != ReportKind::FontEmbedding),
+            "{:?}",
+            report.entries()
         );
     }
 

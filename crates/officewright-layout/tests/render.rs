@@ -441,3 +441,149 @@ fn the_options_make_a_book_of_their_fonts() -> TestResult {
     assert_eq!(families(&in_memory), ["Liberation Mono"]);
     Ok(())
 }
+
+/// officewright-font's test font (glyphs 0 `.notdef`, 1 space, 2 `A`, 3 acute, 4 `Á`)
+/// with glyph `glyph` damaged as [`damage_glyph`] does.
+fn with_damaged_glyph(glyph: usize) -> TestResult<Vec<u8>> {
+    let mut font =
+        std::fs::read(repository().join("crates/officewright-font/tests/data/minimal.ttf"))?;
+    damage_glyph(&mut font, glyph)?;
+    Ok(font)
+}
+
+/// Damages glyph `glyph` of `font`, a TrueType font with long `loca` offsets: its `loca`
+/// entry sends it past the end of `glyf`, so that it cannot be subset.
+fn damage_glyph(font: &mut [u8], glyph: usize) -> TestResult {
+    let be32 = |font: &[u8], at: usize| -> TestResult<u32> {
+        Ok(u32::from_be_bytes(
+            font.get(at..at + 4).ok_or("truncated")?.try_into()?,
+        ))
+    };
+    let tables = usize::try_from(be32(font, 4)? >> 16)?;
+    let loca = (0..tables)
+        .map(|i| 12 + 16 * i)
+        .find(|&at| font.get(at..at + 4) == Some(b"loca"))
+        .ok_or("no loca")?;
+    let loca = usize::try_from(be32(font, loca + 8)?)?;
+    // Long offsets: a glyph ends at the entry after its own.
+    let end = loca + 4 * (glyph + 1);
+    font.get_mut(end..end + 4)
+        .ok_or("no loca entry")?
+        .copy_from_slice(&0x0100_0000_u32.to_be_bytes());
+    Ok(())
+}
+
+/// A document of one paragraph of `text` in the test font at 11 pt.
+fn in_test_font(text: &str) -> Document {
+    let mut document = Document::default();
+    let test = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Officewright Test"))
+            .with_size(Pt(11.0)),
+    );
+    document.add_section(Section::new(PageSetup::new(PageSize::A4)).with_blocks(vec![
+        Paragraph::new(test).with_inlines([Inline::text(text, test)]).into(),
+    ]));
+    document
+}
+
+/// The messages of the report's entries of `kind`.
+fn messages(report: &officewright_layout::LayoutReport, kind: ReportKind) -> Vec<String> {
+    report
+        .entries()
+        .iter()
+        .filter(|entry| entry.kind() == kind)
+        .map(|entry| entry.message().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_soft_hyphen_takes_the_hyphen_minus_where_the_hyphen_cannot_be_embedded() -> TestResult {
+    use officewright_font::{FontFace, FontOrigin};
+    use officewright_layout::fuzzing;
+    // Liberation Sans with its glyph of U+2010 damaged (long `loca` offsets): the hyphen
+    // drawn where a line breaks at a soft hyphen is the hyphen-minus, which it can embed.
+    let mut font =
+        std::fs::read(repository().join("tests/fonts/liberation/LiberationSans-Regular.ttf"))?;
+    let face = FontFace::from_bytes(font.clone(), 0)?;
+    let (hyphen, minus) = (
+        face.glyph_id('\u{2010}').ok_or("no U+2010")?,
+        face.glyph_id('-').ok_or("no hyphen-minus")?,
+    );
+    damage_glyph(&mut font, usize::from(hyphen.to_u16()))?;
+    let mut book = officewright_font::FontBook::new();
+    book.add_bytes(font, FontOrigin::Document)?;
+    let mut document = Document::default();
+    let style = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Liberation Sans"))
+            .with_size(Pt(11.0)),
+    );
+    let paragraph = Paragraph::new(style)
+        .with_inlines([Inline::text("Hyphen\u{AD}ation hyphen\u{AD}ation", style)]);
+    let painted = fuzzing::paint(&book, &document, &[paragraph], 60.0);
+    let dump = painted.text();
+    assert!(
+        dump.contains(&format!(" {}@", minus.to_u16())),
+        "no hyphen-minus: {dump}"
+    );
+    assert!(
+        !dump.contains(&format!(" {}@", hyphen.to_u16())),
+        "the damaged hyphen is drawn: {dump}"
+    );
+    Ok(())
+}
+
+#[test]
+fn text_of_a_font_with_a_damaged_glyph_is_drawn_in_another_font() -> TestResult {
+    // Issue #217: an embedded font whose glyph of `A` cannot be subset would make the whole
+    // PDF fail. Word shows such text in another font: here Carlito, the first face of the
+    // test fonts with `A`, and the face is reported.
+    let mut book = book()?;
+    book.add_bytes(
+        with_damaged_glyph(2)?,
+        officewright_font::FontOrigin::Document,
+    )?;
+    let rendered = render_pdf(&in_test_font("A"), &book, &plain())?;
+    let pdf = text(rendered.pdf())?;
+    assert!(pdf.contains("Carlito"), "A is not in Carlito");
+    assert!(
+        !pdf.contains("OfficewrightTest"),
+        "the damaged face is embedded"
+    );
+    assert_eq!(
+        messages(rendered.report(), ReportKind::FontEmbedding),
+        [
+            "some glyphs of Officewright Test cannot be embedded (cannot subset font face 0: \
+             glyph 2: its loca entries do not give a range of the glyf table); their text is \
+             drawn in other fonts, or as the missing-glyph shape"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_glyph_shaping_chose_that_cannot_be_embedded_is_drawn_as_the_missing_glyph() -> TestResult {
+    // `Á` damaged, and no other font: shaping composes `A` and a combining acute, which the
+    // font has whole, into `Á`, which the character map did not give; and `Á` typed has no
+    // other font to fall back to. Both are drawn as `.notdef`, and the PDF is made.
+    let mut book = officewright_font::FontBook::new();
+    book.add_bytes(
+        with_damaged_glyph(4)?,
+        officewright_font::FontOrigin::Document,
+    )?;
+    for (typed, code) in [("A\u{301}", "0301"), ("\u{C1}", "00C1")] {
+        let rendered = render_pdf(&in_test_font(typed), &book, &plain())?;
+        let pdf = text(rendered.pdf())?;
+        assert!(pdf.contains("OfficewrightTest"), "{typed:?}");
+        // The missing-glyph shape stands for the text, which the PDF still gives.
+        assert!(pdf.contains(code), "{typed:?}: no {code} in the text");
+        assert_eq!(
+            messages(rendered.report(), ReportKind::FontEmbedding).len(),
+            1,
+            "{typed:?}: {:?}",
+            rendered.report()
+        );
+    }
+    Ok(())
+}

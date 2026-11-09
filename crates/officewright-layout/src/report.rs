@@ -149,8 +149,10 @@ pub enum ReportKind {
     FontSubstituted,
     /// A font is embedded with what its license or its format restricts: for viewing
     /// and printing only, for editing but not installing, whole rather than as a subset,
-    /// or only the default instance of a variable font; or it cannot be embedded, and its
-    /// text is not drawn.
+    /// or only the default instance of a variable font; or some of its glyphs cannot be
+    /// embedded, and their text is drawn in other fonts or as the missing-glyph shape; or
+    /// it cannot be embedded at all, and none of its text is drawn when its license
+    /// forbids embedding, else only what other fonts have, its white space left out.
     FontEmbedding,
     /// No available font has a glyph for a character; the font's missing-glyph shape
     /// is drawn.

@@ -41,8 +41,12 @@ impl Document {
     /// - [`Error::Font`](crate::Error::Font) when a font `options` give cannot be read, or
     ///   a directory of fonts cannot be listed;
     /// - [`Error::Pdf`](crate::Error::Pdf) when the PDF cannot be written to `out`, or
-    ///   cannot be made, such as when a font the document embeds is damaged past what the
-    ///   font book checks and cannot be subset for the PDF (#217).
+    ///   cannot be made. Text in a font with glyphs that cannot be subset, such as a
+    ///   damaged font the document embeds, is drawn in another font or as the
+    ///   missing-glyph shape, and reported; what checking each glyph alone does not find
+    ///   can still fail: glyphs of several large CFF fonts that together take more than
+    ///   the subset budget, and a crafted TrueType font whose composite glyphs name
+    ///   glyphs past its glyph count.
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
