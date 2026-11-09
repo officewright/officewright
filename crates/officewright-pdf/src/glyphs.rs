@@ -178,8 +178,9 @@ impl GlyphRun {
     }
 
     /// Appends a cluster: `text` and the glyphs that show it. Text extraction returns the
-    /// text, which may be empty for glyphs that stand for no text, such as tab leaders,
-    /// and may have up to 16382 UTF-16 code units; a cluster needs at least one glyph.
+    /// text, which may be empty for glyphs that stand for no text, such as the hyphen a
+    /// layout draws at a soft hyphen, and may have up to 16382 UTF-16 code units; a
+    /// cluster needs at least one glyph.
     pub fn push_cluster(&mut self, text: &str, glyphs: impl IntoIterator<Item = PlacedGlyph>) {
         self.glyphs.extend(glyphs);
         self.clusters.push((text.to_owned(), self.glyphs.len()));

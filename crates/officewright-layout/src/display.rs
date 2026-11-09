@@ -121,8 +121,9 @@ pub(crate) struct GlyphItem {
 /// Glyphs that stand for some text together.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Cluster {
-    /// The text as the document has it, for copying and searching; empty when the
-    /// cluster before it stands for this one's text too.
+    /// The text the PDF gives for copying and searching: the source text of its
+    /// characters, or a tab leader's character; empty when the cluster before it stands
+    /// for this one's text too.
     pub(crate) text: String,
     pub(crate) glyphs: Vec<DrawnGlyph>,
 }
