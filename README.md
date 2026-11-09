@@ -82,12 +82,13 @@ The main things not laid out yet:
 - the texts of footnotes and endnotes, and the numbers of references to them in headers
   and footers;
 - text wrapping around floating pictures and text boxes (it runs over or under them),
-  floating pictures in table cells, and shapes, charts, SmartArt, VML shapes other than
-  pictures and text boxes, and equations;
-- in text boxes: tables and floating objects; boxes in a group of shapes; a chain of
-  linked boxes, whose text all goes into the first; turned boxes and vertical text, drawn
-  upright and across; shapes other than a rectangle, WordArt, columns, shadows and other
-  effects; gradient and pattern fills, drawn in their first colour, and picture fills;
+  floating pictures and text boxes in table cells, and shapes, charts, SmartArt, VML
+  shapes other than pictures and text boxes, and equations;
+- tables and floating objects in text boxes; text boxes in a group of shapes, a chain of
+  linked boxes (its text all goes into the first), turned boxes and vertical text (drawn
+  upright and across), boxes shaped other than as a rectangle (drawn as rectangles),
+  WordArt, columns in a box, shadows and other effects, gradient and pattern fills (drawn
+  in their first colour) and picture fills;
 - text in several columns (laid out in one column), paragraph and page borders, and line
   numbers;
 - the document grid, which sets the line height of many Chinese and Japanese documents;
