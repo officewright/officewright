@@ -517,7 +517,13 @@
     "tests/corpus/word-rules/E-underline-trailspace-margin.docx": "opened",
     "tests/corpus/word-rules/E-underline-trailspace.docx": "opened",
     "tests/corpus/word-rules/E-underline.docx": "opened",
-    "tests/corpus/word-rules/E-vml-pictures.docx": "opened"
+    "tests/corpus/word-rules/E-vml-pictures.docx": "opened",
+    "tests/corpus/word-rules/E-wrap-square.docx": "opened",
+    "tests/corpus/word-rules/E-wrap-textbox.docx": "opened",
+    "tests/corpus/word-rules/E-wrap-tight.docx": "opened",
+    "tests/corpus/word-rules/E-wrap-top-bottom.docx": "opened",
+    "tests/corpus/word-rules/E-wrap-vml-textbox.docx": "opened",
+    "tests/corpus/word-rules/E-wrap-vml.docx": "opened"
   },
   "scores": {
     "tests/corpus/business/contract-ec-data-processing-clauses-bg.docx": {
