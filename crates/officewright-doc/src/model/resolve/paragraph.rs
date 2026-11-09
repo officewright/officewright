@@ -46,7 +46,7 @@ impl Formats<'_> {
             .and_then(|index| document.styles.styles.get(index))
             .map(|style| Arc::clone(&style.id));
 
-        let (list, below_direct) = match self.list(&base, &direct, style) {
+        let (list, below_direct) = match self.list(&base, &direct) {
             Some((
                 list,
                 InstanceLevel {
@@ -81,7 +81,7 @@ impl Formats<'_> {
             None => defaults,
         };
         let direct = ParagraphLevel::of(direct);
-        let (_, level) = self.list(&base, &direct, style)?;
+        let (_, level) = self.list(&base, &direct)?;
         Some(level.label)
     }
 
@@ -221,31 +221,28 @@ impl Formats<'_> {
     /// The list a paragraph is an item of, and what its level gives to the paragraph.
     /// The instance and the level are properties of their own, each from the last level
     /// that gives it, as Word keeps them. Without a level in direct formatting, the level
-    /// is the one the style hierarchy writes, else the one whose `w:pStyle` names the
-    /// paragraph style (ECMA-376 §17.9.23), else 0. That order is what Word's render of
-    /// case 04 of word-rules/E-list-level-inherit.docx shows, for a level from 0 to 8
-    /// that the style itself writes; MS-OI29500 §17.3.1.19(a) says only that Word does
-    /// not ignore a level in a style's `w:numPr` and behaves unpredictably with one, and
-    /// the other cases are asked of Word in #293.
+    /// is the one the style hierarchy writes, else 0, whether or not a level of the list
+    /// names the paragraph style in its `w:pStyle`. Word's renders show it: of case 04 of
+    /// word-rules/E-list-level-inherit.docx, for a level the style writes, and of cases
+    /// 01 and 02 of word-rules/E-list-level-linked-no-level.docx, for a style that writes
+    /// none. MS-OI29500 §17.3.1.19(a) says only that Word does not ignore a level in a
+    /// style's `w:numPr` and behaves unpredictably with one.
     /// Instance 0 is no list, even when a `w:num` has that id (ECMA-376 §17.9.18).
     fn list(
         &mut self,
         base: &ParagraphLevel,
         direct: &ParagraphLevel,
-        style: Option<usize>,
     ) -> Option<(ListFormat, InstanceLevel)> {
         let instance = direct
             .list_instance
             .or(base.list_instance)
             .filter(|&id| id != 0)?;
         let found = self.instance(instance)?;
-        // Word deviates from ECMA-376 §17.9.23, which takes the level from w:pStyle
-        // first: see case 04 of tests/corpus/word-rules/E-list-level-inherit.docx and
-        // Word's reference of it.
-        let written_level = direct
-            .list_level
-            .or(base.list_level)
-            .or_else(|| style.and_then(|style| found.shared.level_of_style(style)));
+        // Word deviates from ECMA-376 §17.9.23, which takes the level whose w:pStyle
+        // names the paragraph style: see case 04 of word-rules/E-list-level-inherit.docx,
+        // cases 01 and 02 of word-rules/E-list-level-linked-no-level.docx and Word's
+        // references of them.
+        let written_level = direct.list_level.or(base.list_level);
         let level_number = usize::try_from(written_level.unwrap_or(0))
             .ok()
             .filter(|&level| level <= 8)?;
@@ -354,8 +351,8 @@ impl Formats<'_> {
         instance
     }
 
-    /// The start of each level of the definition `id` and the style it names, worked
-    /// out once and shared by every instance that uses it. The levels are parsed and
+    /// The start of each level of the definition `id`, worked out once and shared by
+    /// every instance that uses it. The levels are parsed and
     /// dropped: what a level gives to paragraphs and to their labels is kept only for
     /// the levels paragraphs use ([`level_gives`](Self::level_gives)).
     fn definition_levels(&mut self, id: i64) -> Arc<DefinitionLevels> {
@@ -377,9 +374,6 @@ impl Formats<'_> {
             if let Some(slot) = levels.get_mut(level.level()) {
                 *slot = Some(DefinitionLevel {
                     start: level.start(),
-                    style: level
-                        .paragraph_style()
-                        .and_then(|id| style_index(document, id, StyleKind::Paragraph)),
                 });
             }
         }
@@ -547,28 +541,11 @@ pub(super) struct DefinitionLevels {
     levels: [Option<DefinitionLevel>; 9],
 }
 
-impl DefinitionLevels {
-    /// The first level whose `w:pStyle` names the paragraph style at `style`. An
-    /// override's level does not take a style over.
-    fn level_of_style(&self, style: usize) -> Option<i64> {
-        self.levels
-            .iter()
-            .position(|level| {
-                level
-                    .as_ref()
-                    .is_some_and(|level| level.style == Some(style))
-            })
-            .and_then(|number| i64::try_from(number).ok())
-    }
-}
-
 /// What the resolver keeps of a level of a list definition.
 #[derive(Debug)]
 struct DefinitionLevel {
     /// Its `w:start`.
     start: Option<i64>,
-    /// The index of the paragraph style its `w:pStyle` names.
-    style: Option<usize>,
 }
 
 /// The definition a list instance uses, after a numbering style's link, and its levels.
