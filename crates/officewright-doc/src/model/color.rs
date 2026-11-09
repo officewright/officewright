@@ -75,48 +75,156 @@ pub(crate) fn color_of_element(
     max_transforms: usize,
     report: Report<'_>,
 ) -> (Option<Paint>, bool) {
-    let base = base(element, names, document, placeholder, report);
-    let mut paint = base.unwrap_or(Paint {
-        rgb: (0, 0, 0),
-        opacity: 1.0,
-    });
-    let mut rgb = [paint.rgb.0, paint.rgb.1, paint.rgb.2].map(|c| f64::from(c) / 255.0);
-    let (mut applied, mut cut) = (0usize, false);
+    let (color, cut) = read_color(element, names, max_transforms, report);
+    (
+        color.and_then(|color| resolve(&color, document, placeholder)),
+        cut,
+    )
+}
+
+/// A colour element read into data: its base and its transforms, the colours of the
+/// theme left to resolve when a shape asks for them, so that a colour of the theme's
+/// format scheme is read once however many shapes' styles name it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ColorValue {
+    base: Base,
+    transforms: Vec<Transform>,
+}
+
+/// The colour a colour element names before its transforms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Base {
+    Rgb((u8, u8, u8)),
+    /// A colour of the theme, through the document's colour mapping.
+    Scheme(ThemeColor),
+    /// `phClr`, the colour a style's reference gives.
+    Placeholder,
+}
+
+/// A transform of a colour that the readers apply, with its amount in millionths: of one
+/// for a fraction, of a degree for an angle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Transform {
+    kind: TransformKind,
+    amount: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransformKind {
+    Alpha,
+    AlphaMod,
+    AlphaOff,
+    Hue,
+    HueOff,
+    HueMod,
+    Sat,
+    SatOff,
+    SatMod,
+    Lum,
+    LumOff,
+    LumMod,
+    Shade,
+    Tint,
+    Comp,
+    Inv,
+    Gray,
+}
+
+/// A colour element read into data, with at most `max_transforms` of its transforms, and
+/// whether it has more, which are left out; none for a base that names nothing. Each value
+/// is read, and reported when not taken, also when the base names nothing.
+pub(crate) fn read_color(
+    element: Element<'_>,
+    names: &Names,
+    max_transforms: usize,
+    report: Report<'_>,
+) -> (Option<ColorValue>, bool) {
+    let base = read_base(element, names, report);
+    let mut transforms = Vec::new();
+    let mut cut = false;
     for transform in element.children_through_alternates(names.mc) {
         let Some(local) = transform.local_in(&names.a) else {
             continue;
         };
-        if applied == max_transforms {
+        let kind = match local {
+            "alpha" => TransformKind::Alpha,
+            "alphaMod" => TransformKind::AlphaMod,
+            "alphaOff" => TransformKind::AlphaOff,
+            "hue" => TransformKind::Hue,
+            "hueOff" => TransformKind::HueOff,
+            "hueMod" => TransformKind::HueMod,
+            "sat" => TransformKind::Sat,
+            "satOff" => TransformKind::SatOff,
+            "satMod" => TransformKind::SatMod,
+            "lum" => TransformKind::Lum,
+            "lumOff" => TransformKind::LumOff,
+            "lumMod" => TransformKind::LumMod,
+            "shade" => TransformKind::Shade,
+            "tint" => TransformKind::Tint,
+            "comp" => TransformKind::Comp,
+            "inv" => TransformKind::Inv,
+            "gray" => TransformKind::Gray,
+            // The transforms of single channels and of gamma are not applied.
+            _ => continue,
+        };
+        if transforms.len() == max_transforms {
             cut = true;
             break;
         }
-        applied += 1;
-        if matches!(local, "comp" | "inv" | "gray") {
-            rgb = match local {
-                "inv" => rgb.map(|c| 1.0 - c),
-                "gray" => {
-                    let [r, g, b] = rgb;
-                    [0.3 * r + 0.59 * g + 0.11 * b; 3]
+        let amount = match kind {
+            TransformKind::Comp | TransformKind::Inv | TransformKind::Gray => 0.0,
+            TransformKind::Hue | TransformKind::HueOff => {
+                match value(transform, names, "val", angle, report) {
+                    Some(amount) => amount,
+                    None => continue,
                 }
-                _ => {
-                    let (hue, saturation, luminance) = to_hsl(rgb);
-                    from_hsl(((hue + 180.0) % 360.0, saturation, luminance))
-                }
-            };
-            continue;
-        }
-        let read = match local {
-            "hue" | "hueOff" => angle,
-            _ => percentage,
+            }
+            _ => match value(transform, names, "val", percentage, report) {
+                Some(amount) => amount,
+                None => continue,
+            },
         };
-        let Some(amount) = value(transform, names, "val", read, report) else {
-            continue;
-        };
-        match local {
-            "alpha" => paint.opacity = amount,
-            "alphaMod" => paint.opacity *= amount,
-            "alphaOff" => paint.opacity += amount,
-            "shade" | "tint" => {
+        transforms.push(Transform {
+            kind,
+            amount: (amount * 1e6).round() as i64,
+        });
+    }
+    (base.map(|base| ColorValue { base, transforms }), cut)
+}
+
+/// A colour read into data, its transforms applied in their order; `placeholder` stands
+/// for `phClr`. A colour of the theme is resolved through `document`'s colour mapping and
+/// theme, and is none without it.
+pub(crate) fn resolve(
+    color: &ColorValue,
+    document: Option<&Document>,
+    placeholder: Option<Paint>,
+) -> Option<Paint> {
+    let mut paint = match color.base {
+        Base::Rgb(rgb) => Paint { rgb, opacity: 1.0 },
+        Base::Scheme(theme) => Paint {
+            rgb: super::resolve::theme_color(document?, theme)?,
+            opacity: 1.0,
+        },
+        Base::Placeholder => placeholder?,
+    };
+    let mut rgb = [paint.rgb.0, paint.rgb.1, paint.rgb.2].map(|c| f64::from(c) / 255.0);
+    for transform in &color.transforms {
+        let amount = transform.amount as f64 / 1e6;
+        match transform.kind {
+            TransformKind::Inv => rgb = rgb.map(|c| 1.0 - c),
+            TransformKind::Gray => {
+                let [r, g, b] = rgb;
+                rgb = [0.3 * r + 0.59 * g + 0.11 * b; 3];
+            }
+            TransformKind::Comp => {
+                let (hue, saturation, luminance) = to_hsl(rgb);
+                rgb = from_hsl(((hue + 180.0) % 360.0, saturation, luminance));
+            }
+            TransformKind::Alpha => paint.opacity = amount,
+            TransformKind::AlphaMod => paint.opacity *= amount,
+            TransformKind::AlphaOff => paint.opacity += amount,
+            TransformKind::Shade | TransformKind::Tint => {
                 // In linear light, as Word's VML fallbacks of shapes have such colours
                 // (LibreOffice's fdo74401.docx: 4F81BD shaded 50 % is 385D8A), also the
                 // stops it gives a gradient of a colour of the scheme with several
@@ -124,27 +232,27 @@ pub(crate) fn color_of_element(
                 // with one shade or tint has its old index there (`#243f60 [1604]`) and a
                 // value in its luminance, as Word's older colour model has it; what Word
                 // draws for those no render shows yet (#468).
+                let shade = transform.kind == TransformKind::Shade;
                 rgb = rgb.map(|c| {
                     let linear = to_linear(c);
-                    from_linear(if local == "shade" {
+                    from_linear(if shade {
                         linear * amount
                     } else {
                         linear * amount + (1.0 - amount)
                     })
                 });
             }
-            "hue" | "hueOff" | "hueMod" | "sat" | "satOff" | "satMod" | "lum" | "lumOff"
-            | "lumMod" => {
+            kind => {
                 let (mut hue, mut saturation, mut luminance) = to_hsl(rgb);
-                match local {
-                    "hue" => hue = amount,
-                    "hueOff" => hue += amount,
-                    "hueMod" => hue *= amount,
-                    "sat" => saturation = amount,
-                    "satOff" => saturation += amount,
-                    "satMod" => saturation *= amount,
-                    "lum" => luminance = amount,
-                    "lumOff" => luminance += amount,
+                match kind {
+                    TransformKind::Hue => hue = amount,
+                    TransformKind::HueOff => hue += amount,
+                    TransformKind::HueMod => hue *= amount,
+                    TransformKind::Sat => saturation = amount,
+                    TransformKind::SatOff => saturation += amount,
+                    TransformKind::SatMod => saturation *= amount,
+                    TransformKind::Lum => luminance = amount,
+                    TransformKind::LumOff => luminance += amount,
                     _ => luminance *= amount,
                 }
                 rgb = from_hsl((
@@ -153,37 +261,25 @@ pub(crate) fn color_of_element(
                     luminance.clamp(0.0, 1.0),
                 ));
             }
-            // The transforms of single channels and of gamma are not applied.
-            _ => {}
         }
-    }
-    if base.is_none() {
-        return (None, cut);
     }
     let [r, g, b] = rgb.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
     paint.rgb = (r, g, b);
     paint.opacity = paint.opacity.clamp(0.0, 1.0);
-    (Some(paint), cut)
+    Some(paint)
 }
 
-/// A colour element without its transforms.
-fn base(
-    element: Element<'_>,
-    names: &Names,
-    document: Option<&Document>,
-    placeholder: Option<Paint>,
-    report: Report<'_>,
-) -> Option<Paint> {
-    let opaque = |rgb| Paint { rgb, opacity: 1.0 };
+/// The base of a colour element, before its transforms.
+fn read_base(element: Element<'_>, names: &Names, report: Report<'_>) -> Option<Base> {
     match element.local_name() {
-        "srgbClr" => value(element, names, "val", hex, report).map(opaque),
-        "sysClr" => value(element, names, "lastClr", hex, report).map(opaque),
+        "srgbClr" => value(element, names, "val", hex, report).map(Base::Rgb),
+        "sysClr" => value(element, names, "lastClr", hex, report).map(Base::Rgb),
         "scrgbClr" => {
             let mut channel = |name| {
                 value(element, names, name, percentage, report)
                     .map(|c| (from_linear(c.clamp(0.0, 1.0)) * 255.0).round() as u8)
             };
-            Some(opaque((channel("r")?, channel("g")?, channel("b")?)))
+            Some(Base::Rgb((channel("r")?, channel("g")?, channel("b")?)))
         }
         "hslClr" => {
             let hue = value(element, names, "hue", angle, report)?;
@@ -195,16 +291,13 @@ fn base(
                 luminance.clamp(0.0, 1.0),
             ))
             .map(|c| (c * 255.0).round() as u8);
-            Some(opaque((r, g, b)))
+            Some(Base::Rgb((r, g, b)))
         }
-        "prstClr" => value(element, names, "val", preset, report).map(opaque),
-        _ => {
-            let scheme = value(element, names, "val", scheme_color, report)?;
-            match scheme {
-                None => placeholder,
-                Some(theme) => super::resolve::theme_color(document?, theme).map(opaque),
-            }
-        }
+        "prstClr" => value(element, names, "val", preset, report).map(Base::Rgb),
+        _ => match value(element, names, "val", scheme_color, report)? {
+            None => Some(Base::Placeholder),
+            Some(theme) => Some(Base::Scheme(theme)),
+        },
     }
 }
 
