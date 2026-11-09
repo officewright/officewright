@@ -1821,7 +1821,7 @@ fn stack<'d>(
                     Some(above) => paragraph::space_between(document, above.props(), props).0,
                     None => paragraph::space_before(document, props).0,
                 };
-                let layout = paragraph::lay_out_with(
+                let layout = paragraph::lay_out_in_cell(
                     document,
                     (paragraph, label),
                     width,

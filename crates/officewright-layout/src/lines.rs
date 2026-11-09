@@ -316,6 +316,9 @@ pub(crate) struct Input<'p> {
     pub(crate) width: Pt,
     /// The paragraph's place, for the report.
     pub(crate) location: &'p Location,
+    /// Whether the paragraph is in a table cell, where its paragraph mark and breaks keep
+    /// counting in the height of a line of text (see `set_height`).
+    pub(crate) cell: bool,
 }
 
 /// What the line breaker works with.
@@ -342,6 +345,8 @@ pub(crate) struct Breaker<'p, 'f, 'b> {
     splice: Option<Splice>,
     /// How far the list label moves the first line's start.
     label_shift: Pt,
+    /// Whether the paragraph is in a table cell.
+    cell: bool,
 }
 
 impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
@@ -359,6 +364,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             paragraph,
             width,
             location,
+            cell,
         } = input;
         let (text, starts) = break_text(itemized);
         let props = paragraph.props();
@@ -381,6 +387,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             overflow_reported: false,
             splice: None,
             label_shift: Pt(0.0),
+            cell,
         };
         breaker.scales = breaker.measure_items();
         breaker.units = breaker.make_units(shaped);
@@ -1397,9 +1404,12 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             .settings()
             .has_compat_flag(&CompatFlag::NoLeading);
         let mut extent = Extent::default();
+        let mut text = false;
+        let mut breaks = Vec::new();
         for piece in &line.pieces {
             match &piece.kind {
                 PieceKind::Text { item, .. } | PieceKind::Hyphen { item, .. } => {
+                    text = true;
                     let metrics = self.text_metrics(*item);
                     extent.add(metrics, self.position(*item));
                 }
@@ -1409,8 +1419,12 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                         extent.add(metrics, Pt(0.0));
                     }
                 }
-                // A break counts only on a line with nothing else (below).
-                PieceKind::Break { .. } => {}
+                // A break counts only on a line without text (below).
+                PieceKind::Break { item } => {
+                    if let Some(style) = item_style(self.itemized, *item) {
+                        breaks.push(self.style_metrics(style));
+                    }
+                }
                 PieceKind::Object { item, height } => {
                     if let Some(height) = height {
                         extent.ascent = extent.ascent.max(height.0);
@@ -1426,22 +1440,20 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         // nor the run of a break that ends the line a height of their own there, however
         // large they are (E-smallcaps-15's reference: a Calibri 11 pt break and mark next
         // to 9 pt text; contract-usds-statement-of-objectives: a 12 pt title with a 20 pt
-        // mark). An empty line has the height of the break that ends it, or of the mark.
-        if extent.empty {
-            let ending = line
-                .pieces
-                .iter()
-                .rev()
-                .find_map(|piece| match &piece.kind {
-                    PieceKind::Break { item } => item_style(self.itemized, *item),
-                    _ => None,
-                });
-            let style = match ending {
-                Some(style) if !last => style,
-                _ => self.paragraph.mark(),
-            };
-            let metrics = self.style_metrics(style);
-            extent.add(metrics, Pt(0.0));
+        // mark). A line without text has the height of its break, and the last line of a
+        // paragraph that of the mark too: an empty line, or one of an inline picture, whose
+        // descent they put below it. In a table cell the break and the last line's mark
+        // still count: Word's rows of the letterheads of generated/invoice-en-standard
+        // and letter-uk are taller than their text. Hypothesis until a rule document
+        // settles cells.
+        if !text || self.cell {
+            for metrics in breaks {
+                extent.add(metrics, Pt(0.0));
+            }
+            if last || extent.empty {
+                let metrics = self.style_metrics(self.paragraph.mark());
+                extent.add(metrics, Pt(0.0));
+            }
         }
         let leading = if no_leading { 0.0 } else { extent.leading };
         let natural = extent.ascent + extent.descent + leading;
@@ -2158,6 +2170,7 @@ mod tests {
             paragraph: &paragraph,
             width: Pt(100.0),
             location: &location,
+            cell: false,
         };
         let starts = |breaker: &Breaker<'_, '_, '_>| -> Vec<usize> {
             breaker.units.iter().map(|unit| unit.range.start).collect()
