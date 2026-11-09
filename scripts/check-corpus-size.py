@@ -4,13 +4,16 @@ folder at most 100 MB, where 1 MB is 1,000,000 bytes.
 
 The sizes are those of the files git tracks under tests/corpus, as they are in the working
 tree of the repository the script runs in; files git does not track are not counted, and
-a tracked file deleted from the working tree counts as gone. .gitattributes gives text
-files LF line ends on every platform, so the sizes are the same everywhere.
+a tracked file deleted from the working tree counts as gone. A symbolic link counts with
+its own size, the length of the path it holds, as on a system that checks it out as a
+file with that path. .gitattributes gives text files LF line ends on every platform, so
+the sizes are the same everywhere.
 
     check-corpus-size.py   exit 0 with a line of the sizes, or 1 with what is too large
 """
 
 import os
+import stat
 import subprocess
 import sys
 
@@ -24,18 +27,28 @@ def megabytes(size: int) -> str:
     return f"{size / MB:.2f} MB"
 
 
+def git(*args: str) -> bytes:
+    result = subprocess.run(["git", *args], capture_output=True)
+    if result.returncode != 0:
+        message = result.stderr.decode("utf-8", "replace").strip()
+        sys.exit(f"check-corpus-size: git {args[0]} failed: {message}")
+    return result.stdout
+
+
 def main() -> int:
-    top = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"], check=True, capture_output=True, text=True
-    ).stdout.strip()
-    os.chdir(top)
-    listed = subprocess.run(
-        ["git", "ls-files", "-z", "--", CORPUS], check=True, capture_output=True
-    ).stdout
+    os.chdir(git("rev-parse", "--show-toplevel").decode("utf-8", "surrogateescape").strip())
+    listed = git("ls-files", "-z", "--", CORPUS).decode("utf-8", "surrogateescape")
     sizes = {}
-    for name in listed.decode("utf-8", "surrogateescape").split("\0"):
-        if name and os.path.isfile(name):
-            sizes[name] = os.path.getsize(name)
+    for name in filter(None, listed.split("\0")):
+        try:
+            status = os.lstat(name)
+        except FileNotFoundError:
+            continue  # deleted from the working tree
+        if stat.S_ISLNK(status.st_mode):
+            sizes[name] = len(os.fsencode(os.readlink(name)))
+        elif stat.S_ISREG(status.st_mode):
+            sizes[name] = status.st_size
+        # Anything else is a folder: a submodule.
     total = sum(sizes.values())
 
     failed = False

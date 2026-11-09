@@ -190,7 +190,7 @@ Unit and snapshot tests (`insta`) cover small handcrafted inputs. Real-world cor
 
 ### Corpora
 
-- Committed, `tests/corpus/`: a few hundred small files (each at most 1 MB, at most 100 MB in all, where 1 MB is 1,000,000 bytes: the sizes of the files git tracks there, as they are in the working tree; `scripts/check-corpus-size.py` checks both in check.sh) chosen for edge cases. Only files whose license allows redistribution; each listed in `SOURCES.md` with origin and license. Never commit personal, customer or copyrighted documents.
+- Committed, `tests/corpus/`: small files (each at most 1 MB, at most 100 MB in all, where 1 MB is 1,000,000 bytes: the sizes of the files git tracks there, as they are in the working tree; `scripts/check-corpus-size.py` checks both in check.sh) chosen for edge cases. Only files whose license allows redistribution; each listed in `SOURCES.md` with origin and license. Never commit personal, customer or copyrighted documents.
 - External, `corpus-ext/`, downloaded by `scripts/fetch-corpus.sh` from the manifest `scripts/corpus-ext.tsv`, used in nightly runs only. Git sources are pinned by commit SHA and fetched as shallow, sparse, partial clones, so git verifies their content (GitHub does not guarantee stable checksums for generated archives, and a sparse clone fetches only the test data); archives are pinned by SHA-256.
   - Apache POI `test-data` (Apache-2.0): DOC, DOCX, XLS, XLSX, PPT, PPTX edge cases.
   - pdf.js `test/pdfs` (Apache-2.0), qpdf test files (Apache-2.0), PDFium testing corpus (BSD-3-Clause): broken and unusual PDFs.
