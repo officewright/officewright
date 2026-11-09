@@ -437,8 +437,9 @@ impl Translator<'_> {
     }
 }
 
-/// A font name cut to at most [`MAX_FONT_NAME`] bytes, at the end of a character.
-fn cut_name(name: &str) -> &str {
+/// A font name cut to at most [`MAX_FONT_NAME`] bytes, at the end of a character: the name
+/// the IR passes on, which the embedded fonts are added under too.
+pub(super) fn cut_name(name: &str) -> &str {
     let end = (0..=MAX_FONT_NAME.min(name.len()))
         .rev()
         .find(|&end| {
