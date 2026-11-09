@@ -1824,10 +1824,10 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-style-defaults-size-10-11-14.docx": {
-      "line_agreement": 0.7143,
-      "ssim_mean": 0.9643,
-      "ssim_min": 0.9643,
-      "text_score": 0.8857
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9945,
+      "ssim_min": 0.9945,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-style-defaults-size-13-12-14.docx": {
       "line_agreement": 1.0,
@@ -1836,16 +1836,16 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-style-defaults-size-14.docx": {
-      "line_agreement": 0.7143,
-      "ssim_mean": 0.9639,
-      "ssim_min": 0.9639,
-      "text_score": 0.8958
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9941,
+      "ssim_min": 0.9941,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-style-defaults-size-right-14.docx": {
-      "line_agreement": 0.8571,
-      "ssim_mean": 0.9642,
-      "ssim_min": 0.9642,
-      "text_score": 0.9773
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9945,
+      "ssim_min": 0.9945,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-style-defaults-size.docx": {
       "line_agreement": 1.0,
