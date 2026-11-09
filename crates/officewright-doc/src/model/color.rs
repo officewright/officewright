@@ -142,7 +142,13 @@ pub(crate) fn read_color(
             "comp" => TransformKind::Comp,
             "inv" => TransformKind::Inv,
             "gray" => TransformKind::Gray,
-            // The transforms of single channels and of gamma are not applied.
+            // The transforms of single channels are not applied; their values are checked.
+            "red" | "redMod" | "redOff" | "green" | "greenMod" | "greenOff" | "blue"
+            | "blueMod" | "blueOff" => {
+                value(transform, names, "val", percentage, report);
+                continue;
+            }
+            // Nor those of gamma, which have no value.
             _ => continue,
         };
         if transforms.len() == max_transforms {
