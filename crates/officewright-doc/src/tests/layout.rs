@@ -3436,6 +3436,45 @@ fn translates_notes_where_the_text_refers_to_them() {
 }
 
 #[test]
+fn passes_on_whether_a_note_s_own_mark_follows_its_reference() {
+    // A note whose own mark follows its reference (`w:customMarkFollows`) has no number of
+    // its own and takes none from the others (ECMA-376 Part 1, §17.11.14), which the
+    // layout learns from the IR.
+    let notes = |root: &str, note: &str| {
+        format!(
+            r#"<w:{root} xmlns:w="{W}"><w:{note} w:id="1"><w:p><w:r><w:t>one</w:t></w:r></w:p></w:{note}><w:{note} w:id="2"><w:p><w:r><w:t>two</w:t></w:r></w:p></w:{note}></w:{root}>"#
+        )
+    };
+    let body = r#"<w:p><w:r><w:footnoteReference w:customMarkFollows="1" w:id="1"/><w:t>*</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r><w:r><w:endnoteReference w:customMarkFollows="true" w:id="1"/><w:t>+</w:t></w:r><w:r><w:endnoteReference w:customMarkFollows="0" w:id="2"/></w:r><w:r><w:footnoteReference w:customMarkFollows="yes" w:id="2"/></w:r></w:p>"#;
+    let document = with_parts(
+        body,
+        &[
+            ("footnotes", "footnotes.xml", notes("footnotes", "footnote")),
+            ("endnotes", "endnotes.xml", notes("endnotes", "endnote")),
+        ],
+    );
+    let translation = translate(&document);
+    let custom_marks: Vec<bool> = paragraphs(&translation)[0]
+        .inlines()
+        .iter()
+        .filter_map(|inline| match inline {
+            ir::Inline::NoteReference { custom_mark, .. } => Some(*custom_mark),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(custom_marks, [true, false, true, false, false]);
+    // A value that is not ST_OnOff is reported and read as off.
+    let messages: Vec<&str> = document.diagnostics().iter().map(|d| d.message()).collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(
+        messages[0].ends_with(
+            r#"w:footnoteReference w:customMarkFollows="yes" is not valid; it is ignored"#
+        ),
+        "{messages:?}"
+    );
+}
+
+#[test]
 fn keeps_tables_in_notes_from_floating() {
     // Word ignores a w:tblpPr in a note (MS-OI29500 §17.4.57(b)).
     let table = r#"<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="margin" w:tblpY="100"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#;

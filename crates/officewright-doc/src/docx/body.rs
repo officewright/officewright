@@ -645,10 +645,24 @@ impl Reading<'_, '_, '_> {
                     self.invalid(&tag, "id", &value);
                     return self.keep(reader, mce, tag);
                 };
-                match local {
-                    "footnoteReference" => RunItem::FootnoteReference(id),
-                    "endnoteReference" => RunItem::EndnoteReference(id),
-                    _ => RunItem::CommentReference(id),
+                if local == "commentReference" {
+                    RunItem::CommentReference(id)
+                } else {
+                    // A note whose mark follows its reference has no number of its own and
+                    // takes none from the others (§17.11.14).
+                    let custom_mark = match self.w_attribute(&tag, "customMarkFollows") {
+                        None | Some("false" | "off" | "0") => false,
+                        Some("true" | "on" | "1") => true,
+                        Some(value) => {
+                            self.invalid(&tag, "customMarkFollows", value);
+                            false
+                        }
+                    };
+                    if local == "footnoteReference" {
+                        RunItem::FootnoteReference { id, custom_mark }
+                    } else {
+                        RunItem::EndnoteReference { id, custom_mark }
+                    }
                 }
             }
             _ => return self.keep(reader, mce, tag),

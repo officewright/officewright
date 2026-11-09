@@ -596,8 +596,16 @@ pub(crate) enum RunItem {
     },
     NoBreakHyphen,
     SoftHyphen,
-    FootnoteReference(i64),
-    EndnoteReference(i64),
+    /// The reference of the note with this id, and whether a mark of its own follows it
+    /// (`w:customMarkFollows`), in place of the number Word draws and counts.
+    FootnoteReference {
+        id: i64,
+        custom_mark: bool,
+    },
+    EndnoteReference {
+        id: i64,
+        custom_mark: bool,
+    },
     CommentReference(i64),
     NoteNumber,
     Separator,
