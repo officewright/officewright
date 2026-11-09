@@ -649,7 +649,7 @@ impl Reading<'_, '_, '_> {
                     RunItem::CommentReference(id)
                 } else {
                     // A note whose mark follows its reference has no number of its own and
-                    // takes none from the others (§17.11.14).
+                    // takes none from the others (§17.11.14, and §17.11.7 for endnotes).
                     let custom_mark = match self.w_attribute(&tag, "customMarkFollows") {
                         None | Some("false" | "off" | "0") => false,
                         Some("true" | "on" | "1") => true,
