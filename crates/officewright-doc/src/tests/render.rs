@@ -309,12 +309,34 @@ fn uses_an_embedded_font_under_the_name_of_the_font_that_embeds_it() {
     // The PDF holds the subset under the PostScript name Word keeps.
     assert!(names(&pdf, b"+OfficewrightTest"));
 
-    // A font name the font book cannot keep, longer than 512 bytes: the text cannot reach
-    // the program by it, and the report says so.
-    let long = "L".repeat(600);
+    // A font name longer than the IR keeps, past what the font book keeps too: the
+    // program answers to the name as the IR cuts it, which the text names.
+    for length in [300, 600] {
+        let long = "L".repeat(length);
+        let document = Document::from_bytes(package_with_body_and_fonts(
+            &format!(
+                r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="{long}" w:hAnsi="{long}"/></w:rPr><w:t>A</w:t></w:r></w:p>"#
+            ),
+            &font(&long, r#"<w:embedRegular r:id="rId1"/>"#),
+            &relationship("rId1", "fonts/font1.odttf"),
+            &[("word/fonts/font1.odttf", &program)],
+        ))
+        .unwrap();
+        let (pdf, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+        let listed = entries(&report);
+        assert!(names(&pdf, b"+OfficewrightTest"), "{length}: {listed:?}");
+        assert!(
+            listed.iter().all(|entry| !entry.contains("cannot reach")
+                && !(entry.contains("LLLL") && entry.contains("no font available"))),
+            "{length}: {listed:?}"
+        );
+    }
+
+    // A font name of white space only names nothing: the text cannot reach the program,
+    // the report says so, and nothing draws the text in the test font.
     let document = Document::from_bytes(package_with_body_and_fonts(
         &text_in_test_font("A"),
-        &font(&long, r#"<w:embedRegular r:id="rId1"/>"#),
+        &font("   ", r#"<w:embedRegular r:id="rId1"/>"#),
         &relationship("rId1", "fonts/font1.odttf"),
         &[("word/fonts/font1.odttf", &program)],
     ))
@@ -326,11 +348,13 @@ fn uses_an_embedded_font_under_the_name_of_the_font_that_embeds_it() {
         .find(|entry| entry.message().contains("holds a font named"))
         .unwrap_or_else(|| panic!("{listed:?}"));
     assert_eq!(entry.kind(), ReportKind::FontSubstituted);
+    assert_eq!(
+        entry.to_string(),
+        "document: the w:embedRegular of the font     holds a font named ___WRD_EMBED_S_17, \
+         which the text cannot reach by the font's name, so other fonts are used"
+    );
     assert!(
-        entry.message().ends_with(
-            "holds a font named ___WRD_EMBED_S_17, which the text cannot reach by the font's \
-             name, so other fonts are used"
-        ),
+        listed.iter().any(|entry| entry == NO_TEST_FONT),
         "{listed:?}"
     );
 
@@ -820,16 +844,20 @@ fn uses_an_embedded_font_without_a_family_name_and_reports_it_when_unreachable()
             .all(|entry| !entry.contains("Officewright Test")),
         "{listed:?}"
     );
-    // Under a font name the font book cannot keep, the report describes the program.
-    let (_, report) = embedding(&"L".repeat(600))
+    // Under a font name of white space only, the report describes the program, and
+    // nothing draws the text in the test font.
+    let (_, report) = embedding("   ")
         .save_pdf_bytes(&without_system_fonts())
         .unwrap();
     let listed = entries(&report);
     assert!(
-        listed.iter().any(|entry| entry.ends_with(
-            "holds a font without a family name, which the text cannot reach by the font's \
-             name, so other fonts are used"
-        )),
+        listed.iter().any(|entry| entry
+            == "document: the w:embedRegular of the font     holds a font without a family \
+                name, which the text cannot reach by the font's name, so other fonts are used"),
+        "{listed:?}"
+    );
+    assert!(
+        listed.iter().any(|entry| entry == NO_TEST_FONT),
         "{listed:?}"
     );
 }

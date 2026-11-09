@@ -28,10 +28,11 @@ impl Document {
     /// name of the font that embeds it (`w:font`'s `w:name`), or its own family,
     /// typographic family, full or PostScript name, or a named instance. So a subset Word
     /// embeds under a name of its own (`___WRD_EMBED_SUB_` and a number) is used for the
-    /// text in the font that embeds it (#216). A program the text cannot reach, under a
-    /// font name the font book cannot keep, is reported. At most 256 faces and named
-    /// instances of embedded fonts are used, and no program with a name longer than any
-    /// font's; the report says what is left out.
+    /// text in the font that embeds it (#216). A program several fonts embed answers to
+    /// the name of the first of them only, as it is added once. A program the text cannot
+    /// reach, under a font name that is empty or only white space, is reported. At most
+    /// 256 faces and named instances of embedded fonts are used, and no program with a
+    /// name longer than any font's; the report says what is left out.
     ///
     /// # Errors
     ///
@@ -190,9 +191,10 @@ impl Document {
                 }
                 // Whether the text reaches the program, asked of a book that holds only
                 // it, which is gone before the program goes into `fonts`.
-                let reach = reaches(&program.0, font.name());
-                match fonts.add_bytes_as(Arc::clone(&program.0), FontOrigin::Document, font.name())
-                {
+                // The name as the text names it: the IR cuts long font names.
+                let name = super::style::cut_name(font.name());
+                let reach = reaches(&program.0, name);
+                match fonts.add_bytes_as(Arc::clone(&program.0), FontOrigin::Document, name) {
                     Ok(_) => {
                         if let Some(Err(family)) = reach {
                             entries.push(ReportEntry::new(
@@ -375,8 +377,8 @@ fn scan(program: &[u8]) -> Scan {
 /// holding only the program finds a face by its family, an alias, another of its names
 /// or a named instance, or takes it for a metric-compatible substitute of the name;
 /// `Some(Err(family))` with the family the program holds, described for the report, when
-/// it does not, as when the book keeps no name so long; none when no font book can read
-/// it.
+/// it does not, as under a name that is empty or only white space; none when no font book
+/// can read it.
 fn reaches(program: &Arc<[u8]>, name: &str) -> Option<std::result::Result<(), String>> {
     let mut alone = FontBook::new();
     alone
