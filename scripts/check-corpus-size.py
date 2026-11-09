@@ -42,8 +42,8 @@ def main() -> int:
     for name in filter(None, listed.split("\0")):
         try:
             status = os.lstat(name)
-        except FileNotFoundError:
-            continue  # deleted from the working tree
+        except (FileNotFoundError, NotADirectoryError):
+            continue  # deleted from the working tree, or its folder replaced by a file
         if stat.S_ISLNK(status.st_mode):
             sizes[name] = len(os.fsencode(os.readlink(name)))
         elif stat.S_ISREG(status.st_mode):

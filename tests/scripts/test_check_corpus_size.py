@@ -49,8 +49,9 @@ class CheckCorpusSize(unittest.TestCase):
             self.git("add", "-f", "--", *sizes)
 
     def check(self, cwd=None):
-        # Git looks for a repository no higher than the throwaway one's parent.
-        env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(self.repo.parent)}
+        # Git looks for a repository no higher than the throwaway one's parent, and speaks
+        # English (LANGUAGE is ignored in the C locale).
+        env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(self.repo.parent), "LC_ALL": "C"}
         result = subprocess.run(
             [sys.executable, "-B", str(SCRIPT)], cwd=cwd or self.repo, capture_output=True,
             text=True, env=env,
@@ -69,16 +70,21 @@ class CheckCorpusSize(unittest.TestCase):
     def test_a_file_may_take_1_mb_and_no_byte_more(self):
         self.write({"tests/corpus/full.docx": MB})
         self.assertEqual(self.check()[0], 0)
-        # Listed by path, not by size.
-        self.write({"tests/corpus/b/over.png": 2 * MB, "tests/corpus/a/over.json": MB + 1})
+        # Listed by path, not by size either way.
+        self.write({
+            "tests/corpus/b/over.png": MB + 1,
+            "tests/corpus/a/over.json": MB + 2,
+            "tests/corpus/c/over.xml": MB + 3,
+        })
         code, out, err = self.check()
         self.assertEqual((code, out), (1, ""))
         self.assertEqual(
             err,
             "check-corpus-size: these files of tests/corpus are larger than its limit of "
             "1 MB (1,000,000 bytes) a file:\n"
-            "  tests/corpus/a/over.json: 1,000,001 bytes\n"
-            "  tests/corpus/b/over.png: 2,000,000 bytes\n",
+            "  tests/corpus/a/over.json: 1,000,002 bytes\n"
+            "  tests/corpus/b/over.png: 1,000,001 bytes\n"
+            "  tests/corpus/c/over.xml: 1,000,003 bytes\n",
         )
 
     def test_the_corpus_may_take_100_mb_and_no_byte_more(self):
@@ -120,6 +126,23 @@ class CheckCorpusSize(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertIn("in 1 files", out)
 
+    def test_a_tracked_file_whose_folder_became_a_file_counts_as_gone(self):
+        self.write({"tests/corpus/kept.docx": 10, "tests/corpus/d/gone.png": 2 * MB})
+        shutil.rmtree(self.repo / "tests/corpus/d")
+        (self.repo / "tests/corpus/d").write_bytes(b"x")
+        code, out, err = self.check()
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("in 1 files", out)
+
+    def test_a_submodule_is_not_counted(self):
+        self.write({"tests/corpus/kept.docx": 10})
+        (self.repo / "tests/corpus/sub").mkdir()
+        (self.repo / "tests/corpus/sub/large.bin").write_bytes(b"x" * (2 * MB))
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},tests/corpus/sub")
+        code, out, err = self.check()
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("in 1 files", out)
+
     def test_the_sizes_are_those_of_the_working_tree(self):
         self.write({"tests/corpus/a.docx": 10})
         (self.repo / "tests/corpus/a.docx").write_bytes(b"x" * (MB + 1))
@@ -136,9 +159,21 @@ class CheckCorpusSize(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertIn("0.00 MB in 1 files", out)
         self.assertIn("the largest file 0.00 MB", out)
+        # The link holds 23 bytes, which take files of 100 MB less 22 bytes one byte past
+        # the limit.
+        self.write({f"tests/corpus/{i:02}.png": MB for i in range(99)})
+        self.write({"tests/corpus/last.png": MB - 22})
+        code, _, err = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn("tests/corpus holds 100,000,001 bytes", err)
 
     def test_outside_a_repository_it_says_what_git_said(self):
-        code, out, err = self.check(cwd=self.repo.parent)
+        # A folder of its own next to the repository, below the ceiling, so that git finds
+        # no repository even when the temporary folder is inside one.
+        outside = Path(tempfile.mkdtemp(prefix="check-corpus-size-outside-"))
+        self.addCleanup(shutil.rmtree, outside)
+        self.assertEqual(outside.parent, self.repo.parent)
+        code, out, err = self.check(cwd=outside)
         self.assertEqual((code, out), (1, ""))
         self.assertTrue(err.startswith("check-corpus-size: git rev-parse failed: "), err)
         self.assertIn("not a git repository", err)
