@@ -129,6 +129,9 @@ try {
         $null = Invoke-WordStep $worker "`$global:kept = 'kept'" @() 10 { @() } $progress
         $kept = Invoke-WordStep $worker '$global:kept' @() 10 { @() } $progress
         Check 'steps share the worker''s session' ($kept.Status -eq 'done' -and $null -ne $kept.Output -and $kept.Output[0] -eq 'kept') $kept.Status
+        # And its thread: Word's objects belong to the single-threaded apartment that made them.
+        $threads = @(1, 2 | ForEach-Object { (Invoke-WordStep $worker '[System.Threading.Thread]::CurrentThread.ManagedThreadId' @() 10 { @() } $progress).Output[0] })
+        Check 'steps run on the worker''s thread' ($threads.Count -eq 2 -and $threads[0] -eq $threads[1]) ($threads -join ', ')
 
         # A call blocked until "Word" ends, as a COM call is: the time-out stops the process,
         # checks that it is gone, and the step ends with the step name in the message.
@@ -150,18 +153,20 @@ try {
         $worker.Dispose()
     }
 
-    # A call that stays blocked after the process was stopped: the step reports 'stuck'.
+    # A call that stays blocked after the process was stopped: the step reports 'stuck'. The
+    # call is one PowerShell cannot interrupt, as a COM call into a hung Word is; it ends by
+    # itself after 30 seconds. The step is reported after the time-out and the grace period of
+    # 15 seconds, without waiting for the call: disposing its PowerShell would wait until then.
     $worker = New-WordWorker $progress
     $dummy = Start-Dummy
     try {
         $clock = [System.Diagnostics.Stopwatch]::StartNew()
-        $result = Invoke-WordStep $worker '$progress.Step = ''saving''; Start-Sleep -Seconds 600' @() 2 { @($dummy.Id) } $progress
+        $result = Invoke-WordStep $worker '$progress.Step = ''saving''; [System.Threading.Thread]::Sleep(30000)' @() 2 { @($dummy.Id) } $progress
         $seconds = $clock.Elapsed.TotalSeconds
         Check 'a step still blocked after the stop is reported as stuck' ($result.Status -eq 'stuck') "$($result.Status): $($result.Message)"
-        Check 'being stuck is reported within its limits' ($seconds -lt 35) "$seconds s"
+        Check 'being stuck is reported without waiting for the blocked call' ($seconds -lt 25) "$seconds s"
     } finally {
         Stop-Dummy $dummy
-        $worker.Stop()
         $worker.Runspace.Dispose()
         $worker.Dispose()
     }
