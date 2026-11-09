@@ -10,8 +10,8 @@ use crate::model::NoteType;
 impl Translator<'_> {
     /// The IR note a reference to the note `id` names, added the first time; none,
     /// listed each time, for a reference inside a note, which the IR does not hold, or
-    /// inside a text box, where Word lets none be inserted (https://word.tips.net/T003416),
-    /// and for a note that does not exist or is not a normal note.
+    /// inside a text box, which Word ignores (MS-OI29500 2.1.302 b, 2.1.305 a), and for a
+    /// note that does not exist or is not a normal note.
     pub(super) fn note_reference(&mut self, endnote: bool, id: i64) -> Option<ir::NoteId> {
         let name = if endnote { "endnote" } else { "footnote" };
         if self.in_note || self.in_text_box {
