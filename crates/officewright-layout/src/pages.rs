@@ -1486,12 +1486,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         };
         let left = page.body.left;
         // The notes of the lines go on the page first, so that what the paragraph draws
-        // below its last line stops above them at the bottom of the page. Notes beneath the
-        // text start under its last line, and a bar tab reaching through the space after
-        // it crosses their separator: a hypothesis until a Word render, as no reference
-        // has both.
+        // below its last line stops above them at the bottom of the page, the space after
+        // the last note included. Notes beneath the text start under its last line, and a
+        // bar tab reaching through the space after it crosses their separator: a
+        // hypothesis until a Word render, as no reference has both.
         self.add_footnotes((flowed.section, paragraph), layout, lines.clone())?;
-        let bottom = self.text_bottom()?;
+        let bottom = self.notes_top()?;
         let height: f64 = layout
             .lines
             .get(lines.clone())
@@ -9218,8 +9218,9 @@ mod tests {
         use crate::ir::NotePosition;
         // A line referencing a note (20 to 40), then a table of rows of 20 pt: five rows
         // fit above the note's room (140), the other three go to the next page. With 10 pt
-        // after the note, the same: the space after gives way to the rows.
-        for after in [0.0, 10.0] {
+        // or 30 pt after the note, the same: the space after gives way to the rows, and only
+        // that space.
+        for after in [0.0, 10.0, 30.0] {
             let document = with_notes(
                 setup(),
                 NotePosition::PageBottom,
@@ -9432,29 +9433,36 @@ mod tests {
         use crate::ir::{NotePosition, TabKind, TabStop};
         // Five lines with a bar tab and 30 pt after, the last referencing a note: the bar
         // runs from 20 through the space after only down to the note's room (140), under
-        // which the separator is drawn.
+        // which the separator is drawn; with 15 pt after the note, down to 125, where the
+        // notes' room starts with that space.
         let bar = TabStop::default()
             .with_position(Pt(30.0))
             .with_kind(TabKind::Bar);
-        let document = with_notes(
-            setup(),
-            NotePosition::PageBottom,
-            Inline::separator,
-            |document, style, mark| {
-                let note = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
-                vec![referencing(
-                    style,
-                    (4, 0),
-                    &[note],
-                    spacing(0.0, 30.0).with_tabs([bar]),
-                )]
-            },
-        );
-        let (laid, _) = laid(&document, 10);
-        assert_eq!(
-            drawn_lines(&laid.expect("pages").pages[0]),
-            [(20.0, 140.0), (153.75, 153.75)]
-        );
+        for (after, drawn) in [
+            (0.0, [(20.0, 140.0), (153.75, 153.75)]),
+            (15.0, [(20.0, 125.0), (138.75, 138.75)]),
+        ] {
+            let document = with_notes(
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let note = footnote(document, (style, mark), 1, spacing(0.0, after));
+                    vec![referencing(
+                        style,
+                        (4, 0),
+                        &[note],
+                        spacing(0.0, 30.0).with_tabs([bar]),
+                    )]
+                },
+            );
+            let (laid, _) = laid(&document, 10);
+            assert_eq!(
+                drawn_lines(&laid.expect("pages").pages[0]),
+                drawn,
+                "{after}"
+            );
+        }
     }
 
     #[test]
@@ -9562,14 +9570,15 @@ mod tests {
         // Under five, the line (120 to 140) leaves 40 pt: the line stays, and the space
         // after gives way, the notes ending at the bottom. So does it to the lines after:
         // a paragraph of six lines under the referencing line puts five on the page, down
-        // to 140, as far as the note itself leaves room.
-        let lay = |filler: usize, after: usize| {
+        // to 140, as far as the note itself leaves room, and no more with 30 pt after the
+        // note, more than a line.
+        let lay = |filler: usize, after: usize, space: f64| {
             let document = with_notes(
                 setup(),
                 NotePosition::PageBottom,
                 Inline::separator,
                 |document, style, mark| {
-                    let note = footnote(document, (style, mark), 1, spacing(0.0, 10.0));
+                    let note = footnote(document, (style, mark), 1, spacing(0.0, space));
                     let mut blocks = Vec::new();
                     if filler > 0 {
                         blocks.push(lines(style, filler, spacing(0.0, 0.0)));
@@ -9593,25 +9602,28 @@ mod tests {
             let (separators, texts) = &pages[0];
             (separators.clone(), texts.last().cloned())
         };
-        let pages = lay(4, 0);
+        let pages = lay(4, 0, 10.0);
         assert_eq!(pages.len(), 1);
         assert_eq!(
             note_at(&pages),
             (vec![143.75], Some(("N".to_owned(), 166.0)))
         );
-        let pages = lay(5, 0);
+        let pages = lay(5, 0, 10.0);
         assert_eq!(pages.len(), 1);
         assert_eq!(
             note_at(&pages),
             (vec![153.75], Some(("N".to_owned(), 176.0)))
         );
-        let pages = lay(0, 6);
-        assert_eq!(pages.len(), 2);
-        assert_eq!(pages[0].1.len(), 1 + 5 + 2);
-        assert_eq!(
-            note_at(&pages),
-            (vec![153.75], Some(("N".to_owned(), 176.0)))
-        );
+        for space in [10.0, 30.0] {
+            let pages = lay(0, 6, space);
+            assert_eq!(pages.len(), 2);
+            assert_eq!(pages[0].1.len(), 1 + 5 + 2, "{space}");
+            assert_eq!(
+                note_at(&pages),
+                (vec![153.75], Some(("N".to_owned(), 176.0))),
+                "{space}"
+            );
+        }
     }
 
     #[test]

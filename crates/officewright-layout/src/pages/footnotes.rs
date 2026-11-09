@@ -144,6 +144,14 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         Ok(self.body()?.bottom.0 - needed)
     }
 
+    /// The top of the room the footnotes of the current page take at the bottom of its
+    /// body, the space after the last included, as far as nothing below its text takes it
+    /// yet.
+    pub(super) fn notes_top(&self) -> Result<f64> {
+        let room = self.footnotes.last().map_or(0.0, PageNotes::room);
+        Ok(self.body()?.bottom.0 - room)
+    }
+
     /// The footnotes that line `line` of `layout`, the layout of `paragraph`, references
     /// and no page holds yet, in order.
     fn line_footnotes(
