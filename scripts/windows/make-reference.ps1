@@ -398,18 +398,24 @@ function Invoke-WordStep($Worker, [string] $Script, [object[]] $Arguments, [int]
     #             and the worker gave up;
     #   'stuck'   with Message: the worker is still blocked after that; only ending this
     #             process frees it.
-    $Worker.Commands.Clear()
-    $Worker.Streams.ClearStreams()
-    [void]$Worker.AddScript($Script)
-    foreach ($argument in $Arguments) { [void]$Worker.AddArgument($argument) }
+    # Each step runs in a PowerShell of its own on the worker's runspace, which keeps Word's
+    # objects ($global:word) from one step to the next. A PowerShell whose invocation failed
+    # returns no output from its next one: the step that closes Word after Word did not start
+    # came back without its result, and reading it hid why Word did not start.
+    $step = [PowerShell]::Create()
+    $step.Runspace = $Worker.Runspace
+    [void]$step.AddScript($Script)
+    foreach ($argument in $Arguments) { [void]$step.AddArgument($argument) }
     $Progress.Step = ''
-    $handle = $Worker.BeginInvoke()
+    $handle = $step.BeginInvoke()
     if ($handle.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000)) {
         try {
-            $output = $Worker.EndInvoke($handle)
+            $output = $step.EndInvoke($handle)
             return New-Object PSObject -Property @{ Status = 'done'; Output = $output; Message = '' }
         } catch {
             return New-Object PSObject -Property @{ Status = 'error'; Output = $null; Message = (Get-InnerMessage $_.Exception) }
+        } finally {
+            $step.Dispose()
         }
     }
     $details = @()
@@ -417,9 +423,11 @@ function Invoke-WordStep($Worker, [string] $Script, [object[]] $Arguments, [int]
     if ($details.Count -eq 0) { $details += 'found no Word process of this script to stop' }
     $message = "no answer within $TimeoutSeconds seconds, during: $($Progress.Step); $($details -join '; ')"
     if ($handle.AsyncWaitHandle.WaitOne(15000)) {
-        try { [void]$Worker.EndInvoke($handle) } catch { }
+        try { [void]$step.EndInvoke($handle) } catch { }
+        $step.Dispose()
         return New-Object PSObject -Property @{ Status = 'timeout'; Output = $null; Message = $message }
     }
+    # Still blocked: disposing the PowerShell would wait for it.
     return New-Object PSObject -Property @{ Status = 'stuck'; Output = $null; Message = $message }
 }
 
