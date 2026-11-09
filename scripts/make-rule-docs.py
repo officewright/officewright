@@ -5886,10 +5886,11 @@ WHOLE = ((0, 0), (0, 21600), (21600, 21600), (21600, 0), (0, 0))
 POINTING_RIGHT = ((0, 0), (0, 21600), (21600, 10800), (0, 0))
 DIAMOND = ((10800, 0), (0, 10800), (10800, 21600), (21600, 10800), (10800, 0))
 MIDDLE_HALF = ((5400, 5400), (5400, 16200), (16200, 16200), (16200, 5400), (5400, 5400))
-# A C open to the right: the picture's left quarter, and its top and bottom quarters. Text
-# wrapped through may run into the opening, wrapped tight it may not.
-OPEN_RIGHT = ((0, 0), (0, 21600), (21600, 21600), (21600, 16200), (5400, 16200),
-              (5400, 5400), (21600, 5400), (21600, 0), (0, 0))
+# A U open at the top: arms an eighth of the picture wide on its left and right, joined by
+# a bar an eighth of it tall at its bottom. Text wrapped through may run into the opening
+# between the arms, wrapped tight it may not.
+OPEN_TOP = ((0, 0), (0, 21600), (21600, 21600), (21600, 0), (18900, 0), (18900, 18900),
+            (2700, 18900), (2700, 0), (0, 0))
 
 
 def wrap_tight(points: tuple[tuple[int, int], ...], edited: bool,
@@ -5940,9 +5941,9 @@ def wrap_square_doc() -> Doc:
                    space=spacing(before=12), keep_next=True, page_break_before=True)
               + para(wrapped_picture(10, ("margin", 0), wrap_square())
                      + run("The anchor of case 10, one line."), space=spacing(after=12))
-              + para(run(wrap_text(10, 12)), space=spacing(after=12))
+              + para(run(wrap_text(10, 4)), space=spacing(after=12))
               + para(run(" ".join(f"Text {k:02d} of case 10 wraps around the object."
-                                  for k in range(13, WRAP_SENTENCES + 1)))))
+                                  for k in range(5, WRAP_SENTENCES + 1)))))
     return Doc(
         "E-wrap-square",
         "Where Word puts text wrapped square (wp:wrapSquare) around a floating DrawingML "
@@ -5973,20 +5974,20 @@ def wrap_tight_doc() -> Doc:
         ("tight on both sides, at the left margin, the whole picture with distT and distB "
          "of 18 pt, which tight wrapping may ignore",
          wrapped_picture(6, ("margin", 0), wrap_tight(WHOLE, False), dist=(18, 18, 9, 9))),
-        ("tight on both sides, at the left margin, an edited polygon shaped as a C open to "
-         "the right (to compare with case 08)",
-         wrapped_picture(7, ("margin", 0), wrap_tight(OPEN_RIGHT, True))),
-        ("through (wp:wrapThrough) on both sides, at the left margin, the same C open to "
-         "the right: text may run into its opening",
-         wrapped_picture(8, ("margin", 0), wrap_tight(OPEN_RIGHT, True,
-                                                      element="wrapThrough"))),
+        ("tight on both sides, centred between the margins, an edited polygon shaped as a U "
+         "open at the top (to compare with case 08)",
+         wrapped_picture(7, ("margin", "center"), wrap_tight(OPEN_TOP, True))),
+        ("through (wp:wrapThrough) on both sides, centred between the margins, the same U "
+         "open at the top: text may run into its opening",
+         wrapped_picture(8, ("margin", "center"), wrap_tight(OPEN_TOP, True,
+                                                            element="wrapThrough"))),
     ]
     return Doc(
         "E-wrap-tight",
         "Where Word puts text wrapped tight (wp:wrapTight) and through (wp:wrapThrough) "
         "around a floating DrawingML picture of 108 x 108 pt, by its wrapping polygon (in the "
         "space of 21600 x 21600 of MS-OI29500 2.1.1354): the whole picture, a triangle, a "
-        "diamond, the middle half and a C open to the right, with square wrapping to compare, "
+        "diamond, the middle half and a U open at the top, with square wrapping to compare, "
         "and distances above and below",
         wrap_cases(cases) + para(run("End of the document.")),
         media=(WRAP_PICTURE,),
@@ -6107,11 +6108,11 @@ def wrap_vml_doc() -> Doc:
          vml_picture("image1.png", "w7", left + ";mso-wrap-distance-left:18pt;"
                      "mso-wrap-distance-top:18pt;mso-wrap-distance-right:18pt;"
                      "mso-wrap-distance-bottom:18pt", "square")),
-        ("through, at the left margin, wrapcoords of a C open to the right "
-         "(0 0, 0 21600, 21600 21600, 21600 16200, 5400 16200, 5400 5400, 21600 5400, "
-         "21600 0, 0 0)",
-         vml_picture("image1.png", "w8", left, "through",
-                     shape_attrs=' wrapcoords="' + " ".join(f"{x} {y}" for x, y in OPEN_RIGHT)
+        ("through, centred between the margins, wrapcoords of a U open at the top "
+         "(0 0, 0 21600, 21600 21600, 21600 0, 18900 0, 18900 18900, 2700 18900, 2700 0, 0 0)",
+         vml_picture("image1.png", "w8", floating("margin-left:0", ";mso-position-horizontal:"
+                                                  "center"), "through",
+                     shape_attrs=' wrapcoords="' + " ".join(f"{x} {y}" for x, y in OPEN_TOP)
                      + '"')),
         ("positioned absolutely at the left margin, no w10:wrap written",
          vml_picture("image1.png", "w9", left)),
@@ -6121,7 +6122,7 @@ def wrap_vml_doc() -> Doc:
         "Where Word puts text wrapped around a floating VML picture (w:pict, w10:wrap) of "
         "108 x 108 pt: square at the margin and centred, tight without and with wrapcoords, "
         "top and bottom, on the left side only, with wrap distances of 18 pt, through with "
-        "wrapcoords of a C, and with no w10:wrap",
+        "wrapcoords of a U, and with no w10:wrap",
         wrap_cases(cases) + para(run("End of the document.")),
         media=(WRAP_PICTURE,),
     )

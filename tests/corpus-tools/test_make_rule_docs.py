@@ -3183,8 +3183,8 @@ class Packages(unittest.TestCase):
         triangle = ((0, 0), (0, 21600), (21600, 10800), (0, 0))
         diamond = ((10800, 0), (0, 10800), (10800, 21600), (21600, 10800), (10800, 0))
         middle = ((5400, 5400), (5400, 16200), (16200, 16200), (16200, 5400), (5400, 5400))
-        open_right = ((0, 0), (0, 21600), (21600, 21600), (21600, 16200), (5400, 16200),
-                      (5400, 5400), (21600, 5400), (21600, 0), (0, 0))
+        open_top = ((0, 0), (0, 21600), (21600, 21600), (21600, 0), (18900, 0), (18900, 18900),
+                    (2700, 18900), (2700, 0), (0, 0))
         expected = {
             "E-wrap-square": [
                 ("wrapSquare", "bothSides", margin, top, usual, "0", (), None, square),
@@ -3210,8 +3210,10 @@ class Packages(unittest.TestCase):
                 ("wrapTight", "bothSides", margin, top, usual, "0", middle, "1", square),
                 ("wrapTight", "bothSides", margin, top, (18.0, 18.0, 9.0, 9.0), "0", whole,
                  "0", square),
-                ("wrapTight", "bothSides", margin, top, usual, "0", open_right, "1", square),
-                ("wrapThrough", "bothSides", margin, top, usual, "0", open_right, "1", square),
+                ("wrapTight", "bothSides", ("margin", "center"), top, usual, "0", open_top, "1",
+                 square),
+                ("wrapThrough", "bothSides", ("margin", "center"), top, usual, "0", open_top, "1",
+                 square),
             ],
             "E-wrap-top-bottom": [
                 ("wrapTopAndBottom", None, margin, top, usual, "0", (), None, (144.0, 72.0)),
@@ -3260,10 +3262,19 @@ class Packages(unittest.TestCase):
         texts = ["".join(t.text or "" for t in p.iter(f"{W}t")) for p in body.findall(f"{W}p")]
         at = next(i for i, text in enumerate(texts) if text.startswith("Case 10: "))
         self.assertEqual(texts[at + 1], "The anchor of case 10, one line.")
+        # Four sentences, short enough that the next paragraph starts beside the picture too.
         self.assertTrue(texts[at + 2].startswith("Text 01 of case 10 ")
-                        and texts[at + 2].endswith("Text 12 of case 10 wraps around the object."))
-        self.assertTrue(texts[at + 3].startswith("Text 13 of case 10 ")
+                        and texts[at + 2].endswith("Text 04 of case 10 wraps around the object."))
+        self.assertTrue(texts[at + 3].startswith("Text 05 of case 10 ")
                         and texts[at + 3].endswith("Text 24 of case 10 wraps around the object."))
+        # Each label is kept with the paragraph after it.
+        for name in expected:
+            doc = next(doc for doc in self.docs if doc.name == name)
+            labels = [p for p in ElementTree.fromstring(dict(rules.parts(doc))[
+                "word/document.xml"]).iter(f"{W}p")
+                if "".join(t.text or "" for t in p.iter(f"{W}t")).startswith("Case ")]
+            with self.subTest(name=name):
+                self.assertTrue(all(p.find(f"{W}pPr/{W}keepNext") is not None for p in labels))
         # Case 05 of E-wrap-top-bottom holds its anchor after the paragraph's third sentence.
         label, after = self.wrap_cases("E-wrap-top-bottom")[5]
         runs = after.findall(f"{W}r")
@@ -3304,6 +3315,7 @@ class Packages(unittest.TestCase):
                 wrap = ElementTree.Element("none")
             distances = tuple(style.get(f"mso-wrap-distance-{side}")
                               for side in ("left", "top", "right", "bottom"))
+            self.assertEqual(style.get("position"), "absolute")
             return (wrap.get("type"), wrap.get("side"), style.get("margin-left"),
                     style.get("mso-position-horizontal"), shape.get("wrapcoords"), distances,
                     int(style["z-index"]) < 0, shape.get("fillcolor"), shape.get("stroked"))
@@ -3317,8 +3329,8 @@ class Packages(unittest.TestCase):
             ("topAndBottom", None, "0", None, None, none, False, None, None),
             ("square", "left", "200pt", None, None, none, False, None, None),
             ("square", None, "0", None, None, ("18pt",) * 4, False, None, None),
-            ("through", None, "0", None,
-             "0 0 0 21600 21600 21600 21600 16200 5400 16200 5400 5400 21600 5400 21600 0 0 0",
+            ("through", None, "0", "center",
+             "0 0 0 21600 21600 21600 21600 0 18900 0 18900 18900 2700 18900 2700 0 0 0",
              none, False, None, None),
             (None, None, "0", None, None, none, False, None, None),
         ]
