@@ -374,7 +374,7 @@ Exit-Stuck 'test' ''
         return New-Object PSObject -Property @{ StoryType = $Type; Paragraphs = $Paragraphs; NextStoryRange = $Next }
     }
     $header2 = New-Story 7 @((New-Paragraph ('Second header' + [char]13) $runs $false 'Header B'))
-    $document = New-Object PSObject -Property @{ StoryRanges = @(
+    $document = New-Object PSObject -Property @{ Sections = @(); StoryRanges = @(
             (New-Story 1 @($listed, (New-Paragraph ('Body' + [char]13) $runs $true ''))),
             (New-Story 7 @((New-Paragraph ('Header' + [char]13) $runs $true '')) $header2),
             (New-Story 12 @((New-Paragraph ([string][char]3) $runs $true '')))
@@ -391,7 +391,7 @@ Exit-Stuck 'test' ''
     # paragraphs above take about 1 ms in all, and whether the clock ticked during that pass
     # decided the result (#166). The linked header and the second story must not be read
     # after the deadline either.
-    $sluggish = New-Object PSObject -Property @{ StoryRanges = @(
+    $sluggish = New-Object PSObject -Property @{ Sections = @(); StoryRanges = @(
             (New-Story 7 @(
                     (New-Paragraph ('First' + [char]13) $runs $true '' -ReadDelay 50),
                     (New-Paragraph ('Second' + [char]13) $runs $true '' -ReadDelay 50)
@@ -405,7 +405,7 @@ Exit-Stuck 'test' ''
     Check 'a document over its time budget is marked incomplete, without runs' ($late.complete -eq $false -and $lateStories.Count -eq 1 -and @($lateStories[0].paragraphs).Count -lt 2 -and $late.runs -eq $false -and $late.runs_note -eq 'not collected: the paragraphs did not fit in the time budget') "complete $($late.complete), runs $($late.runs), paragraphs per story $lateCounts, $($late.runs_note)"
     # The budget holds for the whole document, not for each story: each story here fits in
     # 1 s, both do not, and the last paragraph is reached 1.2 s or more after the start.
-    $twoStories = New-Object PSObject -Property @{ StoryRanges = @(
+    $twoStories = New-Object PSObject -Property @{ Sections = @(); StoryRanges = @(
             (New-Story 7 @(
                     (New-Paragraph ('First' + [char]13) $runs $true '' -ReadDelay 400),
                     (New-Paragraph ('Second' + [char]13) $runs $true '' -ReadDelay 400)
@@ -421,14 +421,96 @@ Exit-Stuck 'test' ''
     Check 'the time budget holds for the whole document, not for each story' ($overall.complete -eq $false) "complete $($overall.complete), paragraphs per story $overallCounts"
     $unchecked = (Export-Formatting $document 600 $theme $progress $false).Export
     Check 'runs are left out with a fixed note when the run reader failed its check' ($unchecked.complete -eq $true -and $unchecked.runs -eq $false -and $unchecked.runs_note -eq 'left out: Word failed the check of the run reader' -and -not $unchecked.stories[0].paragraphs[0].Contains('runs')) "$($unchecked.runs_note)"
-    $failing = New-Object PSObject -Property @{ StoryRanges = @((New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true '' 0 '' 99)))) }
+    $failing = New-Object PSObject -Property @{ Sections = @(); StoryRanges = @((New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true '' 0 '' 99)))) }
     $failed = Export-Formatting $failing 600 $theme $progress
     Check 'a failed run pass gives a fixed note; the message stays apart' ($failed.Export.runs -eq $false -and $failed.Export.runs_note -eq 'left out: reading them failed' -and $failed.RunError -like '*did not move*')
-    $slow = New-Object PSObject -Property @{ StoryRanges = @((New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true '' 0 '' 13 1500)))) }
+    $slow = New-Object PSObject -Property @{ Sections = @(); StoryRanges = @((New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true '' 0 '' 13 1500)))) }
     $clipped = (Export-Formatting $slow 1 $theme $progress).Export
     Check 'runs cut short by the time budget say so' ($clipped.complete -eq $true -and $clipped.runs -eq $false -and $clipped.runs_note -eq 'left out: they did not fit in the time budget') "$($clipped.runs_note)"
     $unresolved = @((Export-Formatting $document 600 $theme $progress).Unresolved)
     Check 'unresolved placeholders are reported apart' ($unresolved -contains '+Unbekannt' -and $unresolved -contains '+Kaputt' -and -not ($unresolved -contains '+Textkoerper'))
+    # A header or footer type that only later sections have is read through the sections
+    # (#464). The sections stand in for Word's where it matters here: StoryRanges holds the
+    # primary header of section 1, which has one, and no footer; section 1's primary header
+    # and footer exist (Word reports the primary ones as existing in every document), its
+    # footer an empty story the file does not have; section 2's are linked to section 1's;
+    # section 3 has its own primary, first-page and even-pages footers, and a primary header of
+    # its own of a type already read.
+    function New-HeaderFooter($Story, [bool] $Exists = $true, [bool] $Linked = $false) {
+        return New-Object PSObject -Property @{ Exists = $Exists; LinkToPrevious = $Linked; Range = $Story }
+    }
+    function New-HeadersFooters([hashtable] $Kinds) {
+        $collection = New-Object PSObject -Property @{ Kinds = $Kinds }
+        $collection | Add-Member -MemberType ScriptMethod -Name Item -Value { param($Kind) $this.Kinds[[int]$Kind] }
+        return $collection
+    }
+    function New-Section([int] $Index, [hashtable] $Headers, [hashtable] $Footers) {
+        return New-Object PSObject -Property @{ Index = $Index; Headers = (New-HeadersFooters $Headers); Footers = (New-HeadersFooters $Footers) }
+    }
+    # Word gives a range for a header or footer that does not exist as well.
+    $absent = New-HeaderFooter (New-Story 10 @((New-Paragraph ([string][char]13) $runs $true ''))) $false
+    $sectionHeader = New-HeaderFooter (New-Story 7 @((New-Paragraph ('Header' + [char]13) $runs $true '')))
+    $emptyFooter = New-HeaderFooter (New-Story 9 @((New-Paragraph ([string][char]13) $runs $true '')))
+    $ownFooter = New-HeaderFooter (New-Story 9 @(
+            (New-Paragraph ('Footer of section 3' + [char]13) $runs $true ''),
+            (New-Paragraph ('Its second line' + [char]13) $runs $true '')))
+    $firstFooter = New-HeaderFooter (New-Story 11 @((New-Paragraph ('First page' + [char]13) $runs $true '')))
+    $evenFooter = New-HeaderFooter (New-Story 8 @((New-Paragraph ('Even pages' + [char]13) $runs $true '')))
+    $linkedFooter = New-HeaderFooter (New-Story 9 @((New-Paragraph ([string][char]13) $runs $true ''))) $true $true
+    $linkedHeader = New-HeaderFooter (New-Story 7 @((New-Paragraph ('Header' + [char]13) $runs $true ''))) $true $true
+    $sectioned = New-Object PSObject -Property @{
+        StoryRanges = @(
+            (New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true ''))),
+            (New-Story 7 @((New-Paragraph ('Header' + [char]13) $runs $true '')))
+        )
+        Sections = @(
+            (New-Section 1 @{ 1 = $sectionHeader; 2 = $absent; 3 = $absent } @{ 1 = $emptyFooter; 2 = $absent; 3 = $absent }),
+            (New-Section 2 @{ 1 = $linkedHeader; 2 = $absent; 3 = $absent } @{ 1 = $linkedFooter; 2 = $absent; 3 = $absent }),
+            (New-Section 3 @{ 1 = $sectionHeader; 2 = $absent; 3 = $absent } @{ 1 = $ownFooter; 2 = $firstFooter; 3 = $evenFooter })
+        )
+    }
+    $bySection = (Export-Formatting $sectioned 600 $theme $progress).Export
+    $sectionNames = @($bySection.stories | ForEach-Object { "$($_.story)/$($_.instance)/$(@($_.paragraphs).Count)" }) -join ','
+    Check 'headers and footers only later sections have are read through the sections, not section 1''s' ($sectionNames -eq 'main/0/1,primary-header/0/1,primary-footer/0/2,first-page-footer/0/1,even-pages-footer/0/1') $sectionNames
+    Check 'their paragraphs are numbered per story and keep their runs' ($bySection.complete -eq $true -and $bySection.runs -eq $true -and $bySection.stories[2].paragraphs[1].index -eq 1 -and @($bySection.stories[2].paragraphs[1].runs).Count -eq 3) "complete $($bySection.complete), runs $($bySection.runs)"
+    # Two later sections with footers of their own of one type are two instances, in order.
+    $thirdFooter = New-HeaderFooter (New-Story 9 @((New-Paragraph ('Footer of section 3' + [char]13) $runs $true '')))
+    $twoFooters = New-Object PSObject -Property @{
+        StoryRanges = @((New-Story 1 @((New-Paragraph ('Body' + [char]13) $runs $true ''))))
+        Sections = @(
+            (New-Section 1 @{ 1 = $absent; 2 = $absent; 3 = $absent } @{ 1 = $emptyFooter; 2 = $absent; 3 = $absent }),
+            (New-Section 2 @{ 1 = $absent; 2 = $absent; 3 = $absent } @{ 1 = $ownFooter; 2 = $absent; 3 = $absent }),
+            (New-Section 3 @{ 1 = $absent; 2 = $absent; 3 = $absent } @{ 1 = $thirdFooter; 2 = $absent; 3 = $absent })
+        )
+    }
+    $twoNames = @((Export-Formatting $twoFooters 600 $theme $progress).Export.stories | ForEach-Object { "$($_.story)/$($_.instance)/$(@($_.paragraphs).Count)" }) -join ','
+    Check 'footers of two later sections are two instances of the story' ($twoNames -eq 'main/0/1,primary-footer/0/2,primary-footer/1/1') $twoNames
+    # The time budget holds for the stories read through the sections too.
+    $slowFooter = New-HeaderFooter (New-Story 9 @(
+            (New-Paragraph ('Slow' + [char]13) $runs $true '' -ReadDelay 50),
+            (New-Paragraph ('Slower' + [char]13) $runs $true '' -ReadDelay 50)))
+    $slowSections = New-Object PSObject -Property @{
+        StoryRanges = @()
+        Sections = @(
+            (New-Section 1 @{ 1 = $absent; 2 = $absent; 3 = $absent } @{ 1 = $emptyFooter; 2 = $absent; 3 = $absent }),
+            (New-Section 2 @{ 1 = $absent; 2 = $absent; 3 = $absent } @{ 1 = $slowFooter; 2 = $absent; 3 = $absent })
+        )
+    }
+    $slowExport = (Export-Formatting $slowSections 0 $theme $progress).Export
+    Check 'a footer read through the sections after the deadline marks the export incomplete' ($slowExport.complete -eq $false -and @($slowExport.stories[0].paragraphs).Count -lt 2) "complete $($slowExport.complete)"
+    # Nor are the sections read once StoryRanges' stories ran past the deadline.
+    $lateStories = New-Object PSObject -Property @{
+        StoryRanges = @((New-Story 1 @(
+                    (New-Paragraph ('Slow' + [char]13) $runs $true '' -ReadDelay 50),
+                    (New-Paragraph ('Slower' + [char]13) $runs $true '' -ReadDelay 50))))
+        Sections = @(
+            (New-Section 1 @{ 1 = $absent; 2 = $absent; 3 = $absent } @{ 1 = $emptyFooter; 2 = $absent; 3 = $absent }),
+            (New-Section 2 @{ 1 = $absent; 2 = $absent; 3 = $absent } @{ 1 = $ownFooter; 2 = $absent; 3 = $absent })
+        )
+    }
+    $lateExport = (Export-Formatting $lateStories 0 $theme $progress).Export
+    $lateNames = @($lateExport.stories | ForEach-Object { $_.story }) -join ','
+    Check 'no section is read once the stories of StoryRanges ran past the deadline' ($lateExport.complete -eq $false -and $lateNames -eq 'main') $lateNames
     # The worker has only the functions' text: in a runspace of its own, the export of a
     # document must find every function it calls.
     $isolated = [PowerShell]::Create()

@@ -2275,8 +2275,8 @@ def word_export(parts, runs=True, texts=None):
 
 
 class Formatting(Import):
-    def add_v3(self, export=None, **changes):
-        doc = rules.documents()[0]
+    def add_v3(self, export=None, doc=None, **changes):
+        doc = doc or rules.documents()[0]
         record = self.add_result(doc)
         parts = importer.read_parts(self.results / record["resaved_file"])
         export = export if export is not None else word_export(parts)
@@ -2451,6 +2451,33 @@ class Formatting(Import):
                 self.add_v3(export, **changes)
                 self.assertIn(message.split(" (")[0], self.refused())
 
+    def test_a_complete_export_needs_every_header_and_footer_story_it_reads(self):
+        # E-header-tall's sections have a header and a footer of their own (#464).
+        doc = next(d for d in rules.documents() if d.name == "E-header-tall")
+        record = self.add_result(doc)
+        parts = importer.read_parts(self.results / record["resaved_file"])
+        self.assertEqual(importer.header_footer_stories(parts), {"primary-header",
+                                                                  "primary-footer"})
+        without = word_export(parts)
+        self.add_v3(without, doc=doc)
+        message = self.refused()
+        self.assertIn("formatting.json has no primary-footer story, which the re-saved copy has",
+                      message)
+        self.assertIn("make-reference.ps1 -FormattingOnly", message)
+        # An export that ran out of time may lack it.
+        incomplete = word_export(parts)
+        incomplete["complete"] = False
+        self.add_v3(incomplete, doc=doc)
+        self.run_import(dry_run=True)
+        # With the footer it imports.
+        complete = word_export(parts)
+        footer = dict(complete["stories"][1], story="primary-footer")
+        complete["stories"].append(footer)
+        self.add_v3(complete, doc=doc)
+        self.run_import()
+        stories = [s["story"] for s in self.committed(doc)["stories"]]
+        self.assertEqual(stories, ["main", "primary-header", "primary-footer"])
+
     def test_runs_are_dropped_to_stay_under_the_size_limit(self):
         doc, _ = self.add_v3()
         limit = importer.MAX_FORMATTING_BYTES
@@ -2480,6 +2507,61 @@ class Formatting(Import):
         self.run_import()
         folder = self.corpus / "reference" / "word-rules" / rules.documents()[0].name
         self.assertFalse((folder / "formatting.json").exists())
+
+
+class HeaderFooterStories(unittest.TestCase):
+    """The header and footer stories of a re-saved copy that its formatting export must hold."""
+
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+    def parts(self, sections, settings=""):
+        """A main part whose sections hold these children of w:sectPr, and settings."""
+        body = "".join(f"<w:p><w:pPr><w:sectPr>{s}</w:sectPr></w:pPr></w:p>"
+                       for s in sections[:-1])
+        document = (f'<w:document xmlns:w="{self.W}" xmlns:r="{self.R}"><w:body>{body}'
+                    f"<w:sectPr>{sections[-1]}</w:sectPr></w:body></w:document>")
+        return {
+            "word/document.xml": document.encode(),
+            "word/settings.xml": f'<w:settings xmlns:w="{self.W}">{settings}</w:settings>'.encode(),
+        }
+
+    @staticmethod
+    def reference(kind, ref_type):
+        return f'<w:{kind}Reference w:type="{ref_type}" r:id="rId{kind}{ref_type}"/>'
+
+    def test_each_kind_of_reference_of_any_section_counts(self):
+        header, footer = self.reference("header", "default"), self.reference("footer", "default")
+        parts = self.parts(["", header, footer])
+        self.assertEqual(importer.header_footer_stories(parts), {"primary-header",
+                                                                  "primary-footer"})
+        self.assertEqual(importer.header_footer_stories(self.parts([""])), set())
+
+    def test_a_first_page_one_counts_only_in_a_section_with_a_title_page(self):
+        first = self.reference("footer", "first")
+        self.assertEqual(importer.header_footer_stories(self.parts([first])), set())
+        for title in ("<w:titlePg/>", '<w:titlePg w:val="1"/>', '<w:titlePg w:val="on"/>'):
+            with self.subTest(title=title):
+                parts = self.parts([first + title, ""])
+                self.assertEqual(importer.header_footer_stories(parts), {"first-page-footer"})
+        for off in ('<w:titlePg w:val="0"/>', '<w:titlePg w:val="false"/>',
+                    '<w:titlePg w:val="off"/>'):
+            with self.subTest(off=off):
+                parts = self.parts([first + off])
+                self.assertEqual(importer.header_footer_stories(parts), set())
+        # The title page of another section does not show this section's.
+        parts = self.parts([first, "<w:titlePg/>"])
+        self.assertEqual(importer.header_footer_stories(parts), set())
+
+    def test_an_even_pages_one_counts_only_with_even_and_odd_headers(self):
+        even = self.reference("header", "even")
+        self.assertEqual(importer.header_footer_stories(self.parts([even])), set())
+        parts = self.parts([even], "<w:evenAndOddHeaders/>")
+        self.assertEqual(importer.header_footer_stories(parts), {"even-pages-header"})
+        for off in ('<w:evenAndOddHeaders w:val="0"/>', '<w:evenAndOddHeaders w:val="off"/>'):
+            with self.subTest(off=off):
+                parts = self.parts([even], off)
+                self.assertEqual(importer.header_footer_stories(parts), set())
 
 
 class BodyParagraphs(unittest.TestCase):
