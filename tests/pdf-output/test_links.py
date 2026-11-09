@@ -1,6 +1,7 @@
 """Checks the PDF that officewright-pdf's example `links` writes: links to a URI and to
-named destinations on three pages, and 153 named destinations, more than one node of the
-name tree holds. With tools that share no code with it:
+named destinations on three pages, and 156 named destinations, more than one node of the
+name tree holds, among them names whose UTF-8 forms sort otherwise than their keys. With
+tools that share no code with it:
 
 - qpdf validates the file structure, and its JSON gives each page's link annotations and
   the name tree, which this test walks to find the page of each link's destination;
@@ -22,6 +23,9 @@ from test_embedded_fonts import run
 # Each named destination the example adds: its page, from 1, and its point.
 DESTINATIONS = {
     "Start": (1, 72, 800),
+    "Résumé": (1, 72, 640),
+    "Zeta": (1, 72, 620),
+    "_Toc123": (1, 72, 600),
     **{f"d{i:03}": (2, 36, 800 - 5 * i) for i in range(150)},
     "Appendix": (3, 72, 770.25),
     "Глава": (3, 0, 400),
@@ -32,6 +36,7 @@ LINKS = [
     [
         ([72, 700, 192, 714.5], ("uri", "https://example.com/a%20b/(%D0%96)")),
         ([72, 680, 152, 694], ("dest", "Appendix")),
+        ([72, 660, 152, 674], ("dest", "Résumé")),
     ],
     [],
     [
@@ -39,6 +44,14 @@ LINKS = [
         ([300, 300, 400, 320], ("dest", "Start")),
     ],
 ]
+
+
+def key(name):
+    """The key the file stores for a destination's name: printable ASCII but "%" as it is,
+    every other byte of its UTF-8 form as "%XX"."""
+    return "".join(
+        chr(byte) if 0x20 <= byte <= 0x7E and byte != 0x25 else f"%{byte:02X}" for byte in name.encode("utf-8")
+    )
 
 
 def text(value):
@@ -94,6 +107,7 @@ class LinksTest(unittest.TestCase):
                 else:
                     target = ("dest", text(link["/Dest"]))
                 links.append((link["/Rect"], target))
+            expected = [(rect, (kind, key(name) if kind == "dest" else name)) for rect, (kind, name) in expected]
             self.assertEqual(links, expected, f"page {number}")
 
     def names(self, node, depth=0):
@@ -122,17 +136,17 @@ class LinksTest(unittest.TestCase):
         # More names than one node holds.
         self.assertIn("/Kids", root)
         entries = self.names(catalog["/Names"]["/Dests"])
-        names = [name for name, _ in entries]
-        keys = [name.encode("ascii") if name.isascii() else b"\xfe\xff" + name.encode("utf-16-be") for name in names]
-        # Sorted by their bytes as the file stores them.
+        keys = [name for name, _ in entries]
+        # Printable ASCII, sorted alike as bytes and as text.
+        self.assertTrue(all(" " <= c <= "~" for k in keys for c in k), keys)
         self.assertEqual(keys, sorted(keys))
         found = {name: (self.pages.index(page) + 1, x, y) for name, (page, _, x, y, _) in entries}
-        self.assertEqual(found, DESTINATIONS)
+        self.assertEqual(found, {key(name): place for name, place in DESTINATIONS.items()})
         # Every link to a destination finds it.
         for links in LINKS:
             for _, (kind, name) in links:
                 if kind == "dest":
-                    self.assertIn(name, found)
+                    self.assertIn(key(name), found)
 
     def test_pdfinfo_lists_every_destination(self):
         lines = run(["pdfinfo", "-dests", str(self.pdf)]).stdout.decode("utf-8").splitlines()
@@ -143,12 +157,12 @@ class LinksTest(unittest.TestCase):
             self.assertIsNotNone(match, line)
             page, x, y, name = match.groups()
             listed[name] = (int(page), float(x), float(y))
-        self.assertEqual(listed.keys(), DESTINATIONS.keys())
+        self.assertEqual(listed.keys(), {key(name) for name in DESTINATIONS})
         for name, (page, x, y) in DESTINATIONS.items():
             # pdfinfo prints whole points.
-            self.assertEqual(listed[name][0], page, name)
-            self.assertLessEqual(abs(listed[name][1] - x), 1, name)
-            self.assertLessEqual(abs(listed[name][2] - y), 1, name)
+            self.assertEqual(listed[key(name)][0], page, name)
+            self.assertLessEqual(abs(listed[key(name)][1] - x), 1, name)
+            self.assertLessEqual(abs(listed[key(name)][2] - y), 1, name)
 
 
 if __name__ == "__main__":

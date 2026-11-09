@@ -33,7 +33,8 @@ pub enum LinkTarget {
     Uri(String),
     /// Goes to the named destination of this name, which a page of the same document adds
     /// with [`Page::add_destination`](crate::Page::add_destination), before or after the
-    /// link (12.3.2.3).
+    /// link (12.3.2.3). The file stores the name as
+    /// [`add_destination`](crate::Page::add_destination) says.
     Destination(String),
 }
 
@@ -74,7 +75,7 @@ impl Link {
         check_position(right, top)?;
         let target = match target {
             LinkTarget::Uri(uri) => {
-                let encoded = percent_encode(uri);
+                let encoded = uri_key(uri);
                 check_length("URI length in bytes", encoded.len())?;
                 Target::Uri(encoded)
             }
@@ -111,7 +112,8 @@ impl Link {
                 out.extend_from_slice(b" >>");
             }
             Target::Destination { key, .. } => {
-                out.extend_from_slice(format!("/Dest {}", hex_string(key)).as_bytes());
+                out.extend_from_slice(b"/Dest ");
+                push_string(&mut out, key);
             }
         }
         out.extend_from_slice(b" >>");
@@ -223,7 +225,7 @@ impl<'a> Destinations<'a> {
                             let _ = write!(
                                 out,
                                 "\n{} [{} 0 R /XYZ {} {} null]",
-                                hex_string(&destination.key),
+                                literal(&destination.key),
                                 page_object(*page),
                                 number(destination.x),
                                 number(destination.y)
@@ -244,9 +246,7 @@ impl<'a> Destinations<'a> {
                     let key = |entry: usize| {
                         self.entries
                             .get(entry)
-                            .map_or_else(String::new, |(destination, _)| {
-                                hex_string(&destination.key)
-                            })
+                            .map_or_else(String::new, |(destination, _)| literal(&destination.key))
                     };
                     let _ = write!(
                         out,
@@ -315,10 +315,15 @@ fn tree(count: usize, leaf: usize, fanout: usize) -> Vec<Node> {
 }
 
 /// `uri` as a URI: each byte of its UTF-8 form outside `!` to `~` as `%XX`.
-fn percent_encode(uri: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(uri.len());
-    for &byte in uri.as_bytes() {
-        if (b'!'..=b'~').contains(&byte) {
+fn uri_key(uri: &str) -> Vec<u8> {
+    percent_encode(uri, |byte| (b'!'..=b'~').contains(&byte))
+}
+
+/// `text` with each byte of its UTF-8 form that `keep` refuses written as `%XX`.
+fn percent_encode(text: &str, keep: impl Fn(u8) -> bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    for &byte in text.as_bytes() {
+        if keep(byte) {
             out.push(byte);
         } else {
             out.extend_from_slice(format!("%{byte:02X}").as_bytes());
@@ -327,16 +332,13 @@ fn percent_encode(uri: &str) -> Vec<u8> {
     out
 }
 
-/// `name` as a text string (7.9.2.2): as it is when every character is printable ASCII,
-/// else in UTF-16BE with a byte order mark.
+/// `name` as a key of the name tree: printable ASCII as it is, but for `%`, and every
+/// other byte of its UTF-8 form as `%XX`. The keys are sorted by their bytes (7.9.6), and
+/// readers that compare them as text, as qpdf does, put printable ASCII in the same order,
+/// where text strings in UTF-16 would sort apart from the others. `%` itself is encoded,
+/// so that no two names share a key.
 fn name_key(name: &str) -> Result<Vec<u8>> {
-    let key = if name.bytes().all(|byte| (b' '..=b'~').contains(&byte)) {
-        name.as_bytes().to_vec()
-    } else {
-        let mut key = vec![0xFE, 0xFF];
-        key.extend(name.encode_utf16().flat_map(u16::to_be_bytes));
-        key
-    };
+    let key = percent_encode(name, |byte| byte != b'%' && (b' '..=b'~').contains(&byte));
     check_length("destination name length in bytes", key.len())?;
     Ok(key)
 }
@@ -346,15 +348,12 @@ fn check_length(what: &'static str, length: usize) -> Result<()> {
     check_range(what, length as f64, 1.0, MAX_STRING_BYTES as f64)
 }
 
-/// `bytes` as a hexadecimal string.
-fn hex_string(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(2 + 2 * bytes.len());
-    out.push('<');
-    for byte in bytes {
-        let _ = write!(out, "{byte:02X}");
-    }
-    out.push('>');
-    out
+/// `key` as a literal string.
+fn literal(key: &[u8]) -> String {
+    let mut out = Vec::with_capacity(key.len() + 2);
+    push_string(&mut out, key);
+    // push_string writes printable ASCII only.
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -464,26 +463,27 @@ mod tests {
     #[test]
     fn percent_encodes_what_a_uri_cannot_hold() {
         assert_eq!(
-            percent_encode("https://example.com/a b?q=%41&x=~!"),
+            uri_key("https://example.com/a b?q=%41&x=~!"),
             b"https://example.com/a%20b?q=%41&x=~!"
         );
-        assert_eq!(percent_encode("\t\u{7f}é"), b"%09%7F%C3%A9");
+        assert_eq!(uri_key("\t\u{7f}é"), b"%09%7F%C3%A9");
         assert_eq!(
-            percent_encode("https://пр.укр/ж"),
+            uri_key("https://пр.укр/ж"),
             b"https://%D0%BF%D1%80.%D1%83%D0%BA%D1%80/%D0%B6"
         );
-        assert_eq!(percent_encode("\u{1F600}"), b"%F0%9F%98%80");
+        assert_eq!(uri_key("\u{1F600}"), b"%F0%9F%98%80");
     }
 
     #[test]
-    fn names_are_ascii_or_utf16_text_strings() {
+    fn names_are_keys_of_printable_ascii() {
         assert_eq!(name_key("Appendix A").unwrap(), b"Appendix A");
-        assert_eq!(name_key(" ~").unwrap(), b" ~");
-        // A tab is not printable, so the name is UTF-16, which no printable ASCII name
-        // can be mistaken for.
-        assert_eq!(name_key("a\tb").unwrap(), b"\xFE\xFF\0a\0\t\0b");
-        assert_eq!(name_key("Ж").unwrap(), b"\xFE\xFF\x04\x16");
-        assert_eq!(name_key("\u{1F600}").unwrap(), b"\xFE\xFF\xD8\x3D\xDE\x00");
+        assert_eq!(name_key(" (~)").unwrap(), b" (~)");
+        assert_eq!(name_key("a\tb\u{7f}").unwrap(), b"a%09b%7F");
+        assert_eq!(name_key("Ж").unwrap(), b"%D0%96");
+        assert_eq!(name_key("\u{1F600}").unwrap(), b"%F0%9F%98%80");
+        // `%` is encoded too, so a name that looks encoded keeps a key of its own.
+        assert_eq!(name_key("100%").unwrap(), b"100%25");
+        assert_ne!(name_key("%D0%96").unwrap(), name_key("Ж").unwrap());
     }
 
     #[test]
@@ -501,12 +501,17 @@ mod tests {
             "destination name length in bytes",
             32768.0,
         );
-        // Two bytes of byte order mark and two for each UTF-16 code unit.
-        assert_eq!(name_key(&"ж".repeat(16382)).unwrap().len(), 32766);
+        // Three bytes for each byte of UTF-8 that is not printable ASCII, and for `%`.
+        assert_eq!(name_key(&"ж".repeat(5461)).unwrap().len(), 32766);
         refused(
-            name_key(&"ж".repeat(16383)),
+            name_key(&"ж".repeat(5462)),
             "destination name length in bytes",
-            32768.0,
+            32772.0,
+        );
+        refused(
+            name_key(&"%".repeat(10923)),
+            "destination name length in bytes",
+            32769.0,
         );
     }
 }

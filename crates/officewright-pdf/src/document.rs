@@ -930,13 +930,18 @@ impl Page {
     /// name, but a document has only one destination of each. See
     /// [`add_link`](Self::add_link) for an example.
     ///
+    /// The file stores a name in printable ASCII: each printable ASCII character but `%`
+    /// as it is, and every other byte of the name's UTF-8 form as `%XX`, so that "Résumé" is
+    /// `R%C3%A9sum%C3%A9`. Every reader then sorts the names alike, whether it compares them as
+    /// bytes or as text, and finds each.
+    ///
     /// # Errors
     ///
     /// [`Error::InvalidPosition`] if the point is outside -32767 to 32767 pt, and
     /// [`Error::OutOfRange`] if the name is empty or longer than 32767 bytes as written: a
-    /// byte for each character when all are printable ASCII, else two for each UTF-16 code
-    /// unit and two more. Two destinations of one name make [`Document::write_to`] fail
-    /// with [`Error::DuplicateDestination`]. On error the page is unchanged.
+    /// byte for each printable ASCII character but `%`, and three for each other byte of
+    /// its UTF-8 form. Two destinations of one name make [`Document::write_to`] fail with
+    /// [`Error::DuplicateDestination`]. On error the page is unchanged.
     pub fn add_destination(&mut self, name: &str, x: Pt, y: Pt) -> Result<()> {
         self.destinations.push(Destination::new(name, x, y)?);
         Ok(())
@@ -1909,11 +1914,11 @@ mod tests {
             .unwrap();
         doc.add_page(PageSize::A4).unwrap();
         let third = doc.add_page(PageSize::LETTER).unwrap();
-        // Added after the link to it, and before the name that sorts first.
-        third.add_destination("Глава", Pt(0.0), Pt(400.0)).unwrap();
+        // Added after the link to it, and before the name that sorts first, "%D0%93…".
         third
             .add_destination("Appendix", Pt(72.0), Pt(770.25))
             .unwrap();
+        third.add_destination("Глава", Pt(0.0), Pt(400.0)).unwrap();
         let chapter = LinkTarget::Destination("Глава".to_owned());
         third
             .add_link(Pt(-10.0), Pt(0.0), Pt(20.0), Pt(10.0), &chapter)
@@ -1944,18 +1949,18 @@ mod tests {
         assert_eq!(
             object(&pdf, 10),
             "10 0 obj\n<< /Type /Annot /Subtype /Link /Rect [72 680 152 694] /Border [0 0 0] \
-             /Dest <417070656E646978> >>\n"
+             /Dest (Appendix) >>\n"
         );
         assert_eq!(
             object(&pdf, 11),
             "11 0 obj\n<< /Type /Annot /Subtype /Link /Rect [-10 0 10 10] /Border [0 0 0] \
-             /Dest <FEFF0413043B043004320430> >>\n"
+             /Dest (%D0%93%D0%BB%D0%B0%D0%B2%D0%B0) >>\n"
         );
         // Sorted by their bytes, and the root has no limits.
         assert_eq!(
             object(&pdf, 12),
-            "12 0 obj\n<< /Names [\n<417070656E646978> [7 0 R /XYZ 72 770.25 null]\n\
-             <FEFF0413043B043004320430> [7 0 R /XYZ 0 400 null]\n] >>\n"
+            "12 0 obj\n<< /Names [\n(%D0%93%D0%BB%D0%B0%D0%B2%D0%B0) [7 0 R /XYZ 0 400 null]\n\
+             (Appendix) [7 0 R /XYZ 72 770.25 null]\n] >>\n"
         );
     }
 
@@ -1989,7 +1994,7 @@ mod tests {
         assert!(!pdf.contains("/Annots"));
         assert_eq!(
             object(&pdf, 6),
-            "6 0 obj\n<< /Names [\n<746F70> [4 0 R /XYZ 0 841.89 null]\n] >>\n"
+            "6 0 obj\n<< /Names [\n(top) [4 0 R /XYZ 0 841.89 null]\n] >>\n"
         );
     }
 
@@ -2019,12 +2024,7 @@ mod tests {
         let pdf = doc.to_bytes().unwrap();
         assert_xref_is_right(&pdf);
         let pdf = String::from_utf8_lossy(&pdf);
-        let key = |i: usize| {
-            format!("d{i:03}")
-                .bytes()
-                .map(|b| format!("{b:02X}"))
-                .collect::<String>()
-        };
+        let key = |i: usize| format!("d{i:03}");
         // Pages and contents are 3 to 6, the links 7 to 206, the tree 207 to 211: a root
         // above four leaves of 64, 64, 64 and 8 names.
         assert!(object(&pdf, 1).contains("/Names << /Dests 207 0 R >>"));
@@ -2034,23 +2034,66 @@ mod tests {
         );
         for (leaf, names) in [0..64, 64..128, 128..192, 192..200].into_iter().enumerate() {
             let node = object(&pdf, 208 + leaf);
-            let listed: Vec<&str> = node
-                .lines()
-                .filter(|line| line.starts_with('<') && !line.starts_with("<<"))
-                .collect();
+            let listed: Vec<&str> = node.lines().filter(|line| line.starts_with('(')).collect();
             assert_eq!(listed.len(), names.len());
             for (line, i) in listed.iter().zip(names.clone()) {
                 let page = 3 + 2 * (i / 100);
                 assert_eq!(
                     *line,
-                    format!("<{}> [{page} 0 R /XYZ 1 {} null]", key(i), i % 100)
+                    format!("({}) [{page} 0 R /XYZ 1 {} null]", key(i), i % 100)
                 );
             }
             assert!(node.ends_with(&format!(
-                "] /Limits [<{}> <{}>] >>\n",
+                "] /Limits [({}) ({})] >>\n",
                 key(names.start),
                 key(names.end - 1)
             )));
+        }
+    }
+
+    #[test]
+    fn sorts_names_the_same_as_bytes_and_as_text() {
+        // Names whose UTF-8 forms sort otherwise than their keys, and keys that would sort
+        // otherwise as bytes than as text if they were text strings in UTF-16.
+        let names = [
+            "Zeta",
+            "Résumé",
+            "_Toc123",
+            "Éclair",
+            "\u{FB00}",
+            "\u{1F600}x",
+            "100%",
+        ];
+        let mut doc = Document::new();
+        doc.set_compression(Compression::None);
+        let page = doc.add_page(PageSize::A4).unwrap();
+        for name in names {
+            page.add_destination(name, Pt(0.0), Pt(0.0)).unwrap();
+            let target = LinkTarget::Destination(name.to_owned());
+            page.add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &target)
+                .unwrap();
+        }
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        let keys: Vec<&str> = object(&pdf, 12)
+            .lines()
+            .filter_map(|line| line.strip_prefix('(')?.split_once(") ["))
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "%C3%89clair",
+                "%EF%AC%80",
+                "%F0%9F%98%80x",
+                "100%25",
+                "R%C3%A9sum%C3%A9",
+                "Zeta",
+                "_Toc123",
+            ]
+        );
+        // Each link names its destination by the same key.
+        for (link, key) in (5..12).zip(["Zeta", "R%C3%A9sum%C3%A9", "_Toc123", "%C3%89clair"]) {
+            assert!(object(&pdf, link).ends_with(&format!("/Dest ({key}) >>\n")));
         }
     }
 

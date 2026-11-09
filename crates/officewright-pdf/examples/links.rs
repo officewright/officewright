@@ -5,8 +5,11 @@
 //! ```
 //!
 //! - Page 1 has a link to `https://example.com/a b/(Ж)` over the text "Example" at
-//!   (72, 700), 120 by 14.5 pt, and a link to the destination "Appendix" over the text
-//!   "Appendix" at (72, 680), 80 by 14 pt; and the destination "Start" at (72, 800).
+//!   (72, 700), 120 by 14.5 pt, a link to the destination "Appendix" over the text
+//!   "Appendix" at (72, 680), 80 by 14 pt, and a link to "Résumé" over the text "Résumé" at
+//!   (72, 660), 80 by 14 pt; and the destinations "Start" at (72, 800), "Résumé" at
+//!   (72, 640), "Zeta" at (72, 620) and "_Toc123" at (72, 600), names whose UTF-8 forms
+//!   sort otherwise than the keys the file stores for them.
 //! - Page 2 has the destinations "d000" to "d149", "dNNN" at (36, 800 − 5 × NNN), more
 //!   than one node of the name tree holds.
 //! - Page 3 has the destinations "Appendix" at (72, 770.25) and "Глава" at (0, 400), a
@@ -36,6 +39,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     first.add_text(Pt(72.0), Pt(683.0), &helvetica, Pt(12.0), "Appendix")?;
     let appendix = destination("Appendix");
     first.add_link(Pt(72.0), Pt(680.0), Pt(80.0), Pt(14.0), &appendix)?;
+    first.add_text(Pt(72.0), Pt(663.0), &helvetica, Pt(12.0), "Résumé")?;
+    let resume = destination("Résumé");
+    first.add_link(Pt(72.0), Pt(660.0), Pt(80.0), Pt(14.0), &resume)?;
+    for (name, y) in [("Résumé", 640.0), ("Zeta", 620.0), ("_Toc123", 600.0)] {
+        first.add_destination(name, Pt(72.0), Pt(y))?;
+    }
 
     let second = doc.add_page(PageSize::A4)?;
     for i in 0..150_u32 {
