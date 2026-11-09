@@ -1,0 +1,591 @@
+{
+"format": 1,
+"document": "word-rules/E-footnote-hidden.docx",
+"pdf_sha256": "183b1e8fd03a961c11d3e1e645d49fd420dfa3ecfeee1ecbfdf8ac652f8e5171",
+"made_with": "pdftotext 26.10.0 -bbox-layout",
+"units": "points, origin at the top left of the page, y downwards",
+"page_count": 1,
+"fonts_not_embedded": [],
+"fonts_rasterized_with": [],
+"compat_flags_dropped": [],
+"compat_flags_added": [
+"useWord2013TrackBottomHyphenation=1"
+],
+"styles_changed": [
+"- EndnoteText: pPr/spacing after=0",
+"- EndnoteText: pPr/spacing line=240",
+"- EndnoteText: pPr/spacing lineRule=auto",
+"- FootnoteText: pPr/spacing after=0",
+"- FootnoteText: pPr/spacing line=240",
+"- FootnoteText: pPr/spacing lineRule=auto",
+"- docDefaults: pPrDefault/pPr/spacing after=0",
+"- docDefaults: pPrDefault/pPr/spacing line=240",
+"- docDefaults: pPrDefault/pPr/spacing lineRule=auto",
+"- docDefaults: pPrDefault/pPr/widowControl"
+],
+"numbering_changed": [],
+"paragraph_styles_changed": [],
+"page_breaks": [],
+"pages": [
+{
+"number": 1,
+"width": 595.32,
+"height": 841.92,
+"lines": [
+{
+"text": "Case 01: three references, the second of them hidden text (w:vanish)",
+"box": [
+72.024,
+73.32,
+381.034,
+84.36
+],
+"words": [
+{
+"text": "Case",
+"box": [
+72.024,
+73.32,
+93.011,
+84.36
+]
+},
+{
+"text": "01:",
+"box": [
+95.429,
+73.32,
+109.538,
+84.36
+]
+},
+{
+"text": "three",
+"box": [
+112.066,
+73.32,
+136.299,
+84.36
+]
+},
+{
+"text": "references,",
+"box": [
+138.827,
+73.32,
+189.203,
+84.36
+]
+},
+{
+"text": "the",
+"box": [
+191.631,
+73.32,
+206.624,
+84.36
+]
+},
+{
+"text": "second",
+"box": [
+209.119,
+73.32,
+240.969,
+84.36
+]
+},
+{
+"text": "of",
+"box": [
+243.332,
+73.32,
+252.572,
+84.36
+]
+},
+{
+"text": "them",
+"box": [
+255.067,
+73.32,
+278.759,
+84.36
+]
+},
+{
+"text": "hidden",
+"box": [
+281.21,
+73.32,
+312.332,
+84.36
+]
+},
+{
+"text": "text",
+"box": [
+314.827,
+73.32,
+332.447,
+84.36
+]
+},
+{
+"text": "(w:vanish)",
+"box": [
+334.975,
+73.32,
+381.034,
+84.36
+]
+}
+]
+},
+{
+"text": "Line 1 holds a reference 1",
+"box": [
+72.024,
+84.44,
+182.229,
+96.38
+],
+"words": [
+{
+"text": "Line",
+"box": [
+72.024,
+85.34,
+90.472,
+96.38
+]
+},
+{
+"text": "1",
+"box": [
+93.0,
+85.34,
+98.597,
+96.38
+]
+},
+{
+"text": "holds",
+"box": [
+101.015,
+85.34,
+125.27,
+96.38
+]
+},
+{
+"text": "a",
+"box": [
+127.677,
+85.34,
+132.965,
+96.38
+]
+},
+{
+"text": "reference",
+"box": [
+135.46,
+85.34,
+178.781,
+96.38
+]
+},
+{
+"text": "1",
+"box": [
+178.7,
+84.44,
+182.229,
+91.4
+]
+}
+]
+},
+{
+"text": "Line 2 holds a hidden reference",
+"box": [
+72.024,
+97.34,
+212.387,
+108.38
+],
+"words": [
+{
+"text": "Line",
+"box": [
+72.024,
+97.34,
+90.472,
+108.38
+]
+},
+{
+"text": "2",
+"box": [
+93.0,
+97.34,
+98.597,
+108.38
+]
+},
+{
+"text": "holds",
+"box": [
+101.015,
+97.34,
+125.27,
+108.38
+]
+},
+{
+"text": "a",
+"box": [
+127.677,
+97.34,
+132.965,
+108.38
+]
+},
+{
+"text": "hidden",
+"box": [
+135.46,
+97.34,
+166.582,
+108.38
+]
+},
+{
+"text": "reference",
+"box": [
+169.077,
+97.34,
+212.387,
+108.38
+]
+}
+]
+},
+{
+"text": "Line 3 holds a reference 3",
+"box": [
+72.024,
+108.44,
+182.229,
+120.38
+],
+"words": [
+{
+"text": "Line",
+"box": [
+72.024,
+109.34,
+90.472,
+120.38
+]
+},
+{
+"text": "3",
+"box": [
+93.0,
+109.34,
+98.597,
+120.38
+]
+},
+{
+"text": "holds",
+"box": [
+101.015,
+109.34,
+125.27,
+120.38
+]
+},
+{
+"text": "a",
+"box": [
+127.677,
+109.34,
+132.965,
+120.38
+]
+},
+{
+"text": "reference",
+"box": [
+135.46,
+109.34,
+178.781,
+120.38
+]
+},
+{
+"text": "3",
+"box": [
+178.7,
+108.44,
+182.229,
+115.4
+]
+}
+]
+},
+{
+"text": "End of the document.",
+"box": [
+72.024,
+121.34,
+169.099,
+132.38
+],
+"words": [
+{
+"text": "End",
+"box": [
+72.024,
+121.34,
+89.004,
+132.38
+]
+},
+{
+"text": "of",
+"box": [
+91.443,
+121.34,
+100.706,
+132.38
+]
+},
+{
+"text": "the",
+"box": [
+103.201,
+121.34,
+118.072,
+132.38
+]
+},
+{
+"text": "document.",
+"box": [
+120.6,
+121.34,
+169.099,
+132.38
+]
+}
+]
+},
+{
+"text": "1",
+"box": [
+72.024,
+734.56,
+75.309,
+741.04
+],
+"words": [
+{
+"text": "1",
+"box": [
+72.024,
+734.56,
+75.309,
+741.04
+]
+}
+]
+},
+{
+"text": "Footnote 1, one line.",
+"box": [
+77.544,
+735.426,
+161.935,
+745.386
+],
+"words": [
+{
+"text": "Footnote",
+"box": [
+77.544,
+735.426,
+114.844,
+745.386
+]
+},
+{
+"text": "1,",
+"box": [
+117.095,
+735.426,
+124.635,
+745.386
+]
+},
+{
+"text": "one",
+"box": [
+126.906,
+735.426,
+142.433,
+745.386
+]
+},
+{
+"text": "line.",
+"box": [
+144.645,
+735.426,
+161.935,
+745.386
+]
+}
+]
+},
+{
+"text": "Footnote 2, one line.",
+"box": [
+77.544,
+747.666,
+161.935,
+757.626
+],
+"words": [
+{
+"text": "Footnote",
+"box": [
+77.544,
+747.666,
+114.844,
+757.626
+]
+},
+{
+"text": "2,",
+"box": [
+117.095,
+747.666,
+124.635,
+757.626
+]
+},
+{
+"text": "one",
+"box": [
+126.906,
+747.666,
+142.433,
+757.626
+]
+},
+{
+"text": "line.",
+"box": [
+144.645,
+747.666,
+161.935,
+757.626
+]
+}
+]
+},
+{
+"text": "3",
+"box": [
+72.024,
+759.036,
+75.309,
+765.516
+],
+"words": [
+{
+"text": "3",
+"box": [
+72.024,
+759.036,
+75.309,
+765.516
+]
+}
+]
+},
+{
+"text": "Footnote 3, one line.",
+"box": [
+77.544,
+759.906,
+161.935,
+769.866
+],
+"words": [
+{
+"text": "Footnote",
+"box": [
+77.544,
+759.906,
+114.844,
+769.866
+]
+},
+{
+"text": "3,",
+"box": [
+117.095,
+759.906,
+124.635,
+769.866
+]
+},
+{
+"text": "one",
+"box": [
+126.906,
+759.906,
+142.433,
+769.866
+]
+},
+{
+"text": "line.",
+"box": [
+144.645,
+759.906,
+161.935,
+769.866
+]
+}
+]
+},
+{
+"text": "2",
+"box": [
+72.024,
+746.796,
+75.309,
+753.276
+],
+"words": [
+{
+"text": "2",
+"box": [
+72.024,
+746.796,
+75.309,
+753.276
+]
+}
+]
+}
+]
+}
+]
+}
