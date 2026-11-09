@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use officewright_core::Pt;
 
@@ -21,6 +22,7 @@ use crate::ir::{
 use crate::itemize::{self, FieldValues};
 use crate::lines::{LineEnd, PieceKind};
 use crate::lists::{Counters, Label};
+use crate::notes::NoteNumbers;
 use crate::paragraph::{self, ParagraphLayout};
 use crate::report::{Location, ReportKind, Step};
 use crate::shape::Shaper;
@@ -335,6 +337,26 @@ pub(crate) fn paginate_into<S: PageSink>(
     .map(|laid| laid.sink)
 }
 
+/// Reports, once, the numbers of notes that the layout writes otherwise than the document
+/// says.
+fn report_note_numbers(notes: &NoteNumbers, fonts: &mut Fonts<'_>) {
+    if notes.decimal {
+        fonts.report_once(
+            ReportKind::FeatureUnsupported,
+            &Location::default(),
+            "numbers in a format the layout does not write are written as decimal".to_owned(),
+        );
+    }
+    if notes.each_page {
+        fonts.report_once(
+            ReportKind::FeatureUnsupported,
+            &Location::default(),
+            "footnote numbers that start again on each page are numbered through the section"
+                .to_owned(),
+        );
+    }
+}
+
 /// [`paginate_into`], with headers and footers drawing at most `max_frame_drawn` in all,
 /// by [`drawn`] and what painting walks, and laying out at most `max_frame_laid` in a pass,
 /// by [`layout_cost`].
@@ -347,6 +369,8 @@ fn paginate_with<S: PageSink>(
     mut sink: impl FnMut() -> S,
 ) -> Result<Laid<S>> {
     let flow = flow(document, fonts)?;
+    let notes = Arc::new(NoteNumbers::new(document));
+    report_note_numbers(&notes, fonts);
     // `NUMPAGES` and `SECTIONPAGES` depend on the layout they are part of: each pass lays
     // out with the counts the one before found, until they agree.
     let counted = counts_pages(document);
@@ -381,6 +405,7 @@ fn paginate_with<S: PageSink>(
             table_budget: max_table_redrawn,
             frame_laid_budget: max_frame_laid,
             totals: totals.clone(),
+            notes: Arc::clone(&notes),
             frames: HashMap::new(),
         };
         let lines = pager.run(&flow)?;
@@ -835,6 +860,8 @@ struct Pager<'d, 'f, 'b, S> {
     table_budget: usize,
     /// The page counts of the pass before, for `NUMPAGES` and `SECTIONPAGES`.
     totals: Totals,
+    /// The numbers of the notes, which the references show.
+    notes: Arc<NoteNumbers>,
     /// The last layout of each header and footer, by section, side and kind: kept while
     /// its `PAGE` fields show the same, and for its paragraphs without fields after.
     frames: HashMap<FrameKey, Rc<Frame<'d>>>,
@@ -2034,6 +2061,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             format,
             pages: self.totals.pages,
             section_pages: self.totals.section(section),
+            notes: Arc::clone(&self.notes),
         }
     }
 
@@ -4361,6 +4389,55 @@ mod tests {
                 .with_relative_to(down.0)
                 .with_placement(down.1),
         ))
+    }
+
+    #[test]
+    fn a_note_s_reference_draws_its_number() {
+        use crate::ir::{Note, NoteKind, VerticalPosition};
+        // Two footnotes and an endnote: the references draw 1, 2 and i, in their own
+        // style; one with a custom mark draws no number, the text after it being the mark.
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let mark = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_vertical(VerticalPosition::Superscript),
+        );
+        let mut note = |kind| document.add_note(Note::new(kind, []));
+        let (first, second, end, custom) = (
+            note(NoteKind::Footnote),
+            note(NoteKind::Footnote),
+            note(NoteKind::Endnote),
+            note(NoteKind::Footnote),
+        );
+        let inlines = vec![
+            Inline::text("A", style),
+            Inline::note_reference(first, false, mark),
+            Inline::text("A", style),
+            Inline::note_reference(second, false, mark),
+            Inline::text("A", style),
+            Inline::note_reference(end, false, mark),
+            Inline::text("A", style),
+            Inline::note_reference(custom, true, mark),
+            Inline::text("Á", mark),
+            // A custom mark draws no number even for a note another reference numbers.
+            Inline::note_reference(first, true, mark),
+        ];
+        document.add_section(Section::new(setup()).with_blocks(vec![holding(style, inlines)]));
+        let (laid, report) = laid(&document, 10);
+        assert_eq!(
+            texts(&laid.expect("pages").pages[0]),
+            ["A", "1", "A", "2", "A", "i", "A", "Á"]
+        );
+        // The notes' texts are still left out, and that is reported.
+        assert!(
+            messages(&report)
+                .iter()
+                .any(|m| m
+                    == "footnotes and endnotes are not laid out yet: their texts are left out"),
+            "{report:?}"
+        );
     }
 
     #[test]

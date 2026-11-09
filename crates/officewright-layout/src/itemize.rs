@@ -19,6 +19,7 @@ use crate::ir::{
     RunStyle, RunStyleId, Suffix, VerticalPosition,
 };
 use crate::lists::Label;
+use crate::notes::NoteNumbers;
 use crate::numbers::number_text;
 use crate::report::{Location, ReportKind};
 use crate::shape::{Features, ShapeRequest, ShapedRun, Shaper, ShapingFace, combining_class};
@@ -136,8 +137,8 @@ struct Placed {
 }
 
 /// The values of the fields the layout computes, for the page a paragraph is laid out
-/// on.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// on, and the numbers of the notes.
+#[derive(Clone, Debug)]
 pub(crate) struct FieldValues {
     /// The page's number, for `PAGE`.
     pub(crate) page: u32,
@@ -148,6 +149,27 @@ pub(crate) struct FieldValues {
     pub(crate) pages: u32,
     /// The number of pages of the section, for `SECTIONPAGES`.
     pub(crate) section_pages: u32,
+    /// The numbers of the notes, one table for the whole layout.
+    pub(crate) notes: Arc<NoteNumbers>,
+}
+
+// The values are compared and hashed by the fields that vary from page to page: the notes'
+// numbers are one table for the whole layout, compared by its address.
+impl PartialEq for FieldValues {
+    fn eq(&self, other: &Self) -> bool {
+        (self.page, &self.format, self.pages, self.section_pages)
+            == (other.page, &other.format, other.pages, other.section_pages)
+            && Arc::ptr_eq(&self.notes, &other.notes)
+    }
+}
+
+impl Eq for FieldValues {}
+
+impl std::hash::Hash for FieldValues {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self.page, &self.format, self.pages, self.section_pages).hash(state);
+        Arc::as_ptr(&self.notes).hash(state);
+    }
 }
 
 /// Itemizes `inlines` of a paragraph of `document`. Fonts are chosen through `fonts`,
@@ -335,11 +357,22 @@ impl Builder<'_, '_, '_> {
             Inline::Break { kind, style, .. } => self.item(Item::Break(*kind, *style)),
             Inline::Object(_) => self.item(Item::Object(path)),
             Inline::Anchored(_) => self.item(Item::Anchored(path)),
-            Inline::NoteReference { style, .. } => {
+            Inline::NoteReference {
+                note,
+                custom_mark,
+                style,
+            } => {
                 self.unsupported(
-                    "footnotes and endnotes are not laid out yet: their texts are left out, \
-                     and so are the numbers of their reference marks",
+                    "footnotes and endnotes are not laid out yet: their texts are left out",
                 );
+                // The note's number, unless the text after it is the mark.
+                if !custom_mark {
+                    let number = self.fields.and_then(|values| values.notes.text(*note));
+                    if let Some(number) = number {
+                        let number = number.to_owned();
+                        self.text(&number, *style);
+                    }
+                }
                 self.item(Item::NoteReference(path, *style));
             }
             Inline::NoteNumber { style, .. }
