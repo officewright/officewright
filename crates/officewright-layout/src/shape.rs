@@ -32,8 +32,9 @@ pub(crate) struct ShapingFace {
     /// map and the advances alone.
     font: Option<harfrust::Font>,
     /// Whether HarfRust shaped a run of the face into more glyphs than the layout keeps,
-    /// or ran out of room for one ([`MAX_GLYPHS_PER_CHARACTER`]): its later runs are then
-    /// shaped from the character map, without HarfRust. The face is loaded once for a
+    /// a run with one cluster of more glyphs than that for its characters, or ran out of
+    /// room for one ([`MAX_GLYPHS_PER_CHARACTER`]): its later runs are then shaped from
+    /// the character map, without HarfRust. The face is loaded once for a
     /// layout and its copies share the mark, so every shaper of the layout sees it.
     refused: Arc<AtomicBool>,
 }
@@ -156,8 +157,9 @@ impl Features {
 /// more is shaped nominally, and that is reported. HarfRust keeps up
 /// to 256 glyphs a character, and at least 65,536 for a run, so a font whose layout tables
 /// multiply glyphs could turn one character into tens of thousands, which every line and
-/// page they are on would then hold (#403). No writing system needs more than a few glyphs
-/// a character. The bound limits what the layout keeps, not the time HarfRust takes to
+/// page they are on would then hold (#403). Text in most fonts takes a few glyphs a
+/// character, but Noto Sans Duployan takes about a hundred, so its runs are refused too
+/// (#481). The bound limits what the layout keeps, not the time HarfRust takes to
 /// shape the run before it is refused. Once a run of a face is refused, or has one cluster
 /// of more glyphs than that for its characters, the face's later runs are shaped nominally
 /// without HarfRust, so that only one run of it takes that time in a layout (#405).
@@ -404,7 +406,9 @@ thread_local! {
 }
 
 /// Shapes without the cache of runs: nominally for a face that is refused, and refusing a
-/// face the run of which HarfRust shapes into more glyphs than the layout keeps.
+/// face the run of which HarfRust shapes into more glyphs than the layout keeps, has one
+/// cluster of more glyphs than that for its characters, or does not fit in HarfRust's
+/// room.
 fn shape(face: &ShapingFace, text: &str, request: &ShapeRequest, plans: &mut Plans) -> ShapedRun {
     let Some(font) = face.font.as_ref().filter(|_| !face.refused()) else {
         return shape_nominal(&face.face, text);
@@ -708,6 +712,12 @@ mod tests {
         // holds for a short run.
         let face = multiplied(30_000);
         assert!(shaper.shape(&face, "AAA", &request).is_nominal());
+        assert!(shaper.shape(&face, spaces, &request).is_nominal());
+        // Characters are counted, not bytes: `A` and its combining circumflex are one
+        // cluster of two characters in three bytes, and 65 glyphs are more than 32 for
+        // each of the two characters.
+        let face = multiplied(64);
+        assert!(!shaper.shape(&face, "A\u{302}  ", &request).is_nominal());
         assert!(shaper.shape(&face, spaces, &request).is_nominal());
         // A run cached before its face was refused is shaped again, nominally.
         let face = multiplied(64);
