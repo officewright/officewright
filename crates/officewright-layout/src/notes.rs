@@ -12,7 +12,8 @@ use crate::numbers::number_text;
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct NoteNumbers {
     numbers: HashMap<NoteId, String>,
-    /// The notes referenced in headers and footers, where a reference shows no number.
+    /// The notes referenced in headers and footers, where a reference shows no number
+    /// unless the body numbers its note.
     framed: HashSet<NoteId>,
     /// Whether a number's format is one the layout writes as decimal instead.
     pub(crate) decimal: bool,
@@ -31,7 +32,10 @@ impl NoteNumbers {
     /// 2.1.302 b and 2.1.305 a), nor a second reference to a note, nor one in the result
     /// of a field the layout computes, which is not laid out. One in hidden text is
     /// numbered, a hypothesis until a Word render. References in headers and footers take
-    /// no number: they show none, which the itemizer reports.
+    /// no number and mark their notes: a reference to a marked note that the body does
+    /// not number shows none, wherever it stands, which the itemizer reports where the
+    /// first such reference is laid out; one to a note the body numbers shows that
+    /// number.
     pub(crate) fn new(document: &Document) -> Self {
         let mut numbers = Self::default();
         let mut next = Counters::default();
@@ -71,8 +75,8 @@ impl NoteNumbers {
         self.numbers.get(&note).map(String::as_str)
     }
 
-    /// Whether `note` is referenced in a header or footer, where its reference shows no
-    /// number.
+    /// Whether `note` is referenced in a header or footer, so that a reference to it that
+    /// shows no number is reported.
     pub(crate) fn framed(&self, note: NoteId) -> bool {
         self.framed.contains(&note)
     }
@@ -207,6 +211,7 @@ mod tests {
         let headed_in_field = note(NoteKind::Footnote);
         let headed_in_box = note(NoteKind::Footnote);
         let footed = note(NoteKind::Endnote);
+        let evened = note(NoteKind::Footnote);
         let reference = |note, custom| Inline::note_reference(note, custom, style);
         // The second note's reference comes first, in a table; the third's in the stored
         // result of a field; a reference to the first again takes no number, nor does one
@@ -242,8 +247,8 @@ mod tests {
                 reference(first, false),
             ],
         );
-        // References in a header, in a field's result there and in its text box, and in a
-        // footer.
+        // References in a header, in a field's result there and in its text box, in a
+        // footer for the first page and in a header for even pages.
         let header = holding(
             style,
             vec![
@@ -253,9 +258,14 @@ mod tests {
             ],
         );
         let footer = holding(style, vec![reference(footed, false)]);
+        let even = holding(style, vec![reference(evened, false)]);
         document.add_section(
             Section::new(PageSetup::default())
-                .with_headers(HeaderFooterSet::default().with_primary([header]))
+                .with_headers(
+                    HeaderFooterSet::default()
+                        .with_primary([header])
+                        .with_even([even]),
+                )
                 .with_footers(HeaderFooterSet::default().with_first([footer]))
                 .with_blocks([table, paragraph]),
         );
@@ -272,9 +282,10 @@ mod tests {
         assert!(unnumbered.iter().all(|&id| numbers.text(id).is_none()));
         assert_eq!(numbers.text(headed_in_box), None);
         assert_eq!(numbers.text(footed), None);
+        assert_eq!(numbers.text(evened), None);
         // The references of headers and footers are marked, those of their fields' results
         // too, but not those of their text boxes, nor any of the body's.
-        let framed = [headed, headed_in_field, footed];
+        let framed = [headed, headed_in_field, footed, evened];
         assert!(framed.iter().all(|&id| numbers.framed(id)));
         let unframed = [
             first,
