@@ -63,7 +63,9 @@ List items get their numbers and bullets, counted as Word counts them. Tables ge
 columns fitted to their content as Word fits them (the grid's widths in fixed layout),
 merged cells, borders and shading, and their rows are cut across pages with the header
 rows repeated. It draws inline PNG and JPEG pictures and floating ones where they are
-anchored, and underlines, strikethrough, highlight and shading.
+anchored, text boxes in the line and floating with their paragraphs, insets, fill and
+line, the numbers of references to footnotes and endnotes, and underlines,
+strikethrough, highlight and shading.
 Much of what it shows otherwise than Word would, such as a substituted font or something
 not laid out yet, it reports: the command line prints it as notes, and the C library and
 Rust return it as a report.
@@ -77,10 +79,15 @@ The main things not laid out yet:
   rows of such a table are not repeated);
 - list numbers in formats such as Hebrew letters or Chinese counting, which are written in
   decimal, and picture bullets, for which the level's text stands in;
-- footnotes and endnotes, and the marks that refer to them;
-- text wrapping around floating pictures (it runs over or under them), floating pictures
-  in table cells, and shapes, text boxes, charts, SmartArt, VML shapes other than
-  pictures, and equations;
+- the texts of footnotes and endnotes, and the numbers of references to them in headers
+  and footers;
+- text wrapping around floating pictures and text boxes (it runs over or under them),
+  floating pictures in table cells, and shapes, charts, SmartArt, VML shapes other than
+  pictures and text boxes, and equations;
+- in text boxes: tables and floating objects; boxes in a group of shapes; a chain of
+  linked boxes, whose text all goes into the first; turned boxes and vertical text, drawn
+  upright and across; shapes other than a rectangle, WordArt, columns, shadows and other
+  effects; gradient and pattern fills, drawn in their first colour, and picture fills;
 - text in several columns (laid out in one column), paragraph and page borders, and line
   numbers;
 - the document grid, which sets the line height of many Chinese and Japanese documents;
