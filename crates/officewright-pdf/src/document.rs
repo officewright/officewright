@@ -2108,6 +2108,31 @@ mod tests {
     }
 
     #[test]
+    fn escapes_the_delimiters_of_a_string_in_keys() {
+        let names = ["a)b", "c(d", "e\\f"];
+        let mut doc = Document::new();
+        doc.set_compression(Compression::None);
+        let page = doc.add_page(PageSize::A4).unwrap();
+        for name in names {
+            page.add_destination(name, Pt(0.0), Pt(0.0)).unwrap();
+            let target = LinkTarget::Destination(name.to_owned());
+            page.add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &target)
+                .unwrap();
+        }
+        let pdf = doc.to_bytes().unwrap();
+        assert_xref_is_right(&pdf);
+        let pdf = String::from_utf8_lossy(&pdf).into_owned();
+        for (link, key) in (5..8).zip([r"a\)b", r"c\(d", r"e\\f"]) {
+            assert!(object(&pdf, link).ends_with(&format!("/Dest ({key}) >>\n")));
+        }
+        assert_eq!(
+            object(&pdf, 8),
+            "8 0 obj\n<< /Names [\n(a\\)b) [3 0 R /XYZ 0 0 null]\n(c\\(d) [3 0 R /XYZ 0 0 null]\n\
+             (e\\\\f) [3 0 R /XYZ 0 0 null]\n] >>\n"
+        );
+    }
+
+    #[test]
     fn a_page_has_at_most_max_links_links() {
         let mut doc = Document::new();
         let page = doc.add_page(PageSize::A4).unwrap();
