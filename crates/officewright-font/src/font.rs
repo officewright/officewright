@@ -893,7 +893,35 @@ mod tests {
             .find(|&at| &font[at..at + 4] == b"post")
             .unwrap();
         font[post + 8..post + 12].copy_from_slice(&4_u32.to_be_bytes());
+        refused(font.clone());
+        // Its edges: a table of the two bytes of the table count, and one that starts
+        // before the bytes rewritten and reaches into them.
+        font[post + 8..post + 16].copy_from_slice(&[0, 0, 0, 4, 0, 0, 0, 2]);
+        refused(font.clone());
+        font[post + 8..post + 16].copy_from_slice(&[0, 0, 0, 2, 0, 0, 0, 32]);
         refused(font);
+        // A table that starts where the directory ends, as real fonts lay them out, is
+        // kept: here `AAAA`, which sorts before `DMAP` and so comes first.
+        let first = TestFont::new("Test Map")
+            .with_table(b"AAAA", vec![1; 8])
+            .with_table(
+                b"DMAP",
+                testing::cmap_of(&[(3, 1, testing::format4(&[(0x41, 0x41, 0, 0)], &[]))]),
+            )
+            .build();
+        let end = 12 + 16 * usize::from(u16::from_be_bytes([first[4], first[5]]));
+        assert_eq!(
+            u32::from_be_bytes(first[20..24].try_into().unwrap()) as usize,
+            end
+        );
+        let face = FontFace::from_bytes(first, 0).unwrap();
+        let hidden = font_ref(face.data(), 0).unwrap();
+        assert_eq!(
+            hidden
+                .table_data(Tag::new(b"AAAA"))
+                .map(|d| d.as_bytes().to_vec()),
+            Some(vec![1; 8])
+        );
 
         // A collection of three faces whose first face's directory starts at byte 16,
         // inside the list of faces: its version is the second face's offset and its table
