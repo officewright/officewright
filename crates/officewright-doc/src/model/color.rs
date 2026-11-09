@@ -392,8 +392,11 @@ pub(crate) fn vml_color(value: &str) -> Option<VmlColor> {
     let value = value
         .split_once('[')
         .map_or(value, |(color, _)| color)
-        .trim();
-    if let Some((base, instruction)) = value.to_ascii_lowercase().rsplit_once(' ') {
+        .trim()
+        .to_ascii_lowercase();
+    // One instruction after the colour it changes (MS-OI29500 2.1.1893(l)), whose base is
+    // read as a plain colour: a second instruction makes the value one Office does not take.
+    if let Some((base, instruction)) = value.rsplit_once(' ') {
         let (name, amount) = match instruction.split_once('(') {
             Some((name, rest)) => (name.trim(), Some(rest.strip_suffix(')')?.trim())),
             None => (instruction.trim(), None),
@@ -403,13 +406,19 @@ pub(crate) fn vml_color(value: &str) -> Option<VmlColor> {
                 Some(amount) => Some(amount.parse::<u8>().ok()?),
                 None => None,
             };
-            return match vml_color(base.trim())? {
+            return match plain_vml_color(base.trim())? {
                 VmlColor::Rgb(rgb) => recolor(rgb, name, amount).map(VmlColor::Rgb),
                 VmlColor::None => None,
                 VmlColor::Elsewhere => Some(VmlColor::Elsewhere),
             };
         }
     }
+    plain_vml_color(&value)
+}
+
+/// A colour of VML without an instruction, in lower case: hexadecimal, `rgb(`, `wincolor(`,
+/// `none`, a colour of the system or of the shape, or a colour's name.
+fn plain_vml_color(value: &str) -> Option<VmlColor> {
     if let Some(digits) = value.strip_prefix('#') {
         let rgb = match digits.len() {
             6 => hex(digits),
@@ -421,8 +430,7 @@ pub(crate) fn vml_color(value: &str) -> Option<VmlColor> {
         };
         return rgb.map(VmlColor::Rgb);
     }
-    let lower = value.to_ascii_lowercase();
-    if let Some(channels) = lower
+    if let Some(channels) = value
         .strip_prefix("rgb(")
         .and_then(|rest| rest.strip_suffix(')'))
     {
@@ -432,21 +440,21 @@ pub(crate) fn vml_color(value: &str) -> Option<VmlColor> {
         let rgb = (channels.next()??, channels.next()??, channels.next()??);
         return channels.next().is_none().then_some(VmlColor::Rgb(rgb));
     }
-    if let Some(index) = lower
+    if let Some(index) = value
         .strip_prefix("wincolor(")
         .and_then(|rest| rest.strip_suffix(')'))
     {
         return index.trim().parse::<u8>().ok().map(|_| VmlColor::Elsewhere);
     }
-    if lower == "none" {
+    if value == "none" {
         return Some(VmlColor::None);
     }
-    if SYSTEM_COLORS.contains(&lower.as_str()) || SHAPE_COLORS.contains(&lower.as_str()) {
+    if SYSTEM_COLORS.contains(&value) || SHAPE_COLORS.contains(&value) {
         return Some(VmlColor::Elsewhere);
     }
     PRESET_COLORS
         .iter()
-        .find(|(preset, _)| preset.eq_ignore_ascii_case(&lower))
+        .find(|(preset, _)| preset.eq_ignore_ascii_case(value))
         .map(|&(_, rgb)| VmlColor::Rgb(rgb))
 }
 
