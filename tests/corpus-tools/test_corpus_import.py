@@ -2544,7 +2544,8 @@ class HeaderFooterStories(unittest.TestCase):
             with self.subTest(title=title):
                 parts = self.parts([first + title, ""])
                 self.assertEqual(importer.header_footer_stories(parts), {"first-page-footer"})
-        for off in ('<w:titlePg w:val="0"/>', '<w:titlePg w:val="false"/>'):
+        for off in ('<w:titlePg w:val="0"/>', '<w:titlePg w:val="false"/>',
+                    '<w:titlePg w:val="off"/>'):
             with self.subTest(off=off):
                 parts = self.parts([first + off])
                 self.assertEqual(importer.header_footer_stories(parts), set())
@@ -2557,8 +2558,10 @@ class HeaderFooterStories(unittest.TestCase):
         self.assertEqual(importer.header_footer_stories(self.parts([even])), set())
         parts = self.parts([even], "<w:evenAndOddHeaders/>")
         self.assertEqual(importer.header_footer_stories(parts), {"even-pages-header"})
-        parts = self.parts([even], '<w:evenAndOddHeaders w:val="0"/>')
-        self.assertEqual(importer.header_footer_stories(parts), set())
+        for off in ('<w:evenAndOddHeaders w:val="0"/>', '<w:evenAndOddHeaders w:val="off"/>'):
+            with self.subTest(off=off):
+                parts = self.parts([even], off)
+                self.assertEqual(importer.header_footer_stories(parts), set())
 
 
 class BodyParagraphs(unittest.TestCase):

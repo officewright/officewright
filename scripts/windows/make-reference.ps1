@@ -701,9 +701,13 @@ function Export-Formatting($Document, [int] $BudgetSeconds, $Themes, $Progress, 
         if (-not $complete) { break }
     }
     # StoryRanges holds a type of header or footer only when the first section has one
-    # (#464). A type it does not hold is read through the sections: each section's header or
+    # (#464). A type it does not hold is read through the later sections: each one's header or
     # footer of that type that exists and is not linked to the previous section's, in the
-    # order of the sections.
+    # order of the sections. The first section is left out: Word reports its primary header
+    # and footer as existing even when the document has none ("exist in all new documents
+    # by default"), and a type the first section has is in StoryRanges already. A first-page
+    # or even-pages header or footer that a later section only inherits, because the section
+    # that has it does not show it, is not read; corpus-import.py does not ask for it either.
     $chained = @{}
     foreach ($story in $stories) { $chained[$story.story] = $true }
     $instances = @{}
@@ -712,8 +716,8 @@ function Export-Formatting($Document, [int] $BudgetSeconds, $Themes, $Progress, 
             # wdHeaderFooterPrimary, wdHeaderFooterFirstPage, wdHeaderFooterEvenPages.
             foreach ($kind in 1, 2, 3) {
                 foreach ($headerFooter in @($section.Headers.Item($kind), $section.Footers.Item($kind))) {
-                    if (-not $headerFooter.Exists) { continue }
-                    if ($section.Index -gt 1 -and $headerFooter.LinkToPrevious) { continue }
+                    if ($section.Index -eq 1 -or -not $headerFooter.Exists) { continue }
+                    if ($headerFooter.LinkToPrevious) { continue }
                     $range = $headerFooter.Range
                     $name = Get-StoryName ([int]$range.StoryType)
                     if ($null -eq $name -or $chained.ContainsKey($name)) { continue }

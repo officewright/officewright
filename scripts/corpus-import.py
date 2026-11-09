@@ -1312,9 +1312,11 @@ def is_on(element: ElementTree.Element | None) -> bool:
 
 
 def header_footer_stories(parts: dict[str, bytes]) -> set[str]:
-    """The header and footer stories of a package that Word shows, by make-reference.ps1's
-    names: one for each kind of reference a section makes, a first-page one only in a section
-    with w:titlePg, and an even-pages one only when the settings ask for w:evenAndOddHeaders."""
+    """The header and footer stories of a package that make-reference.ps1's formatting export
+    reads, by its names: one for each kind of reference a section makes, a first-page one only
+    in a section with w:titlePg, and an even-pages one only when the settings ask for
+    w:evenAndOddHeaders. A first-page or even-pages one that a later section only inherits is
+    not counted, since the export does not read it."""
     main = main_document(parts)
     if main is None:
         return set()
@@ -2261,8 +2263,9 @@ def checked_formatting(
         or export["complete"] != record["formatting_complete"]
     ):
         raise Refused(f"{record['file']}: {path.name} does not match its record")
-    # A complete export holds every header and footer the re-saved copy shows; one that
-    # lacks some was read by a make-reference.ps1 that missed those only later sections have.
+    # A complete export holds every header and footer story of the re-saved copy that it
+    # reads; one that lacks some was read by a make-reference.ps1 that missed those only later
+    # sections have.
     missing = sorted(header_footer_stories(resaved_parts) - {s["story"] for s in export["stories"]})
     if export["complete"] and missing:
         raise Refused(
