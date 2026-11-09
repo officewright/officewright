@@ -522,10 +522,30 @@ impl Painter<'_, '_, '_> {
         let mut runs = Vec::new();
         let mut font = None;
         let mut current: Option<OpenRun> = None;
+        let face = self.fonts.face(run.face);
         // Glyph by glyph: a cluster may be many, such as a base and its marks, of which
-        // only some are on the page.
+        // only some are on the page. A glyph the face cannot embed, which shaping chose
+        // past the character map the itemizer checked (a ligature), is left out, and the
+        // face reported, so that the rest of the document still makes a PDF (#217).
         for cluster in &run.clusters {
             let on: Vec<&DrawnGlyph> = cluster.glyphs.iter().filter(on_page).collect();
+            if on.is_empty() {
+                continue;
+            }
+            // A face that cannot be embedded at all is reported as such, once.
+            if font.is_none() {
+                match self.font(run.face) {
+                    Some(made) => font = Some(made),
+                    None => return Vec::new(),
+                }
+            }
+            let on: Vec<&DrawnGlyph> = on
+                .into_iter()
+                .filter(|glyph| {
+                    face.as_ref()
+                        .is_some_and(|face| self.fonts.embeddable(run.face, face, glyph.glyph))
+                })
+                .collect();
             let Some(&lead) = on.first() else {
                 continue;
             };

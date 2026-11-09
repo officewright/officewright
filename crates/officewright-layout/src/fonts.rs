@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use officewright_font::{FaceId, FontBook, FontRequest, FontResolver, ResolutionKind};
+use officewright_font::{FaceId, FontBook, FontRequest, FontResolver, GlyphId, ResolutionKind};
 use unicode_script::UnicodeScript;
 
 use crate::report::{LayoutReport, Location, ReportKind};
@@ -106,11 +106,48 @@ impl<'a> Fonts<'a> {
         self.faces.insert(id, face);
     }
 
-    /// Whether face `id` has a glyph for `ch`; a symbol font has one for U+0020 to
-    /// U+00FF where it has one for U+F020 to U+F0FF, as Windows finds them.
+    /// Whether face `id` has a glyph for `ch` that the PDF can embed ([`embeddable`]); a
+    /// symbol font has one for U+0020 to U+00FF where it has one for U+F020 to U+F0FF, as
+    /// Windows finds them.
+    ///
+    /// [`embeddable`]: Self::embeddable
     pub(crate) fn has_glyph(&mut self, id: FaceId, ch: char) -> bool {
-        self.face(id)
-            .is_some_and(|face| face.face().glyph_id(ch).is_some())
+        let Some(face) = self.face(id) else {
+            return false;
+        };
+        let Some(glyph) = face.face().glyph_id(ch) else {
+            return false;
+        };
+        self.embeddable(id, &face, glyph)
+    }
+
+    /// Whether glyph `glyph` of face `id` can go into the PDF: whether subsetting the face
+    /// takes it (`FontFace::check_subset_glyph`). A glyph it refuses counts as missing, so
+    /// that its text falls back to the next font that has it, as Word shows the text of a
+    /// damaged embedded font in another font (#217); the face is reported once, with the
+    /// first reason.
+    pub(crate) fn embeddable(&mut self, id: FaceId, face: &ShapingFace, glyph: GlyphId) -> bool {
+        let Err(err) = face.face().check_subset_glyph(glyph) else {
+            return true;
+        };
+        if self.reported.insert(format!("damaged face {id:?}")) {
+            let name = face.face().names().family().unwrap_or("a font").to_owned();
+            let mut why = err.to_string();
+            let mut cause = std::error::Error::source(&err);
+            while let Some(inner) = cause {
+                why = format!("{why}: {inner}");
+                cause = inner.source();
+            }
+            self.report.push(
+                ReportKind::FontEmbedding,
+                Location::default(),
+                format!(
+                    "{name} cannot embed some of its glyphs ({why}); their text is drawn in \
+                     other fonts, and a glyph shaping chose that it cannot embed is left out"
+                ),
+            );
+        }
+        false
     }
 
     /// A face that has `ch`, for text that asked for `family` in bold and italic: first

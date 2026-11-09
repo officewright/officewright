@@ -441,3 +441,52 @@ fn the_options_make_a_book_of_their_fonts() -> TestResult {
     assert_eq!(families(&in_memory), ["Liberation Mono"]);
     Ok(())
 }
+
+#[test]
+fn text_of_a_font_with_a_damaged_glyph_is_drawn_in_another_font() -> TestResult {
+    // Issue #217: an embedded font whose glyph of `A` cannot be subset (officewright-font's
+    // test font, its `loca` sending glyph 2 past the end of `glyf`) would make the whole
+    // PDF fail. Word shows such text in another font: here Carlito, the first face of the
+    // test fonts with `A`, and the face is reported.
+    let mut damaged =
+        std::fs::read(repository().join("crates/officewright-font/tests/data/minimal.ttf"))?;
+    let tables = usize::from(u16::from_be_bytes([damaged[4], damaged[5]]));
+    let loca = (0..tables)
+        .map(|i| 12 + 16 * i)
+        .find(|&at| &damaged[at..at + 4] == b"loca")
+        .map(|at| u32::from_be_bytes(damaged[at + 8..at + 12].try_into().unwrap_or_default()))
+        .ok_or("no loca")? as usize;
+    // Long offsets: glyph 2 ends at entry 3.
+    damaged[loca + 12..loca + 16].copy_from_slice(&0x0010_0000_u32.to_be_bytes());
+    let mut book = book()?;
+    book.add_bytes(damaged, officewright_font::FontOrigin::Document)?;
+    let mut document = Document::default();
+    let test = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Officewright Test"))
+            .with_size(Pt(11.0)),
+    );
+    document.add_section(Section::new(PageSetup::new(PageSize::A4)).with_blocks(vec![
+        Paragraph::new(test).with_inlines([Inline::text("A", test)]).into(),
+    ]));
+    let rendered = render_pdf(&document, &book, &plain())?;
+    let pdf = text(rendered.pdf())?;
+    assert!(pdf.contains("Carlito"), "A is not in Carlito");
+    assert!(
+        !pdf.contains("OfficewrightTest"),
+        "the damaged face is embedded"
+    );
+    let messages: Vec<&str> = rendered
+        .report()
+        .entries()
+        .iter()
+        .filter(|entry| entry.kind() == ReportKind::FontEmbedding)
+        .map(|entry| entry.message())
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(
+        messages[0].starts_with("Officewright Test cannot embed some of its glyphs ("),
+        "{messages:?}"
+    );
+    Ok(())
+}
