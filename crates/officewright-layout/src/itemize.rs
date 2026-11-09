@@ -462,9 +462,25 @@ impl Builder<'_, '_, '_> {
             .language()
             .latin()
             .is_some_and(|tag| crate::slot::language_is(tag, &["tr", "az"]));
+        // Whether the character before was a Greek letter drawn as a capital: a combining
+        // tonos after it is left out, as with one composed with it.
+        let mut raised_greek = false;
         for ch in text.chars() {
+            let small_caps_only = style.small_caps() && !style.caps();
+            if raised_greek && ch == '\u{301}' {
+                // In small capitals the source is what is drawn; in capitals it keeps the
+                // tonos, with the letter before.
+                if !small_caps_only {
+                    self.out.source.push(ch);
+                    if let Some(previous) = self.pending.last_mut() {
+                        previous.source.end = self.out.source.len();
+                    }
+                }
+                continue;
+            }
             let lowercase = ch.is_lowercase();
             let upper = style.caps() || (style.small_caps() && lowercase);
+            raised_greek = upper && is_greek(ch);
             let drawn: Vec<char> = if upper {
                 uppercase(ch, turkic)
             } else {
@@ -938,12 +954,40 @@ fn inline_style(inline: &Inline) -> Option<RunStyleId> {
     }
 }
 
-/// The uppercase of `ch`, the Turkic way for i in Turkish and Azerbaijani.
+/// The uppercase of `ch`, the Turkic way for i in Turkish and Azerbaijani, and Greek
+/// without its tonos ([`greek_capital_without_tonos`]).
 fn uppercase(ch: char, turkic: bool) -> Vec<char> {
     if turkic && ch == 'i' {
         return vec!['\u{0130}'];
     }
+    if let Some(capital) = greek_capital_without_tonos(ch) {
+        return vec![capital];
+    }
     ch.to_uppercase().collect()
+}
+
+/// The capital of a Greek small letter with a tonos, without it, as Word draws Greek in
+/// small capitals (`business/form-ec-state-aid-notification-el`, whose "Νομικό καθεστώς"
+/// Word draws as "ΝΟΜΙΚΟ ΚΑΘΕΣΤΩΣ"), keeping a dialytika; in capitals too, a hypothesis
+/// until a rule document (#555).
+fn greek_capital_without_tonos(ch: char) -> Option<char> {
+    Some(match ch {
+        '\u{3AC}' => '\u{391}',
+        '\u{3AD}' => '\u{395}',
+        '\u{3AE}' => '\u{397}',
+        '\u{3AF}' => '\u{399}',
+        '\u{3CC}' => '\u{39F}',
+        '\u{3CD}' => '\u{3A5}',
+        '\u{3CE}' => '\u{3A9}',
+        '\u{390}' => '\u{3AA}',
+        '\u{3B0}' => '\u{3AB}',
+        _ => return None,
+    })
+}
+
+/// Whether `ch` is a Greek letter (Greek and Coptic, and Greek Extended).
+fn is_greek(ch: char) -> bool {
+    matches!(ch, '\u{370}'..='\u{3FF}' | '\u{1F00}'..='\u{1FFF}')
 }
 
 /// The script of each character, with characters common to scripts and inherited ones
@@ -1237,6 +1281,60 @@ mod tests {
         let (itemized, _, _) = setup.run(&[Inline::text("ab", symbol_small)]);
         assert_eq!(itemized.text, "\u{391}\u{392}");
         assert_eq!(itemized.source, "AB");
+    }
+
+    #[test]
+    fn greek_in_capitals_and_small_capitals_drops_its_tonos() {
+        // Issue #517: Word draws "Νομικό καθεστώς" in small capitals as "ΝΟΜΙΚΟ ΚΑΘΕΣΤΩΣ"
+        // (business/form-ec-state-aid-notification-el), its text too.
+        let mut setup = Setup::new(vec![minimal()]);
+        let caps = setup.style(plain(TEST).with_caps(true));
+        let small = setup.style(plain(TEST).with_small_caps(true));
+        let drawn = |setup: &mut Setup, text: &str, style| {
+            let (itemized, _, _) = setup.run(&[Inline::text(text, style)]);
+            (itemized.text, itemized.source)
+        };
+        let both = |text: &str| (text.to_owned(), text.to_owned());
+        assert_eq!(
+            drawn(
+                &mut setup,
+                "\u{39D}\u{3BF}\u{3BC}\u{3B9}\u{3BA}\u{3CC}",
+                small
+            ),
+            both("\u{39D}\u{39F}\u{39C}\u{399}\u{39A}\u{39F}")
+        );
+        // Each letter with a tonos, the dialytika kept, also where it has a tonos too.
+        assert_eq!(
+            drawn(
+                &mut setup,
+                "\u{3AC}\u{3AD}\u{3AE}\u{3AF}\u{3CC}\u{3CD}\u{3CE}\u{390}\u{3B0}\u{3CA}",
+                small
+            ),
+            both("\u{391}\u{395}\u{397}\u{399}\u{39F}\u{3A5}\u{3A9}\u{3AA}\u{3AB}\u{3AA}")
+        );
+        // A combining tonos after the letter is left out as well.
+        assert_eq!(
+            drawn(&mut setup, "\u{3BF}\u{301}a", small),
+            both("\u{39F}A")
+        );
+        // In capitals the source keeps the tonos, composed or not.
+        assert_eq!(
+            drawn(&mut setup, "\u{3CC}\u{3BF}\u{301}", caps),
+            (
+                "\u{39F}\u{39F}".to_owned(),
+                "\u{3CC}\u{3BF}\u{301}".to_owned()
+            )
+        );
+        // Small capitals leave capitals as they are, with their tonos; Latin keeps its
+        // accents.
+        assert_eq!(
+            drawn(&mut setup, "\u{38C}\u{39F}\u{301}", small),
+            both("\u{38C}\u{39F}\u{301}")
+        );
+        assert_eq!(
+            drawn(&mut setup, "e\u{301}", caps),
+            ("E\u{301}".to_owned(), "e\u{301}".to_owned())
+        );
     }
 
     #[test]
