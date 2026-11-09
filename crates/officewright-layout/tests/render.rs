@@ -556,7 +556,7 @@ fn text_of_a_font_with_a_damaged_glyph_is_drawn_in_another_font() -> TestResult 
         [
             "some glyphs of Officewright Test cannot be embedded (cannot subset font face 0: \
              glyph 2: its loca entries do not give a range of the glyf table); their text is \
-             drawn in other fonts, or as the missing-glyph shape where no other font has it"
+             drawn in other fonts, or as the missing-glyph shape"
         ]
     );
     Ok(())

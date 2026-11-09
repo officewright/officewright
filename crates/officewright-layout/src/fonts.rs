@@ -143,7 +143,7 @@ impl<'a> Fonts<'a> {
                 Location::default(),
                 format!(
                     "some glyphs of {name} cannot be embedded ({why}); their text is drawn in \
-                     other fonts, or as the missing-glyph shape where no other font has it"
+                     other fonts, or as the missing-glyph shape"
                 ),
             );
         }

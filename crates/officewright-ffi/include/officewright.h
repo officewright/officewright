@@ -165,8 +165,9 @@
 /**
  * A report entry: a font is embedded with what its license or format restricts; or some
  * of its glyphs cannot be embedded, and their text is drawn in other fonts or as the
- * missing-glyph shape; or it cannot be embedded at all, and its text is not drawn. Later
- * versions add kinds with new values; existing values never change.
+ * missing-glyph shape; or it cannot be embedded at all, and none of its text is drawn
+ * when its license forbids embedding, else only what other fonts have, its white space
+ * left out. Later versions add kinds with new values; existing values never change.
  */
 #define OW_REPORT_KIND_FONT_EMBEDDING 8
 
@@ -909,9 +910,10 @@ enum OwStatus ow_doc_document_open_bytes(const uint8_t *data,
  * translated the document wrongly, a defect worth reporting with the document. A font
  * with glyphs that cannot be embedded, such as a damaged font the document embeds, is
  * no error here: the text of those glyphs is drawn in other fonts, or as the
- * missing-glyph shape where no other font has it. Nor is a font that
- * `ow_pdf_font_open_bytes` would refuse, such as one whose license forbids embedding:
- * its text is not drawn. The report says so in both cases
+ * missing-glyph shape. Nor is a font that cannot be embedded at all, such as one
+ * `ow_pdf_font_open_bytes` refuses: none of its text is drawn when its license forbids
+ * embedding; otherwise its text is drawn in other fonts where they have it, and the
+ * rest, its white space included, is not drawn. The report says so in each case
  * (`OW_REPORT_KIND_FONT_EMBEDDING`).
  *
  * # Safety
@@ -1005,8 +1007,10 @@ enum OwStatus ow_render_options_add_font_dir(struct OwRenderOptions *options, co
  * system's. Fails with `OW_STATUS_MALFORMED` if the data is not a font or every face in
  * it is damaged, leaving the options unchanged. The check reads what identifies the
  * font, not every glyph: a font damaged deeper is accepted here. The conversion then
- * draws the text of its glyphs that cannot be embedded in other fonts, or does not
- * draw its text when the font cannot be embedded at all, and reports it
+ * draws the text of its glyphs that cannot be embedded in other fonts or as the
+ * missing-glyph shape. Of a font that cannot be embedded at all it draws none of the
+ * text when the font's license forbids embedding, and otherwise only the text other
+ * fonts have, leaving out the rest, its white space included. It reports each case
  * (`OW_REPORT_KIND_FONT_EMBEDDING`).
  *
  * # Safety
