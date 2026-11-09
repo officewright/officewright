@@ -3089,6 +3089,23 @@ fn takes_cell_margins_that_are_no_length_as_word_s_renders_show() {
         assert_eq!(cell.margins(), Some(five));
     }
     assert_eq!(cells[3].margins(), None);
+    // With another table margin on each side, each side of such a cell takes the table's
+    // margin on that side.
+    let table_margins = r#"<w:top w:w="20" w:type="dxa"/><w:start w:w="40" w:type="dxa"/><w:bottom w:w="60" w:type="dxa"/><w:end w:w="80" w:type="dxa"/>"#;
+    let table_of_sides = ir::CellMargins::default()
+        .with_top(Pt(1.0))
+        .with_start(Pt(2.0))
+        .with_bottom(Pt(3.0))
+        .with_end(Pt(4.0));
+    for (kind, width) in [("pct", 500), ("auto", 200), ("nil", 0)] {
+        let body = format!(
+            "<w:tbl><w:tblPr><w:tblCellMar>{table_margins}</w:tblCellMar></w:tblPr><w:tr><w:tc><w:tcPr><w:tcMar>{}</w:tcMar></w:tcPr><w:p/></w:tc></w:tr></w:tbl><w:p/>",
+            margins(kind, width)
+        );
+        let translation = translate(&open(&body));
+        let cell = &tables(&translation)[0].rows()[0].cells()[0];
+        assert_eq!(cell.margins(), Some(table_of_sides), "{kind}");
+    }
 
     // word-rules/E-table-cell-margins-nil: in a table style whose margins are 10 pt, a
     // table's own side of type nil is 0 at the start and the end (and at the top and
