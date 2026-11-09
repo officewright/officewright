@@ -46,10 +46,11 @@ def note_parts(parts):
     return [name for name, _ in parts if name in ("word/footnotes.xml", "word/endnotes.xml")]
 
 
-def carlito_width(text, size=11):
-    """The width in points of text in Carlito, Calibri's metric twin, at size points: the
-    advances of hmtx for the glyphs that its (3, 1) cmap, of format 4, maps the text to."""
-    data = CARLITO.read_bytes()
+def carlito_width(text, size=11, font=CARLITO):
+    """The width in points of text in Carlito, Calibri's metric twin, or in the TrueType
+    font, at size points: the advances of hmtx for the glyphs that its (3, 1) cmap, of
+    format 4, maps the text to."""
+    data = font.read_bytes()
     (count,) = struct.unpack(">H", data[4:6])
     tables = {}
     for i in range(count):
@@ -3401,6 +3402,21 @@ class Packages(unittest.TestCase):
                 self.assertEqual(text_sizes, {"18"})
                 header = ElementTree.fromstring(parts["word/header1.xml"])
                 self.assertEqual(len(header.findall(f"{W}tbl")), 2)
+                # Each line between the breaks fits its cell (a third of the column, less
+                # the cell margins of 5.4 pt), so a cell has the three lines its label says.
+                liberation = CARLITO.parents[1] / "liberation" / "LiberationSans-Regular.ttf"
+                room = (rules.TEXT_W // 3 - 2 * 108) / 20
+                for cell in tables[1].iter(f"{W}tc"):
+                    lines, line = [], ""
+                    for r in cell.iter(f"{W}r"):
+                        if r.find(f"{W}br") is not None:
+                            lines.append(line)
+                            line = ""
+                        line += "".join(t.text or "" for t in r.iter(f"{W}t"))
+                    lines.append(line)
+                    self.assertEqual(len(lines), 3)
+                    for text in lines:
+                        self.assertLess(carlito_width(text, 9, liberation), room, text)
 
     def test_inline_vml_text_box_cases_have_their_space_before(self):
         v = "{urn:schemas-microsoft-com:vml}"
@@ -3598,6 +3614,7 @@ class Packages(unittest.TestCase):
                     self.assertEqual(selected, [1, 0x80000008], name)
                     left, top, right, bottom = struct.unpack("<4i", payload)
                     rects.append((left, top, right - 1, bottom - 1))
+                    self.assertTrue(all(v % unit == 0 for v in rects[-1]), name)
                 offset, records = offset + size, records + 1
             self.assertEqual(brushes, {1: (0, 0x000000)}, name)  # solid, black
             self.assertEqual(struct.unpack("<I", data[52:56])[0], records)
@@ -3625,6 +3642,7 @@ class Packages(unittest.TestCase):
                 elif function == 0x041B:  # META_RECTANGLE: bottom, right, top, left
                     bottom, right, top, left = words
                     rects.append((left, top, right - 1, bottom - 1))
+                    self.assertTrue(all(v % unit == 0 for v in rects[-1]), name)
                 elif function == 0x020C:  # META_SETWINDOWEXT: height, width
                     self.assertEqual(words, (len(rows) * unit, len(rows[0]) * unit))
                 offset += size * 2
@@ -3670,6 +3688,12 @@ class Packages(unittest.TestCase):
         self.assertIn("- " * 76, texts)
         self.assertIn("✂ " + "- " * 73, texts)
         self.assertIn("_" * 80, texts)
+        # Each fits on one line of the column in Carlito, the scissors given a generous
+        # 15 pt, as Carlito has no glyph for them.
+        column = rules.TEXT_W / 20
+        self.assertLess(carlito_width("- " * 76), column)
+        self.assertLess(15 + carlito_width(" " + "- " * 73), column)
+        self.assertLess(carlito_width("_" * 80), column)
         leaders = [(t.get(f"{W}val"), t.get(f"{W}pos"), t.get(f"{W}leader"))
                    for t in body.iter(f"{W}tab") if t.get(f"{W}val")]
         self.assertEqual(leaders, [("right", str(rules.TEXT_W), leader)
