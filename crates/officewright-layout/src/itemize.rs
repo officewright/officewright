@@ -20,7 +20,7 @@ use crate::ir::{
 };
 use crate::lists::Label;
 use crate::notes::NoteNumbers;
-use crate::numbers::number_text;
+use crate::numbers::{UNREPRESENTABLE, Words, Written, in_language, written};
 use crate::report::{Location, ReportKind};
 use crate::shape::{Features, ShapeRequest, ShapedRun, Shaper, ShapingFace, combining_class};
 use crate::slot::{Slot, slot};
@@ -740,14 +740,24 @@ impl Builder<'_, '_, '_> {
             _ => (values.page, &values.format),
         };
         let format = field.format().as_ref().unwrap_or(default);
-        let (text, decimal) = number_text(number, format);
-        if decimal {
-            self.fonts.report_once(
-                ReportKind::FeatureUnsupported,
-                self.location,
-                "numbers in a format the layout does not write are written as decimal".to_owned(),
+        let style = self.style(field.style());
+        let (words, known) = Words::of(style.language().latin());
+        if !known && in_language(format) {
+            self.unsupported(
+                "numbers in words and ordinals in languages other than English and German are \
+                 written in English",
             );
         }
+        let text = match written(number, format, words) {
+            Written::Text(text) => text,
+            Written::Decimal(text) => {
+                self.unsupported(
+                    "numbers in a format the layout does not write are written as decimal",
+                );
+                text
+            }
+            Written::Unrepresentable => UNREPRESENTABLE.to_owned(),
+        };
         let start = self.out.text.len();
         self.text(&text, field.style());
         if *field.kind() == FieldKind::Page {

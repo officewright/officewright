@@ -6512,6 +6512,76 @@ mod tests {
         assert_eq!(footers, ["I 5 2", "II 5 2", "c 5 3", "d 5 3", "e 5 3"]);
     }
 
+    #[test]
+    fn page_fields_write_numbers_in_words_dashes_and_the_language_of_their_style() {
+        use crate::ir::{Field, FieldKind, Language, NumberFormat, PageNumbering};
+        // Each field a paragraph of its own: in English, German and French, and a number
+        // too large for letters, as E-number-formats has them.
+        let in_language = |tag: &str| {
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0))
+                .with_language(Language::default().with_latin(Some(tag.into())))
+        };
+        let mut document = Document::default();
+        let english = document.add_run_style(in_language("en-US"));
+        let german = document.add_run_style(in_language("de-DE"));
+        let french = document.add_run_style(in_language("fr-FR"));
+        let paragraph = |style, kind, format| -> Block {
+            Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0))
+                .with_inlines([Inline::Field(
+                    Field::new(kind, style).with_format(Some(format)),
+                )])
+                .into()
+        };
+        document.add_section(
+            Section::new(setup())
+                .with_page_numbering(PageNumbering::default().with_start(Some(27)))
+                .with_blocks(vec![
+                    paragraph(english, FieldKind::Page, NumberFormat::OrdinalText),
+                    paragraph(german, FieldKind::Page, NumberFormat::CardinalText),
+                    paragraph(german, FieldKind::Page, NumberFormat::Ordinal),
+                    paragraph(english, FieldKind::Page, NumberFormat::NumberInDash),
+                    paragraph(english, FieldKind::NumPages, NumberFormat::Hex),
+                ]),
+        );
+        document.add_section(
+            Section::new(setup())
+                .with_page_numbering(PageNumbering::default().with_start(Some(781)))
+                .with_blocks(vec![
+                    paragraph(english, FieldKind::Page, NumberFormat::UpperLetter),
+                    paragraph(french, FieldKind::Page, NumberFormat::CardinalText),
+                ]),
+        );
+        let (laid, report) = laid(&document, 100);
+        let pages: Vec<String> = laid
+            .expect("pages")
+            .pages
+            .iter()
+            .map(|page| texts(page).concat().replace(' ', ""))
+            .collect();
+        assert_eq!(
+            pages,
+            [
+                "twenty-seventhSiebenundzwanzig27.-27-2",
+                "Error!Numbercannotberepresentedinspecifiedformat.sevenhundredeighty-one",
+            ]
+        );
+        // The test font has no glyph for most of these characters, which is reported too.
+        let languages: Vec<String> = messages(&report)
+            .into_iter()
+            .filter(|message| message.contains("language"))
+            .collect();
+        assert_eq!(
+            languages,
+            [
+                "numbers in words and ordinals in languages other than English and German are \
+              written in English"
+            ]
+        );
+    }
+
     /// A paragraph of the fields `kinds`, in the test font.
     fn fields(style: RunStyleId, kinds: Vec<crate::ir::FieldKind>) -> Block {
         Paragraph::new(style)
@@ -7886,11 +7956,9 @@ mod tests {
         assert!(reported(&split(7, &[false, true], decimal.clone())));
         // The field is on the second of the paragraph's two lines on page 1.
         assert!(!reported(&split(6, &[false, true, false, false], decimal)));
-        // On page 2 the field shows nothing: Chicago marks stop at 116.
-        let chicago = PageNumbering::default()
-            .with_format(NumberFormat::Chicago)
-            .with_start(Some(117));
-        assert!(!reported(&split(7, &[false, true], chicago)));
+        // On page 2 the field shows nothing: the format writes no number.
+        let none = PageNumbering::default().with_format(NumberFormat::None);
+        assert!(!reported(&split(7, &[false, true], none)));
     }
 
     #[test]
