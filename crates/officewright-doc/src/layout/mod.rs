@@ -102,8 +102,9 @@ impl Document {
     /// from semver until 1.0.
     ///
     /// Not translated yet, and listed: the table properties of a table style's conditional
-    /// formats and a row's table property exceptions, drawings that show no picture
-    /// (shapes, charts, text boxes, groups, in DrawingML or VML) and other objects,
+    /// formats and a row's table property exceptions, drawings that show neither a picture
+    /// nor a text box (shapes, charts, groups, in DrawingML or VML) and other objects, the
+    /// text boxes of a group of VML shapes, a reference to a note inside a text box,
     /// equations, and spacing given in line units on a document grid, which keeps its
     /// value in points.
     ///
@@ -114,24 +115,29 @@ impl Document {
     /// to open, gets an empty one, and that is listed too.
     ///
     /// And, once per document at the first place each is met, what the IR has no place for
-    /// yet in sections, paragraphs, runs and pictures: page borders, line numbers, the
-    /// document grid and vertical text; right-to-left paragraphs, text frames and drop
-    /// caps; in a run that shows text and is not hidden, or in a list label that is not
-    /// hidden, embossed, engraved, outlined and shadowed text, emphasis marks, Word 2010's
-    /// effects of text (glow, shadow, reflection, outline, fill and 3-D) unless their
-    /// values change nothing, and, with `enableOpenTypeFeatures` on, its forms and spacing
-    /// of figures and stylistic sets other than the font's default; borders around text, in
-    /// a run that is not hidden and shows text, a tab or a picture in the line; a picture's
-    /// outline, its colour effects, its shadow, reflection, glow, soft edges and 3-D
-    /// effects, and a shape it is cut to; a picture or an object in the line of a raised or
-    /// lowered run; and a paragraph mark, a table row or a table cell
-    /// deleted as a tracked change, which the IR keeps, and a paragraph mark moved away. A
-    /// deleted mark is listed only where a paragraph or a table follows, in the same cell
-    /// or story or in the next section: the last paragraph of a cell or a story is joined
-    /// to nothing. A row in which the last paragraph mark of every cell is deleted or moved
-    /// away is listed as a deleted row, since that is how Word writes a row it moves. Other
-    /// tracked changes are taken as accepted and comments are left out, as Word's PDF of
-    /// the document without markup shows them, so they are not listed.
+    /// yet in sections, paragraphs, runs, pictures and text boxes: page borders, line
+    /// numbers, the document grid and vertical text; right-to-left paragraphs, text frames
+    /// and drop caps; in a run that shows text and is not hidden, or in a list label that
+    /// is not hidden, embossed, engraved, outlined and shadowed text, emphasis marks, Word
+    /// 2010's effects of text (glow, shadow, reflection, outline, fill and 3-D) unless
+    /// their values change nothing, and, with `enableOpenTypeFeatures` on, its forms and
+    /// spacing of figures and stylistic sets other than the font's default; borders around
+    /// text, in a run that is not hidden and shows text, a tab or a picture in the line; a
+    /// picture's outline, its colour effects, its shadow, reflection, glow, soft edges and
+    /// 3-D effects, and a shape it is cut to; in a text box, a link to the next box of a
+    /// chain, a turn, vertical text, WordArt, columns, a shape other than a rectangle, a
+    /// shadow or other effects, text cut off at its bottom, a negative inset, a fill of a
+    /// gradient, a pattern or a picture, a line of a colour the IR does not hold, of dashes
+    /// it has no style for or inside the frame, and a fill or a line partly transparent; a
+    /// picture or an object in the line of a raised or lowered run; and a paragraph mark, a
+    /// table row or a table cell deleted as a tracked change, which the IR keeps, and a
+    /// paragraph mark moved away. A deleted mark is listed only where a paragraph or a
+    /// table follows, in the same cell or story or in the next section: the last paragraph
+    /// of a cell or a story is joined to nothing. A row in which the last paragraph mark of
+    /// every cell is deleted or moved away is listed as a deleted row, since that is how
+    /// Word writes a row it moves. Other tracked changes are taken as accepted and comments
+    /// are left out, as Word's PDF of the document without markup shows them, so they are
+    /// not listed.
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
@@ -227,6 +233,9 @@ struct Translator<'a> {
     notes: HashMap<(bool, i64), ir::NoteId>,
     /// Whether the blocks being translated are a note's, which holds no note references.
     in_note: bool,
+    /// Whether the blocks being translated are a text box's, which holds no note
+    /// references.
+    in_text_box: bool,
     /// How many notes the IR has.
     notes_added: usize,
     /// The IR image of each image of the package shown so far, by its place among the
@@ -300,6 +309,21 @@ enum Once {
     VmlPictureShadow = 1 << 32,
     VmlPictureBorder = 1 << 33,
     RaisedObject = 1 << 34,
+    TextBoxLinked = 1 << 35,
+    TextBoxRotated = 1 << 36,
+    TextBoxVertical = 1 << 37,
+    TextBoxWordArt = 1 << 38,
+    TextBoxColumns = 1 << 39,
+    TextBoxShape = 1 << 40,
+    TextBoxEffects = 1 << 41,
+    TextBoxClip = 1 << 42,
+    TextBoxInsets = 1 << 43,
+    TextBoxFill = 1 << 44,
+    TextBoxPictureFill = 1 << 45,
+    TextBoxLineColor = 1 << 46,
+    TextBoxDash = 1 << 47,
+    TextBoxTransparency = 1 << 48,
+    TextBoxLineInside = 1 << 49,
 }
 
 impl<'a> Translator<'a> {
@@ -322,6 +346,7 @@ impl<'a> Translator<'a> {
             copied: 0,
             notes: HashMap::new(),
             in_note: false,
+            in_text_box: false,
             notes_added: 0,
             images: HashMap::new(),
             missing_image: None,

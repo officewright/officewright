@@ -63,8 +63,8 @@ pub use table_properties::{
     VerticalAlignment, VerticalJustification,
 };
 pub use text_box::{
-    CompoundLine, FillKind, LineDash, ShapeFill, ShapeOutline, TextBox, TextBoxAnchor,
-    TextBoxDirection,
+    CompoundLine, FillKind, LineAlignment, LineDash, ShapeFill, ShapeOutline, TextBox,
+    TextBoxAnchor, TextBoxDirection,
 };
 pub use theme::{ColorScheme, FontCollection, FontScheme, SchemeColor, SystemColor, Theme};
 pub(crate) use views::kind_index;

@@ -1,17 +1,24 @@
 //! Drawings, DrawingML (`w:drawing`) and VML (`w:pict`), and the previews of embedded
-//! objects (`w:object`) as IR objects: a picture in the line or floating, with its image
-//! added to the IR once however many pictures show it. Drawings that show no picture
-//! (shapes, charts, text boxes, groups) and objects without a preview are listed.
+//! objects (`w:object`) as IR objects: a picture or a text box in the line or floating,
+//! with a picture's image added to the IR once however many pictures show it. Drawings
+//! that show neither (shapes, charts, groups) and objects without a preview are listed.
 
-use officewright_core::Pt;
+use officewright_core::{Color, Pt};
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
-use super::{Once, Translator};
+use super::inline::Place;
+use super::{Once, Step, Translator};
 use crate::model::{
-    Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, Crop, Drawing, EmbeddedObject,
-    HorizontalReference, Image, Offsets, VerticalReference, VmlDrawing, VmlPicture, WrapKind,
+    Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, CompoundLine, Crop, Drawing,
+    EmbeddedObject, FillKind, HorizontalReference, Image, LineAlignment, LineDash, Offsets,
+    ShapeFill, ShapeOutline, TextBox, TextBoxAnchor, TextBoxDirection, VerticalReference,
+    VmlDrawing, VmlPicture, WrapKind,
 };
+
+/// What a text box may have that the IR does not hold: what is listed once for it,
+/// whether a box has it, and the entry.
+type Feature<'a> = (Once, fn(TextBox<'a>) -> bool, &'static str);
 
 /// The PNG file signature.
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -19,20 +26,18 @@ const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
 const JPEG: &[u8] = b"\xFF\xD8\xFF";
 
 impl<'a> Translator<'a> {
-    /// A drawing as an IR object in the line or anchored there, or none when it shows
-    /// no picture or has no size; both are listed. A picture whose image the package does
-    /// not have keeps its frame, empty, and is listed.
-    pub(super) fn drawing(&mut self, drawing: Drawing<'a>) -> Option<ir::Inline> {
+    /// A drawing as an IR object in the line or anchored there, at `place` among the
+    /// inlines of its paragraph, or none when it shows no picture or text box or has no
+    /// size; both are listed. A picture whose image the package does not have keeps its
+    /// frame, empty, and is listed.
+    pub(super) fn drawing(&mut self, drawing: Drawing<'a>, place: Place) -> Option<ir::Inline> {
         let Some(picture) = drawing.picture() else {
-            if drawing.text_box().is_some() {
-                self.leave_out(ReportKind::FeatureUnsupported, || {
-                    "a text box is left out".into()
-                });
-            } else {
-                self.leave_out(ReportKind::FeatureUnsupported, || {
-                    "a drawing that shows no picture (a shape, chart or group) is left out".into()
-                });
+            if let Some(text_box) = drawing.text_box() {
+                return self.text_box_object(text_box, drawing.effect_extent(), place);
             }
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "a drawing that shows no picture (a shape, chart or group) is left out".into()
+            });
             return None;
         };
         let (Some(width), Some(height)) = (drawing.width(), drawing.height()) else {
@@ -90,21 +95,16 @@ impl<'a> Translator<'a> {
     }
 
     /// A VML drawing as an IR object in the line or anchored there, as
-    /// [`drawing`](Self::drawing) makes one of a drawing; none when it shows no
-    /// picture, has no size, or is hidden, which Word does not show either.
-    pub(super) fn vml_drawing(&mut self, drawing: VmlDrawing<'a>) -> Option<ir::Inline> {
+    /// [`drawing`](Self::drawing) makes one of a drawing: its picture, else the first of
+    /// its own shapes that is a text box. None when it shows neither, has no size, or is
+    /// hidden, which Word does not show either.
+    pub(super) fn vml_drawing(
+        &mut self,
+        drawing: VmlDrawing<'a>,
+        place: Place,
+    ) -> Option<ir::Inline> {
         let Some(picture) = drawing.picture() else {
-            if drawing.text_boxes().next().is_some() {
-                self.leave_out(ReportKind::FeatureUnsupported, || {
-                    "a text box is left out (w:pict)".into()
-                });
-            } else {
-                self.leave_out(ReportKind::FeatureUnsupported, || {
-                    "a VML drawing that shows no picture (a shape, text box or group) is left out (w:pict)"
-                        .into()
-                });
-            }
-            return None;
+            return self.vml_text_box(drawing, place);
         };
         if drawing.has_other_shapes() {
             self.leave_out(ReportKind::FeatureUnsupported, || {
@@ -112,6 +112,282 @@ impl<'a> Translator<'a> {
             });
         }
         self.vml_picture(picture)
+    }
+
+    /// The first of a VML drawing's own shapes that is a text box, as an IR object; the
+    /// drawing's other shapes, and the text boxes of its groups, which a group places, are
+    /// listed.
+    fn vml_text_box(&mut self, drawing: VmlDrawing<'a>, place: Place) -> Option<ir::Inline> {
+        let Some(text_box) = drawing
+            .text_boxes()
+            .find(|text_box| !text_box.is_in_group())
+        else {
+            if drawing.text_boxes().next().is_some() {
+                self.leave_out(ReportKind::FeatureUnsupported, || {
+                    "a group of VML shapes is left out, with the text boxes in it (w:pict)".into()
+                });
+            } else {
+                self.leave_out(ReportKind::FeatureUnsupported, || {
+                    "a VML drawing that shows no picture or text box (a shape or group) is left out (w:pict)"
+                        .into()
+                });
+            }
+            return None;
+        };
+        if drawing.has_other_shapes() {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "a VML drawing's shapes other than its first text box are left out (w:pict)".into()
+            });
+        }
+        self.text_box_object(text_box, Offsets::default(), place)
+    }
+
+    /// A text box as an IR object in the line or anchored there, its frame taking
+    /// `effect_extent` more room, as [`drawing`](Self::drawing) places a picture; none
+    /// when it is hidden, which Word does not show, or has no size, which is listed.
+    fn text_box_object(
+        &mut self,
+        text_box: TextBox<'a>,
+        effect_extent: Offsets,
+        place: Place,
+    ) -> Option<ir::Inline> {
+        if text_box.is_hidden() {
+            return None;
+        }
+        let (Some(width), Some(height)) = (text_box.width(), text_box.height()) else {
+            self.leave_out(ReportKind::FeatureUnsupported, || {
+                "a text box without a size is left out".into()
+            });
+            return None;
+        };
+        let content = self.text_box(text_box, place);
+        let size = ir::Size::new(width, height);
+        let effect_extent = insets(effect_extent);
+        Some(match text_box.anchor() {
+            Some(anchor) => ir::Inline::anchored(
+                anchored(content, size, &anchor).with_effect_extent(effect_extent),
+            ),
+            None => ir::InlineObject::new(content, size)
+                .with_effect_extent(effect_extent)
+                .into(),
+        })
+    }
+
+    /// A text box as IR content, its blocks translated as a story of their own, at
+    /// `place` among the inlines of the paragraph that holds it, where what the box has that
+    /// the IR does not hold is listed too. The model reads no text box in another (the
+    /// document leaves out the content of such a box as it opens), so that no IR text box
+    /// holds one, which `Document::validate` refuses.
+    #[inline(never)]
+    fn text_box(&mut self, text_box: TextBox<'a>, place: Place) -> ir::ObjectContent {
+        let depth = self.path.len();
+        self.path.push(Step::Index(place.index));
+        if let Some(index) = place.in_result {
+            self.path
+                .extend([Step::Field("result"), Step::Index(index)]);
+        }
+        self.path.push(Step::Field("content"));
+        self.list_text_box_features(text_box);
+        let fill = self.text_box_fill(text_box.fill());
+        let line = text_box.outline();
+        let outline = self.text_box_outline(line);
+        // Word starts a box's text inside its line: the insets count from the line's inner
+        // edge, half a centred line's width and all of a line inside the frame within it, on
+        // every side (Word's references of E-textbox-fill-outline, cases 04 to 06, and of
+        // E-textbox-vml). The IR's insets count from the frame.
+        let reach = match (outline, line) {
+            (Some(outline), Some(line)) => match line.alignment() {
+                LineAlignment::Inside => outline.width().0,
+                _ => outline.width().0 / 2.0,
+            },
+            _ => 0.0,
+        };
+        let written = text_box.insets();
+        if !self.reported(Once::TextBoxInsets)
+            && [
+                written.left(),
+                written.top(),
+                written.right(),
+                written.bottom(),
+            ]
+            .into_iter()
+            .any(|inset| inset.0 < 0.0)
+        {
+            self.report_once(
+                Once::TextBoxInsets,
+                "a text box's negative inset (lIns, tIns, rIns, bIns, or inset in VML) is taken as 0, here and wherever else the document has one",
+            );
+        }
+        let not_negative = |inset: Pt| Pt(inset.0.max(0.0) + reach);
+        let insets = ir::Insets::default()
+            .with_left(not_negative(written.left()))
+            .with_top(not_negative(written.top()))
+            .with_right(not_negative(written.right()))
+            .with_bottom(not_negative(written.bottom()));
+        // Word offers only these three for a text box; justified and distributed text is
+        // taken as the IR says.
+        let anchor = match text_box.vertical_anchor() {
+            TextBoxAnchor::Top | TextBoxAnchor::Distributed => ir::TextBoxAnchor::Top,
+            TextBoxAnchor::Center | TextBoxAnchor::Justified => ir::TextBoxAnchor::Center,
+            TextBoxAnchor::Bottom => ir::TextBoxAnchor::Bottom,
+        };
+        let in_text_box = std::mem::replace(&mut self.in_text_box, true);
+        let blocks = self.blocks(text_box.blocks());
+        self.in_text_box = in_text_box;
+        self.path.truncate(depth);
+        ir::ObjectContent::text_box(
+            ir::TextBox::new()
+                .with_blocks(blocks)
+                .with_insets(insets)
+                .with_anchor(anchor)
+                .with_fill(fill)
+                .with_outline(outline),
+        )
+    }
+
+    /// Lists, once per document each, what a text box has that the IR does not hold:
+    /// each is looked for until it is listed.
+    fn list_text_box_features(&mut self, text_box: TextBox<'a>) {
+        let features: [Feature<'a>; 8] = [
+            (
+                Once::TextBoxLinked,
+                TextBox::is_linked,
+                "a chain of linked text boxes (wps:linkedTxbx, or mso-next-textbox in VML) is drawn with all its text in its first box, here and wherever else the document has one",
+            ),
+            (
+                Once::TextBoxRotated,
+                |text_box| text_box.rotation().rem_euclid(360.0) != 0.0,
+                "a turned text box (a:xfrm rot, or rotation in VML) is drawn upright, here and wherever else the document has one",
+            ),
+            (
+                Once::TextBoxVertical,
+                |text_box| text_box.text_direction() != TextBoxDirection::Horizontal,
+                "vertical text in a text box (wps:bodyPr vert, or layout-flow in VML) is drawn across, here and wherever else the document has some",
+            ),
+            (
+                Once::TextBoxWordArt,
+                TextBox::is_word_art,
+                "WordArt (fromWordArt, or a:prstTxWarp) is drawn as plain text in a box, here and wherever else the document has some",
+            ),
+            (
+                Once::TextBoxColumns,
+                |text_box| text_box.columns() > 1,
+                "the columns of a text box (numCol) are drawn as one, here and wherever else the document has them",
+            ),
+            (
+                Once::TextBoxShape,
+                TextBox::is_shaped,
+                "a text box shaped other than as a rectangle (a:prstGeom other than rect, a:custGeom, or a VML shape such as v:roundrect or a callout) is drawn as a rectangle, here and wherever else the document has one",
+            ),
+            (
+                Once::TextBoxEffects,
+                TextBox::has_effects,
+                "a text box's shadow, reflection, glow, soft edges or 3-D effect (a:effectLst, a:scene3d, a:sp3d, or v:shadow) is not drawn, here and wherever else the document has one",
+            ),
+            (
+                Once::TextBoxClip,
+                TextBox::clips_overflow,
+                "text taller than a text box that cuts it off at its bottom (vertOverflow clip or ellipsis) runs on past the box, here and wherever else the document has some",
+            ),
+        ];
+        for (once, has, message) in features {
+            if !self.reported(once) && has(text_box) {
+                self.report_once(once, message);
+            }
+        }
+    }
+
+    /// The colour a text box is filled with, or none for no fill and for a picture, which
+    /// is listed. A gradient or a pattern is filled with its first colour, and a colour
+    /// partly transparent as if opaque; both are listed.
+    fn text_box_fill(&mut self, fill: Option<ShapeFill>) -> Option<Color> {
+        let fill = fill.filter(|fill| fill.opacity() > 0.0)?;
+        match fill.kind() {
+            FillKind::Solid => {}
+            FillKind::Gradient | FillKind::Pattern => self.report_once(
+                Once::TextBoxFill,
+                "a text box's gradient or pattern fill (a:gradFill, a:pattFill, or a v:fill of that type) is drawn in its first colour, here and wherever else the document has one",
+            ),
+            // The model gives a picture no colour.
+            FillKind::Picture => self.report_once(
+                Once::TextBoxPictureFill,
+                "a text box's picture fill (a:blipFill, or a v:fill of type tile or frame) is left out, here and wherever else the document has one",
+            ),
+        }
+        if fill.opacity() < 1.0 {
+            self.report_transparency();
+        }
+        let (red, green, blue) = fill.color()?;
+        Some(Color::rgb(red, green, blue))
+    }
+
+    /// The line around a text box as an IR border. A line partly transparent is drawn as
+    /// if opaque, one of no colour the IR holds (a gradient, a pattern, a colour the
+    /// document does not define) black, and dashes the IR has no style for (of the
+    /// document's own lengths, or on a double line) plainly; each is listed.
+    fn text_box_outline(&mut self, outline: Option<ShapeOutline>) -> Option<ir::Border> {
+        let outline = outline.filter(|outline| outline.opacity() > 0.0)?;
+        if outline.opacity() < 1.0 {
+            self.report_transparency();
+        }
+        let color = match outline.color() {
+            Some((red, green, blue)) => ir::ColorValue::Rgb(Color::rgb(red, green, blue)),
+            None => {
+                self.report_once(
+                    Once::TextBoxLineColor,
+                    "a text box's line in a gradient, a pattern or a colour the document does not define is drawn black, here and wherever else the document has one",
+                );
+                ir::ColorValue::Auto
+            }
+        };
+        if outline.alignment() == LineAlignment::Inside {
+            self.report_once(
+                Once::TextBoxLineInside,
+                "a text box's line inside its frame (a:ln algn=\"in\") is drawn centred on the frame, here and wherever else the document has one",
+            );
+        }
+        let dash = outline.dash();
+        let style = match outline.compound() {
+            CompoundLine::Single => match dash {
+                LineDash::Solid => ir::BorderStyle::Single,
+                LineDash::Dot | LineDash::SystemDot => ir::BorderStyle::Dotted,
+                LineDash::Dash | LineDash::LongDash | LineDash::SystemDash | LineDash::Custom => {
+                    ir::BorderStyle::Dashed
+                }
+                LineDash::DashDot | LineDash::LongDashDot | LineDash::SystemDashDot => {
+                    ir::BorderStyle::DotDash
+                }
+                LineDash::LongDashDotDot | LineDash::SystemDashDotDot => {
+                    ir::BorderStyle::DotDotDash
+                }
+            },
+            CompoundLine::Double => ir::BorderStyle::Double,
+            CompoundLine::ThickThin => ir::BorderStyle::ThickThinSmallGap,
+            CompoundLine::ThinThick => ir::BorderStyle::ThinThickSmallGap,
+            CompoundLine::Triple => ir::BorderStyle::ThinThickThinSmallGap,
+        };
+        let plain = dash == LineDash::Custom
+            || (outline.compound() != CompoundLine::Single && dash != LineDash::Solid);
+        if plain {
+            self.report_once(
+                Once::TextBoxDash,
+                "a text box's line of dashes of the document's own lengths (a:custDash, or numbers in dashstyle) or of dashes on a double or triple line is drawn with plain dashes or solid, here and wherever else the document has one",
+            );
+        }
+        Some(
+            ir::Border::default()
+                .with_style(style)
+                .with_width(outline.width())
+                .with_color(color),
+        )
+    }
+
+    /// Lists a fill or a line of a text box that is partly transparent.
+    fn report_transparency(&mut self) {
+        self.report_once(
+            Once::TextBoxTransparency,
+            "a text box's partly transparent fill or line (a:alpha, or opacity in VML) is drawn opaque, here and wherever else the document has one",
+        );
     }
 
     /// An embedded object as its preview picture, in the line or anchored there, as

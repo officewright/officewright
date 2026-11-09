@@ -6,7 +6,7 @@ use officewright_layout::{ReportEntry, ReportKind};
 use super::*;
 
 /// The translation of a document, which must be valid IR.
-fn translate(document: &Document) -> Translation {
+pub(super) fn translate(document: &Document) -> Translation {
     let translation = document.to_layout_ir();
     if let Err(err) = translation.document().validate() {
         panic!("not valid: {err}");
@@ -15,7 +15,7 @@ fn translate(document: &Document) -> Translation {
 }
 
 /// The paragraphs of the first section.
-fn paragraphs(translation: &Translation) -> Vec<&ir::Paragraph> {
+pub(super) fn paragraphs(translation: &Translation) -> Vec<&ir::Paragraph> {
     translation.document().sections()[0]
         .blocks()
         .iter()
@@ -3994,7 +3994,7 @@ fn translates_vml_pictures_as_pictures_are() {
         left_out,
         [
             "a picture's image is not in the package: its frame is left empty",
-            "a VML drawing that shows no picture (a shape, text box or group) is left out (w:pict)",
+            "a VML drawing that shows no picture or text box (a shape or group) is left out (w:pict)",
             "a picture without a size is left out",
         ]
     );
@@ -4229,38 +4229,7 @@ fn translates_vml_pictures_whose_values_are_out_of_range_into_valid_ir() {
 }
 
 #[test]
-fn lists_text_boxes_apart_from_other_shapes() {
-    // Until the IR takes text boxes, a text box is listed as one, in DrawingML and in
-    // VML, and other shapes as before.
-    use super::text_box::{SHAPES, drawing, p, pict, txbx};
-    let body = format!(
-        r#"<w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps" {SHAPES}>{}</mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent></w:r><w:r>{}</w:r><w:r>{}</w:r></w:p>"#,
-        drawing(&format!("{}<wps:bodyPr/>", txbx(&p("Boxed")))),
-        pict(r#"<v:rect style="width:10pt;height:10pt"/>"#),
-        drawing("<wps:spPr/><wps:bodyPr/>"),
-        pict(&format!(
-            r#"<v:shape style="width:10pt;height:10pt"><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape>"#,
-            p("Boxed")
-        )),
-    );
-    let translation = translate(&open(&body));
-    let left_out: Vec<&str> = translation
-        .left_out()
-        .iter()
-        .map(ReportEntry::message)
-        .collect();
-    assert_eq!(
-        left_out,
-        [
-            "a text box is left out",
-            "a drawing that shows no picture (a shape, chart or group) is left out",
-            "a text box is left out (w:pict)",
-        ]
-    );
-}
-
-#[test]
-fn translates_a_vml_text_box_whose_image_data_names_no_image_into_nothing() {
+fn translates_a_vml_text_box_whose_image_data_names_no_image_as_a_text_box() {
     // From the review of #401: the footer of LibreOffice's tdf131594.docx holds a text box
     // with a v:imagedata that names no image, where Word shows only the text box's page
     // number; it was drawn as an empty picture frame of 144 by 144 pt.
@@ -4273,13 +4242,20 @@ fn translates_a_vml_text_box_whose_image_data_names_no_image_into_nothing() {
         )
     );
     let translation = translate(&with_images(&body));
-    assert!(paragraphs(&translation)[0].inlines().is_empty());
-    let left_out: Vec<&str> = translation
-        .left_out()
-        .iter()
-        .map(ReportEntry::message)
-        .collect();
-    assert_eq!(left_out, ["a text box is left out (w:pict)"]);
+    let inlines = paragraphs(&translation)[0].inlines();
+    let [ir::Inline::Anchored(object)] = inlines else {
+        panic!("not one floating object: {inlines:?}");
+    };
+    let ir::ObjectContent::TextBox(text_box) = object.content() else {
+        panic!("not a text box: {:?}", object.content());
+    };
+    assert_eq!(text_box.fill(), None);
+    assert_eq!(text_box.outline(), None);
+    assert!(
+        translation.left_out().is_empty(),
+        "{:?}",
+        translation.left_out()
+    );
 }
 
 #[test]

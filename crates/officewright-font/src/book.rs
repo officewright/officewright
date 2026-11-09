@@ -234,8 +234,8 @@ impl FaceInfo {
         &self.keys
     }
 
-    /// The characters the face maps. The first call reads the `cmap` and `DMAP` tables
-    /// of every face added from the same file or buffer; a face that cannot be read any
+    /// The characters the face maps. The first call reads the `cmap` tables of every
+    /// face added from the same file or buffer; a face that cannot be read any
     /// more, or whose character map is damaged, maps nothing, and is not read again.
     fn coverage(&self) -> &Coverage {
         let file = &self.coverage.file;
@@ -680,22 +680,21 @@ impl FontBook {
     /// [`faces`](Self::faces).
     ///
     /// A face covers the characters that [`FontFace::char_map`] maps to a glyph other
-    /// than 0 and inside the font, through the subtable it uses of the face's `DMAP` table
-    /// (ISO/IEC 14496-22:2026) first, and of its `cmap` table for the characters that one
-    /// maps to no glyph: exactly the characters [`CharMap::map`](crate::CharMap::map)
-    /// maps, with these exceptions. A symbol font covers the characters its subtable
+    /// than 0 and inside the font, through the subtable it uses of the face's `cmap` table:
+    /// exactly the characters [`CharMap::map`](crate::CharMap::map) maps, with these
+    /// exceptions. A symbol font covers the characters its subtable
     /// lists, normally U+F020 to U+F0FF; the U+0020 to U+00FF that
     /// [`FontFace::glyph_id`] also finds, as Windows does, do not count, so a symbol font
     /// never stands in for Latin text. A face with a subtable whose segments or groups are
     /// out of order or overlap, so that a lookup cannot be trusted, covers nothing; a
     /// repeated closing segment of a format 4 subtable does not count as overlap. A format
-    /// 4 subtable never covers U+FFFF, a noncharacter, and a format 4 `DMAP` subtable
-    /// keeps `cmap`'s U+FFFF from counting too. And a face without a `cmap` table covers
-    /// nothing, even if its `DMAP` table maps characters.
+    /// 4 subtable never covers U+FFFF, a noncharacter. A face's `DMAP` table (ISO/IEC
+    /// 14496-22:2026) is not read, as Word does not read it: a face without a `cmap` table
+    /// covers nothing.
     ///
     /// Adding fonts does not read their character maps. The first query reads, for every
-    /// face added from the same file or buffer, its table directory, its `cmap` and
-    /// `DMAP` tables and the start of its `maxp` table, and keeps what each face maps as
+    /// face added from the same file or buffer, its table directory, its `cmap` table and
+    /// the start of its `maxp` table, and keeps what each face maps as
     /// ranges of characters, so later queries cost a lookup per face; the clones of the
     /// book share it. Faces that share their tables, as those of a collection usually
     /// do, are read once. The work grows with the size of the tables, not with the number
@@ -3708,7 +3707,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_reads_dmap_before_cmap() {
+    fn coverage_and_char_map_read_cmap_whatever_dmap_maps() {
         use testing::{cmap_of, format4, groups_subtable};
         let d = |code: u16, glyph: u16| glyph.wrapping_sub(code);
         // `cmap` maps A to D to glyphs 1 to 4, all the glyphs of the test font but 0.
@@ -3753,6 +3752,9 @@ mod tests {
             ),
             ("unreadable", vec![0, 0]),
         ];
+        // Word reads `cmap` only (its reference of `E-dmap-font.docx`), and so do the
+        // coverage and `FontFace::char_map`: each `DMAP` below leaves A to D as `cmap` maps
+        // them, and maps nothing else.
         for (name, dmap) in cases {
             let mut book = FontBook::new();
             let font = TestFont::new("Test Map")
@@ -3760,39 +3762,26 @@ mod tests {
                 .with_table(b"DMAP", dmap);
             book.add_bytes(font.build(), FontOrigin::User).unwrap();
             let face = book.load(FaceId(0)).unwrap();
+            assert!(!face.is_symbol(), "{name}");
             let map = face.char_map();
             for code_point in (0..=0x2_0010).chain(0x10_FFF0..=0x10_FFFF) {
                 let Some(ch) = char::from_u32(code_point) else {
                     continue;
                 };
-                // The low range of a symbol font is found through the alias only.
-                if face.is_symbol() && code_point <= 0xFF {
-                    continue;
-                }
                 let covers = !book.faces_covering(ch).is_empty();
                 assert_eq!(covers, map.map(ch).is_some(), "{name}: {ch:?}");
+                assert_eq!(covers, ('A'..='D').contains(&ch), "{name}: {ch:?}");
             }
-            let covered = |ch| !book.faces_covering(ch).is_empty();
-            match name {
-                "Unicode" => {
-                    assert!(!covered('A') && covered('B') && covered('X'));
-                    assert_eq!(face.glyph_id('B'), Some(crate::GlyphId::new(2)));
-                }
-                "symbol" => {
-                    // A finds the glyph past the font, B glyph 3 through the alias, which
-                    // does not count; C is `cmap`'s.
-                    assert!(face.is_symbol());
-                    assert!(!covered('A') && face.glyph_id('A').is_none());
-                    assert!(!covered('B') && face.glyph_id('B') == Some(crate::GlyphId::new(3)));
-                    assert!(covered('C') && covered('\u{F042}') && !covered('\u{F041}'));
-                }
-                "full Unicode" => assert!(covered('A') && covered('\u{1F601}')),
-                _ => assert!(covered('A') && covered('D') && !covered('E')),
+            for (ch, glyph) in [('A', 1), ('B', 2), ('C', 3), ('D', 4)] {
+                assert_eq!(
+                    face.glyph_id(ch),
+                    Some(crate::GlyphId::new(glyph)),
+                    "{name}"
+                );
             }
         }
 
-        // A format 4 `DMAP` whose lookup of U+FFFF lands on a segment that maps it past the
-        // font, before the closing one: `cmap`, which maps it, is not consulted.
+        // A format 4 `DMAP` that maps U+FFFF past the font, beside a `cmap` that maps it.
         let cmap_12 = cmap_of(&[(
             3,
             10,
@@ -3815,12 +3804,11 @@ mod tests {
             .with_table(b"DMAP", dmap);
         book.add_bytes(font.build(), FontOrigin::User).unwrap();
         let face = book.load(FaceId(0)).unwrap();
-        assert!(face.glyph_id('\u{FFFF}').is_none());
-        assert!(book.faces_covering('\u{FFFF}').is_empty());
+        assert_eq!(face.glyph_id('\u{FFFF}'), Some(crate::GlyphId::new(2)));
+        assert!(!book.faces_covering('\u{FFFF}').is_empty());
         assert!(!book.faces_covering('D').is_empty());
 
-        // A `DMAP` subtable whose segments overlap cannot be trusted: the face covers
-        // nothing, though `cmap` maps A to D.
+        // A `DMAP` subtable whose segments overlap does not matter either.
         let dmap = cmap_of(&[(
             3,
             1,
@@ -3831,7 +3819,7 @@ mod tests {
             .with_table(b"cmap", cmap())
             .with_table(b"DMAP", dmap);
         book.add_bytes(font.build(), FontOrigin::User).unwrap();
-        assert!(book.faces_covering('C').is_empty());
+        assert!(!book.faces_covering('C').is_empty());
     }
 
     #[test]
