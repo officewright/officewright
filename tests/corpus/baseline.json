@@ -230,6 +230,10 @@
     "tests/corpus/resaved/word-rules/E-paragraph-units-line-grid.docx": "opened",
     "tests/corpus/resaved/word-rules/E-paragraph-units-sizes.docx": "opened",
     "tests/corpus/resaved/word-rules/E-paragraph-units.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-row-break-fields.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-row-break-hidden.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-row-break-numbers.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-row-break-revisions.docx": "opened",
     "tests/corpus/resaved/word-rules/E-section-continuous-headers.docx": "opened",
     "tests/corpus/resaved/word-rules/E-section-continuous-title.docx": "opened",
     "tests/corpus/resaved/word-rules/E-section-next-column.docx": "opened",
@@ -1410,6 +1414,34 @@
       "line_agreement": 1.0,
       "ssim_mean": 0.9789,
       "ssim_min": 0.9789,
+      "text_score": 1.0
+    },
+    "tests/corpus/word-rules/E-row-break-fields.docx": {
+      "line_agreement": 0.9953,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9928,
+      "ssim_min": 0.9872,
+      "text_score": 0.9907
+    },
+    "tests/corpus/word-rules/E-row-break-hidden.docx": {
+      "line_agreement": 0.9495,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9889,
+      "ssim_min": 0.9723,
+      "text_score": 0.9851
+    },
+    "tests/corpus/word-rules/E-row-break-numbers.docx": {
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9922,
+      "ssim_min": 0.9891,
+      "text_score": 1.0
+    },
+    "tests/corpus/word-rules/E-row-break-revisions.docx": {
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9941,
+      "ssim_min": 0.9889,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-section-continuous-headers.docx": {
