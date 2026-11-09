@@ -4656,6 +4656,9 @@ class Packages(unittest.TestCase):
             else:
                 self.assertIsNone(r.find(f"{W}rPr/{W}vanish"), texts(r))
         self.assertEqual(hidden, {"1": False, "2": True, "3": False})
+        # Only the reference is hidden: no run of the notes themselves is.
+        for note_id, element in notes["footnote"].items():
+            self.assertIsNone(element.find(f".//{W}rPr/{W}vanish"), f"footnote {note_id}")
 
         # E-footnote-start-continuous: no notes and no w:footnotePr in section 1; a continuous
         # section 2 from 5 and a section 3 on the next page from 9, both numbered on.
