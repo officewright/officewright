@@ -41,6 +41,7 @@ mod layout_tables;
 mod lines;
 mod lists;
 mod metrics;
+mod notes;
 mod numbers;
 mod pages;
 mod paragraph;
