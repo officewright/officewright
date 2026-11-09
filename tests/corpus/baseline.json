@@ -338,6 +338,12 @@
     "tests/corpus/resaved/word-rules/E-underline-trailspace.docx": "opened",
     "tests/corpus/resaved/word-rules/E-underline.docx": "opened",
     "tests/corpus/resaved/word-rules/E-vml-pictures.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-wrap-square.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-wrap-textbox.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-wrap-tight.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-wrap-top-bottom.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-wrap-vml-textbox.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-wrap-vml.docx": "opened",
     "tests/corpus/word-rules/E-advance-rounding-12.docx": "opened",
     "tests/corpus/word-rules/E-advance-rounding-14.docx": "opened",
     "tests/corpus/word-rules/E-advance-rounding-15.docx": "opened",
@@ -2106,6 +2112,48 @@
       "page_break_agreement": 1.0,
       "ssim_mean": 0.8914,
       "ssim_min": 0.8891,
+      "text_score": 1.0
+    },
+    "tests/corpus/word-rules/E-wrap-square.docx": {
+      "line_agreement": 0.1124,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.8014,
+      "ssim_min": 0.7046,
+      "text_score": 1.0
+    },
+    "tests/corpus/word-rules/E-wrap-textbox.docx": {
+      "line_agreement": 0.5333,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.8342,
+      "ssim_min": 0.7098,
+      "text_score": 0.9466
+    },
+    "tests/corpus/word-rules/E-wrap-tight.docx": {
+      "line_agreement": 0.1282,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.772,
+      "ssim_min": 0.7611,
+      "text_score": 1.0
+    },
+    "tests/corpus/word-rules/E-wrap-top-bottom.docx": {
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.7396,
+      "ssim_min": 0.6575,
+      "text_score": 1.0
+    },
+    "tests/corpus/word-rules/E-wrap-vml-textbox.docx": {
+      "line_agreement": 0.6364,
+      "page_break_agreement": 0.5,
+      "ssim_mean": 0.7809,
+      "ssim_min": 0.7123,
+      "text_score": 0.9475
+    },
+    "tests/corpus/word-rules/E-wrap-vml.docx": {
+      "line_agreement": 0.2089,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.791,
+      "ssim_min": 0.6828,
       "text_score": 1.0
     }
   }
