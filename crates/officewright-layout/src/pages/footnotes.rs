@@ -23,8 +23,9 @@
 //! The page then takes no more text, and the notes the line references after the one cut
 //! go wholly on the next page. Hypotheses until a Word render: keep rules other than widow
 //! control do not hold inside notes, the notice follows the part cut with its own space
-//! before only, and the rest of a note on the next page is cut again only where it does not
-//! fit that page's whole body, its text taking what is left.
+//! before only, the rest of a note on the next page is cut again only where it does not fit
+//! that page's whole body, its text taking what is left, and a blank page that an odd or
+//! even section start puts in takes none of it.
 //!
 //! A line whose note cannot start on the page, where not even its first part fits, moves
 //! to the next page with its notes in Word 2013 and later (mode 15: `E-footnote-no-room.docx`
