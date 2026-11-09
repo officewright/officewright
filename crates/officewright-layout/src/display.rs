@@ -2103,23 +2103,23 @@ mod tests {
 
     #[test]
     fn a_highlight_is_as_high_as_its_run_in_a_taller_line() {
-        // A 6 pt highlighted run in a line its 10 pt paragraph mark makes taller, as the
-        // layout counts marks (#359): the box is the run's own. Word shades the 12 pt
-        // title of contract-usds-statement-of-objectives 13.7 pt high, its own height,
-        // which this keeps where the layout's line is taller than Word's; a hypothesis for
-        // runs of different sizes until #346.
-        let (items, _) = painted(&[RunStyle::default()], |_, document| {
+        // A 6 pt highlighted run in a line a 10 pt run makes taller: the box is the run's
+        // own. Word shades the 12 pt title of contract-usds-statement-of-objectives
+        // 13.7 pt high, its own height; a hypothesis for runs of different sizes until
+        // #346.
+        let (items, _) = painted(&[RunStyle::default()], |ids, document| {
             let small = document.add_run_style(
                 RunStyle::default()
                     .with_fonts(RunFonts::new("Officewright Test"))
                     .with_size(Pt(6.0))
                     .with_highlight(Some(Color::rgb(255, 255, 0))),
             );
-            (ParagraphProps::default(), vec![Inline::text("A", small)])
+            let inlines = vec![Inline::text("A", ids[0]), Inline::text("A", small)];
+            (ParagraphProps::default(), inlines)
         });
         let boxes = rects(&items);
         assert_eq!(boxes.len(), 1, "{items:?}");
-        // The 10 pt mark sets the line, from 20 to 31.5, with its baseline at 29; the 6 pt
+        // The 10 pt run sets the line, from 20 to 31.5, with its baseline at 29; the 6 pt
         // run reaches 5.4 pt above it and 1.5 below.
         let (at, _, height, _) = boxes[0];
         assert!((at.y.0 - 23.6).abs() < 1e-9, "{boxes:?}");
@@ -2130,7 +2130,7 @@ mod tests {
     fn a_highlight_takes_the_leading_its_font_puts_above_its_text() {
         // The test font with a `hhea` line gap of 300 has a line taller than its Windows
         // one: external leading of 0.15 em, which a line puts above its text, and so does
-        // a run's box. A 6 pt highlighted run in the line of a 10 pt paragraph mark: with
+        // a run's box. A 6 pt highlighted run in the line of a 10 pt run: with
         // leading the line's baseline is at 20 + 1.5 + 9 = 30.5 and the box reaches
         // 0.9 + 5.4 above it and 1.5 below; without (`w:noLeading`) the baseline is at
         // 29 and the box reaches 5.4 above it.
@@ -2144,14 +2144,15 @@ mod tests {
                 settings,
                 vec![tall.clone()],
                 &[RunStyle::default()],
-                |_, document| {
+                |ids, document| {
                     let small = document.add_run_style(
                         RunStyle::default()
                             .with_fonts(RunFonts::new("Officewright Test"))
                             .with_size(Pt(6.0))
                             .with_highlight(Some(Color::rgb(255, 255, 0))),
                     );
-                    (ParagraphProps::default(), vec![Inline::text("A", small)])
+                    let inlines = vec![Inline::text("A", ids[0]), Inline::text("A", small)];
+                    (ParagraphProps::default(), inlines)
                 },
             );
             let boxes = rects(&items);
@@ -2366,16 +2367,19 @@ mod tests {
 
     #[test]
     fn a_smaller_highlighted_tab_without_a_font_reaches_as_far_as_its_own_text() {
-        // With no font, a 6 pt tab under a 10 pt paragraph mark: the line takes the mark's
-        // 8 pt above its baseline (at 28) and 2 below, and the tab's box its own 0.8 and
+        // With no font, a 6 pt tab after a 10 pt one: the line takes the 10 pt tab's 8 pt
+        // above its baseline (at 28) and 2 below, and the small tab's box its own 0.8 and
         // 0.2 of 6 pt, from 23.2 to 29.2.
-        let (items, _) = painted_with(Vec::new(), &[RunStyle::default()], |_, document| {
+        let (items, _) = painted_with(Vec::new(), &[RunStyle::default()], |ids, document| {
             let small = document.add_run_style(
                 RunStyle::default()
                     .with_size(Pt(6.0))
                     .with_highlight(Some(Color::rgb(255, 255, 0))),
             );
-            (ParagraphProps::default(), vec![Inline::tab(small)])
+            (
+                ParagraphProps::default(),
+                vec![Inline::tab(ids[0]), Inline::tab(small)],
+            )
         });
         let boxes = rects(&items);
         let [(at, _, height, _)] = boxes.as_slice() else {

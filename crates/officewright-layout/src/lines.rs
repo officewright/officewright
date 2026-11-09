@@ -1403,12 +1403,14 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     let metrics = self.text_metrics(*item);
                     extent.add(metrics, self.position(*item));
                 }
-                PieceKind::Tab { item, .. } | PieceKind::Break { item } => {
+                PieceKind::Tab { item, .. } => {
                     if let Some(style) = item_style(self.itemized, *item) {
                         let metrics = self.style_metrics(style);
                         extent.add(metrics, Pt(0.0));
                     }
                 }
+                // A break counts only on a line with nothing else (below).
+                PieceKind::Break { .. } => {}
                 PieceKind::Object { item, height } => {
                     if let Some(height) = height {
                         extent.ascent = extent.ascent.max(height.0);
@@ -1420,10 +1422,25 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 }
             }
         }
-        // The line with the paragraph mark includes it; an empty line has only the
-        // mark, or the break that ends it.
-        if last || extent.empty {
-            let metrics = self.style_metrics(self.paragraph.mark());
+        // A line of text is as tall as its text: Word gives neither the paragraph mark
+        // nor the run of a break that ends the line a height of their own there, however
+        // large they are (E-smallcaps-15's reference: a Calibri 11 pt break and mark next
+        // to 9 pt text; contract-usds-statement-of-objectives: a 12 pt title with a 20 pt
+        // mark). An empty line has the height of the break that ends it, or of the mark.
+        if extent.empty {
+            let ending = line
+                .pieces
+                .iter()
+                .rev()
+                .find_map(|piece| match &piece.kind {
+                    PieceKind::Break { item } => item_style(self.itemized, *item),
+                    _ => None,
+                });
+            let style = match ending {
+                Some(style) if !last => style,
+                _ => self.paragraph.mark(),
+            };
+            let metrics = self.style_metrics(style);
             extent.add(metrics, Pt(0.0));
         }
         let leading = if no_leading { 0.0 } else { extent.leading };
