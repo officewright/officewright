@@ -150,21 +150,32 @@ impl<'a> Translator<'a> {
                 RunContent::ContinuationSeparator => {
                     content.push(ir::Inline::continuation_separator(style));
                 }
+                // An object in a field's instruction shows nothing, so it is not translated:
+                // a text box's content would list what it leaves out.
                 RunContent::Drawing(drawing) => {
-                    if let Some(object) = self.drawing(drawing) {
+                    let Some(place) = content.place() else {
+                        continue;
+                    };
+                    if let Some(object) = self.drawing(drawing, place) {
                         boxed |= drawing.is_inline();
                         in_line_object |= drawing.is_inline();
                         content.push(object);
                     }
                 }
                 RunContent::VmlDrawing(drawing) => {
-                    if let Some(object) = self.vml_drawing(drawing) {
+                    let Some(place) = content.place() else {
+                        continue;
+                    };
+                    if let Some(object) = self.vml_drawing(drawing, place) {
                         boxed |= matches!(object, ir::Inline::Object(_));
                         in_line_object |= matches!(object, ir::Inline::Object(_));
                         content.push(object);
                     }
                 }
                 RunContent::Object(embedded) => {
+                    if content.place().is_none() {
+                        continue;
+                    }
                     if let Some(object) = self.embedded_object(embedded) {
                         boxed |= matches!(object, ir::Inline::Object(_));
                         in_line_object |= matches!(object, ir::Inline::Object(_));
@@ -371,7 +382,37 @@ enum Frame {
     },
 }
 
+/// Where an inline goes among the inlines of its paragraph: at `index` of them, or, with
+/// `in_result`, at that index of the result of the field at `index`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Place {
+    pub(super) index: usize,
+    pub(super) in_result: Option<usize>,
+}
+
 impl Content {
+    /// Where the next inline pushed goes: after the inlines so far, or, while a field's
+    /// result is read, after the inlines of the result of the outermost field, which goes
+    /// after the inlines so far when it ends. None inside a field's instruction, which
+    /// shows nothing.
+    fn place(&self) -> Option<Place> {
+        if !self.instructions.is_empty() {
+            return None;
+        }
+        let index = self.out.len();
+        match self.fields.first() {
+            None => Some(Place {
+                index,
+                in_result: None,
+            }),
+            Some(Frame::Result { start, .. }) => Some(Place {
+                index,
+                in_result: Some(self.results.len().saturating_sub(*start)),
+            }),
+            Some(Frame::Instruction { .. }) => None,
+        }
+    }
+
     fn push(&mut self, inline: ir::Inline) {
         #[cfg(test)]
         super::work(|work| work.inlines += 1);

@@ -2497,6 +2497,41 @@ mod tests {
     }
 
     #[test]
+    fn small_capitals_stand_for_the_capitals_they_draw() {
+        // Word's PDF text of small capitals is the capitals it draws: "HAMBURG" for
+        // "hamburg" in E-smallcaps-15's reference. Other text stands for what the document
+        // has: capitals typed, `w:caps` (with or without `w:smallCaps`), and symbols.
+        let text_of = |style: RunStyle, inlines: &dyn Fn(crate::ir::RunStyleId) -> Vec<Inline>| {
+            let (items, _) = painted(&[style], |ids, _| {
+                (ParagraphProps::default(), inlines(ids[0]))
+            });
+            glyph_runs(&items)
+                .iter()
+                .flat_map(|run| &run.clusters)
+                .map(|cluster| cluster.text.clone())
+                .collect::<String>()
+        };
+        let text = |id| vec![Inline::text("aA\u{DF}\u{E9}a", id)];
+        let small = RunStyle::default().with_small_caps(true);
+        assert_eq!(text_of(small.clone(), &text), "AASS\u{C9}A");
+        assert_eq!(text_of(RunStyle::default(), &text), "aA\u{DF}\u{E9}a");
+        let both = RunStyle::default().with_caps(true).with_small_caps(true);
+        assert_eq!(text_of(both, &text), "aA\u{DF}\u{E9}a");
+        assert_eq!(
+            text_of(RunStyle::default().with_caps(true), &text),
+            "aA\u{DF}\u{E9}a"
+        );
+        // A symbol is not a letter small capitals change: it keeps its character.
+        let symbol = |id| {
+            vec![
+                Inline::symbol("Officewright Test", 0x0062, id),
+                Inline::text("a", id),
+            ]
+        };
+        assert_eq!(text_of(small, &symbol), "bA");
+    }
+
+    #[test]
     fn a_symbol_that_is_no_character_shifts_no_text() {
         // U+D800 is no character: it is drawn as the font's code 0x00 and stands for no
         // text, and the `A` after it keeps its own.

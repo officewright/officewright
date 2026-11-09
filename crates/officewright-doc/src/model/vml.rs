@@ -119,11 +119,11 @@ impl<'a> VmlDrawing<'a> {
         })
     }
 
-    /// Whether it has VML shapes besides its picture, which the layout leaves out: a line,
-    /// a rectangle, a text box, a group or a second picture (MS-OI29500, Part 4,
-    /// §14.3.2.2(a), lists what Word allows in a `w:pict`). A shape type
-    /// (`v:shapetype`) only defines shapes, and an embedded object or a control
-    /// (`o:OLEObject`, `w:control`) is shown by its picture.
+    /// Whether it has more than one VML shape: besides the picture or the text box the
+    /// layout shows, which it leaves out, a line, a rectangle, another text box, a group
+    /// or another picture (MS-OI29500, Part 4, §14.3.2.2(a), lists what Word allows in a
+    /// `w:pict`). A shape type (`v:shapetype`) only defines shapes, and an embedded object
+    /// or a control (`o:OLEObject`, `w:control`) is shown by its picture.
     // reason: only the translation into the layout IR asks for it.
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
     pub(crate) fn has_other_shapes(self) -> bool {
@@ -297,7 +297,7 @@ impl<'a> VmlPicture<'a> {
     /// Whether it is hidden (`visibility:hidden` in its `style`), which Word does not
     /// show.
     pub fn is_hidden(self) -> bool {
-        self.style().get("visibility") == Some("hidden")
+        is_hidden(self.shape)
     }
 
     /// The part of the image shown (`v:imagedata`'s `cropleft`, `croptop`, `cropright`
@@ -525,7 +525,7 @@ fn has_color_adjustments(shape: Element<'_>, names: &Names, report: Report<'_>) 
 
 /// Whether a picture casts a shadow ([`VmlPicture::has_shadow`]). Each `v:shadow` is
 /// read, so that each value not taken is reported.
-fn has_shadow(shape: Element<'_>, names: &Names, report: Report<'_>) -> bool {
+pub(super) fn has_shadow(shape: Element<'_>, names: &Names, report: Report<'_>) -> bool {
     shape
         .children_through_alternates(names.mc)
         .filter(|child| child.is(&names.v, "shadow"))
@@ -548,8 +548,9 @@ fn has_shadow(shape: Element<'_>, names: &Names, report: Report<'_>) -> bool {
         })
 }
 
-/// Where a floating picture is and how text wraps around it ([`VmlPicture::anchor`]).
-fn anchor(shape: Element<'_>, names: &Names, report: Report<'_>) -> Option<Anchor> {
+/// Where a floating shape, a picture or a text box, is and how text wraps around it
+/// ([`VmlPicture::anchor`]).
+pub(super) fn anchor(shape: Element<'_>, names: &Names, report: Report<'_>) -> Option<Anchor> {
     let style = shape_style(shape);
     if style.get("position") != Some("absolute") {
         return None;
@@ -633,6 +634,12 @@ fn anchor(shape: Element<'_>, names: &Names, report: Report<'_>) -> Option<Ancho
         z_order: z_order(z_index),
         distances,
     })
+}
+
+/// Whether a shape is hidden (`visibility:hidden` in its `style`), which Word does not
+/// show.
+pub(super) fn is_hidden(shape: Element<'_>) -> bool {
+    shape_style(shape).get("visibility") == Some("hidden")
 }
 
 /// An alignment of `mso-position-horizontal` or `mso-position-vertical`: none for
