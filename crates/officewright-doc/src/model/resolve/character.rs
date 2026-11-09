@@ -125,11 +125,15 @@ impl Formats<'_> {
         let defaults = self.run_defaults();
         let table = table.map(|table| &table.character);
         // A size of 11 or 12 pt the default paragraph style gives may give way to the
-        // table style's (`Formats::table_style_wins`).
-        let yields = table.is_some()
+        // table style's (`Formats::sizes_giving_way`).
+        let giving_way = if table.is_some()
             && paragraph_style.is_some()
             && paragraph_style == self.paragraph_style(None)
-            && self.table_style_wins();
+        {
+            self.sizes_giving_way()
+        } else {
+            &[]
+        };
         let paragraph = paragraph_style.map(|index| {
             self.characters
                 .level(document, index, &CharacterLevel::default())
@@ -151,8 +155,8 @@ impl Formats<'_> {
         }
         if let Some(paragraph) = &paragraph {
             effect.overlay(paragraph);
-            if let Some(table) = table.filter(|_| yields) {
-                let small = |size: Option<Pt>| matches!(size, Some(Pt(11.0) | Pt(12.0)));
+            if let Some(table) = table.filter(|_| !giving_way.is_empty()) {
+                let small = |size: Option<Pt>| size.is_some_and(|size| giving_way.contains(&size));
                 if small(paragraph.size) && table.size.is_some() {
                     effect.size = table.size;
                 }
