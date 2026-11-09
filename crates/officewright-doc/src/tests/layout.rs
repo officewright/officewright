@@ -3438,14 +3438,14 @@ fn translates_notes_where_the_text_refers_to_them() {
 #[test]
 fn passes_on_whether_a_note_s_own_mark_follows_its_reference() {
     // A note whose own mark follows its reference (`w:customMarkFollows`) has no number of
-    // its own and takes none from the others (ECMA-376 Part 1, §17.11.14), which the
-    // layout learns from the IR.
+    // its own and takes none from the others (ECMA-376 Part 1, §17.11.14, and §17.11.7 for
+    // endnotes), which the layout learns from the IR. The value is ST_OnOff.
     let notes = |root: &str, note: &str| {
         format!(
             r#"<w:{root} xmlns:w="{W}"><w:{note} w:id="1"><w:p><w:r><w:t>one</w:t></w:r></w:p></w:{note}><w:{note} w:id="2"><w:p><w:r><w:t>two</w:t></w:r></w:p></w:{note}></w:{root}>"#
         )
     };
-    let body = r#"<w:p><w:r><w:footnoteReference w:customMarkFollows="1" w:id="1"/><w:t>*</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r><w:r><w:endnoteReference w:customMarkFollows="true" w:id="1"/><w:t>+</w:t></w:r><w:r><w:endnoteReference w:customMarkFollows="0" w:id="2"/></w:r><w:r><w:footnoteReference w:customMarkFollows="yes" w:id="2"/></w:r></w:p>"#;
+    let body = r#"<w:p><w:r><w:footnoteReference w:customMarkFollows="1" w:id="1"/><w:t>*</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r><w:r><w:endnoteReference w:customMarkFollows="true" w:id="1"/><w:t>+</w:t></w:r><w:r><w:endnoteReference w:customMarkFollows="0" w:id="2"/></w:r><w:r><w:footnoteReference w:customMarkFollows="yes" w:id="2"/></w:r><w:r><w:footnoteReference w:customMarkFollows="on" w:id="1"/><w:t>*</w:t></w:r><w:r><w:endnoteReference w:customMarkFollows="off" w:id="2"/></w:r><w:r><w:footnoteReference w:customMarkFollows="false" w:id="2"/></w:r></w:p>"#;
     let document = with_parts(
         body,
         &[
@@ -3462,7 +3462,10 @@ fn passes_on_whether_a_note_s_own_mark_follows_its_reference() {
             _ => None,
         })
         .collect();
-    assert_eq!(custom_marks, [true, false, true, false, false]);
+    assert_eq!(
+        custom_marks,
+        [true, false, true, false, false, true, false, false]
+    );
     // A value that is not ST_OnOff is reported and read as off.
     let messages: Vec<&str> = document.diagnostics().iter().map(|d| d.message()).collect();
     assert_eq!(messages.len(), 1, "{messages:?}");
