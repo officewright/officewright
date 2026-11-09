@@ -30,9 +30,9 @@ impl Coverage {
     /// [`FontFace::char_map`](crate::FontFace::char_map) maps them, which is how Skrifa's
     /// `Charmap` maps them: through the subtable it uses of the `cmap` table in `cmap`.
     /// A face's `DMAP` table is never read: Word reads `cmap` only (Word's reference of
-    /// `E-dmap-font.docx`), and [`FontFace`](crate::FontFace) hides `DMAP` from Skrifa. A format 4 subtable never
-    /// covers U+FFFF, whose lookup may land on any closing segment. Groups past U+10FFFF
-    /// cover nothing.
+    /// `E-dmap-font.docx`), and [`FontFace`](crate::FontFace) hides `DMAP` from Skrifa.
+    /// A format 4 subtable never covers U+FFFF, whose lookup may land on any closing
+    /// segment. Groups past U+10FFFF cover nothing.
     ///
     /// The work is a step per segment or group, plus one per code point of a format 4
     /// segment that reads the glyph ID array, so it grows with the table rather than with

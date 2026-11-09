@@ -326,8 +326,8 @@ impl FontFace {
         }
     }
 
-    /// Whether the face has a character map (a `DMAP` or `cmap` table) with a Unicode or
-    /// symbol subtable.
+    /// Whether the face has a character map (`cmap` table) with a Unicode or symbol
+    /// subtable.
     pub fn has_char_map(&self) -> bool {
         self.0.face.has_char_map
     }
@@ -586,7 +586,7 @@ const DMAP: Tag = Tag::new(b"DMAP");
 /// # Errors
 ///
 /// [`Error::MalformedFace`] if the face has a `DMAP` table but its directory does not fit
-/// in the data.
+/// in the data, or overlaps a table it keeps or a collection's list of faces.
 fn hide_dmap(data: Arc<[u8]>, index: u32) -> Result<Arc<[u8]>> {
     let has_dmap = font_ref(&data, index).is_ok_and(|font| font.table_data(DMAP).is_some());
     if !has_dmap {
@@ -596,23 +596,34 @@ fn hide_dmap(data: Arc<[u8]>, index: u32) -> Result<Arc<[u8]>> {
         Some(copy) => Ok(copy.into()),
         None => Err(Error::MalformedFace {
             face: index,
-            source: Cause::new("the table directory does not fit in the data"),
+            source: Cause::new(
+                "its DMAP table cannot be left out: the table directory does not fit in the \
+                 data, or overlaps a table or the collection's list of faces",
+            ),
         }),
     }
 }
 
 /// A copy of `data` without the records of `tag` in face `index`'s table directory;
-/// `None` if the directory does not fit in the data.
+/// `None` if the directory does not fit in the data, or if a table the face keeps, or a
+/// collection's list of faces, lies in the bytes the copy rewrites: the copy would then
+/// read otherwise than the file, which the coverage of `FontBook` reads.
 fn without_records(data: &[u8], index: u32, tag: Tag) -> Option<Vec<u8>> {
+    let u32_at = |at: usize| -> Option<usize> {
+        usize::try_from(u32::from_be_bytes(
+            data.get(at..at.checked_add(4)?)?.try_into().ok()?,
+        ))
+        .ok()
+    };
     // A collection lists where each face's directory starts (OpenType, "Font Collections").
-    let start = if data.get(0..4)? == b"ttcf" {
+    let (start, faces_end) = if data.get(0..4)? == b"ttcf" {
         let at = usize::try_from(index)
             .ok()?
             .checked_mul(4)?
             .checked_add(12)?;
-        usize::try_from(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?)).ok()?
+        (u32_at(at)?, u32_at(8)?.checked_mul(4)?.checked_add(12)?)
     } else {
-        0
+        (0, 0)
     };
     let count = usize::from(u16::from_be_bytes(
         data.get(start + 4..start + 6)?.try_into().ok()?,
@@ -624,6 +635,25 @@ fn without_records(data: &[u8], index: u32, tag: Tag) -> Option<Vec<u8>> {
         .chunks_exact(16)
         .filter(|record| record.get(0..4) != Some(&tag.to_be_bytes()[..]))
         .collect();
+    // The bytes rewritten: the directory's header after its version, and its records.
+    let rewritten = start.checked_add(4)?..end;
+    let overlaps = |from: usize, to: usize| from < rewritten.end && rewritten.start < to;
+    if overlaps(0, faces_end) {
+        return None;
+    }
+    for record in &kept {
+        // A record's offset and length, at bytes 8 and 12 of it.
+        let field = |offset: usize| -> Option<usize> {
+            usize::try_from(u32::from_be_bytes(
+                record.get(offset..offset + 4)?.try_into().ok()?,
+            ))
+            .ok()
+        };
+        let (offset, length) = (field(8)?, field(12)?);
+        if overlaps(offset, offset.checked_add(length)?) {
+            return None;
+        }
+    }
     // searchRange, entrySelector and rangeShift for the records left, which readers
     // compute again; past the 4095 records a u16 holds they are cut to 16 bits, as the
     // format's own arithmetic would.
@@ -788,6 +818,101 @@ mod tests {
         let shared: Arc<[u8]> = plain.into();
         let face = FontFace::from_bytes(shared.clone(), 0).unwrap();
         assert!(std::ptr::eq(face.data(), &*shared));
+    }
+
+    #[test]
+    fn hides_every_dmap_record() {
+        // Two `DMAP` records: the directory is not sorted, so a reader takes the first,
+        // and with the first gone it would take the second. Both go.
+        let second = testing::cmap_of(&[(
+            3,
+            1,
+            testing::format4(&[(0x41, 0x41, 3_u16.wrapping_sub(0x41), 0)], &[]),
+        )]);
+        let mut font = TestFont::new("Test Map")
+            .with_table(
+                b"cmap",
+                testing::cmap_of(&[(
+                    3,
+                    1,
+                    testing::format4(&[(0x41, 0x44, 1_u16.wrapping_sub(0x41), 0)], &[]),
+                )]),
+            )
+            .with_table(
+                b"DMAP",
+                testing::cmap_of(&[(
+                    3,
+                    1,
+                    testing::format4(&[(0x41, 0x41, 2_u16.wrapping_sub(0x41), 0)], &[]),
+                )]),
+            )
+            .with_table(b"DMAQ", second)
+            .build();
+        let at = (0..usize::from(u16::from_be_bytes([font[4], font[5]])))
+            .map(|i| 12 + 16 * i)
+            .find(|&at| &font[at..at + 4] == b"DMAQ")
+            .unwrap();
+        font[at..at + 4].copy_from_slice(b"DMAP");
+        let face = FontFace::from_bytes(font, 0).unwrap();
+        assert_eq!(face.glyph_id('A'), Some(GlyphId::new(1)));
+        assert!(font_ref(face.data(), 0).unwrap().table_data(DMAP).is_none());
+    }
+
+    #[test]
+    fn refuses_a_dmap_face_whose_directory_overlaps_a_table_it_keeps() {
+        let refused = |data: Vec<u8>| match FontFace::from_bytes(data, 0) {
+            Err(err @ Error::MalformedFace { face: 0, .. }) => {
+                let cause = std::error::Error::source(&err).map(ToString::to_string);
+                assert!(
+                    cause
+                        .as_deref()
+                        .is_some_and(|cause| cause.contains("cannot be left out")),
+                    "{err:?}"
+                );
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        };
+        // The test font with `DMAP` and a last record, `zzzz`, inside which its `cmap`
+        // begins: the copy without `DMAP` would rewrite that `cmap`, which the coverage
+        // reads from the file. The face is refused, so the coverage, which finds A, never
+        // meets a face that does not map it.
+        let data = include_bytes!("../tests/damaged/dmap-cmap-in-directory.ttf").to_vec();
+        refused(data.clone());
+        let mut book = crate::FontBook::new();
+        book.add_bytes(data, crate::FontOrigin::Document).unwrap();
+        for id in book.faces_covering('A') {
+            if let Ok(face) = book.load(id) {
+                assert!(face.glyph_id('A').is_some());
+            }
+        }
+
+        // A table that lies in the directory's header.
+        let mut font = mapped(true);
+        let post = (0..11)
+            .map(|i| 12 + 16 * i)
+            .find(|&at| &font[at..at + 4] == b"post")
+            .unwrap();
+        font[post + 8..post + 12].copy_from_slice(&4_u32.to_be_bytes());
+        refused(font);
+
+        // A collection of three faces whose first face's directory starts at byte 16,
+        // inside the list of faces: its version is the second face's offset and its table
+        // count the upper half of the third's, both 0x0001_0000, and its one record,
+        // `DMAP`, follows the list.
+        let dmap = testing::cmap_of(&[(3, 1, testing::format4(&[(0x41, 0x41, 0, 0)], &[]))]);
+        let mut ttc = b"ttcf".to_vec();
+        for value in [0x0001_0000_u32, 3, 16, 0x0001_0000, 0x0001_0000] {
+            ttc.extend_from_slice(&value.to_be_bytes());
+        }
+        ttc.extend_from_slice(&[0; 4]); // the directory's search fields, after the list
+        ttc.extend_from_slice(b"DMAP");
+        ttc.extend_from_slice(&0_u32.to_be_bytes());
+        ttc.extend_from_slice(&44_u32.to_be_bytes());
+        ttc.extend_from_slice(&u32::try_from(dmap.len()).unwrap().to_be_bytes());
+        ttc.extend_from_slice(&dmap);
+        ttc.resize(0x0001_0100, 0);
+        assert!(font_ref(&ttc, 0).unwrap().table_data(DMAP).is_some());
+        refused(ttc);
     }
 
     #[test]
