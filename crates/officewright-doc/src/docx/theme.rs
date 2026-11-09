@@ -120,7 +120,6 @@ fn once<'d>(
     children
 }
 
-/// The fills and lines of a format scheme (`a:fmtScheme`), each list the first of its name.
 /// The fills and lines of a format scheme (`a:fmtScheme`), each list the first of its name,
 /// each entry read once, and its values not taken reported; with how many of their colours
 /// have more transforms than shapes apply, after which they are left out.
@@ -187,12 +186,15 @@ fn theme_elements(
                 };
                 let (scheme, cut) = format_scheme(child, names, report, notes);
                 theme.format_scheme = scheme;
-                for _ in 0..cut {
-                    notes.add(|| {
-                        format!(
-                            "a colour of a:fmtScheme has more than {} transforms; those after are left out",
-                            crate::model::text_box::MAX_SCHEME_TRANSFORMS
-                        )
+                if cut > 0 {
+                    let max = crate::model::text_box::MAX_SCHEME_TRANSFORMS;
+                    notes.add(|| match cut {
+                        1 => format!(
+                            "a colour of a:fmtScheme has more than {max} transforms; those after are left out"
+                        ),
+                        _ => format!(
+                            "{cut} colours of a:fmtScheme have more than {max} transforms; those after are left out"
+                        ),
                     });
                 }
             }
