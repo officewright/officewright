@@ -465,8 +465,9 @@ pub(crate) fn vml_color(value: &str) -> Option<VmlColor> {
         .map_or(value, |(color, _)| color)
         .trim()
         .to_ascii_lowercase();
-    // One instruction after the colour it changes (MS-OI29500 2.1.1893(l)), whose base is
-    // read as a plain colour: a second instruction makes the value one Office does not take.
+    // One instruction follows the colour it changes (MS-OI29500 2.1.1893(l) and its
+    // example), which is read as a plain colour: a value of several instructions is not
+    // taken.
     if let Some((base, instruction)) = value.rsplit_once(' ') {
         let (name, amount) = match instruction.split_once('(') {
             Some((name, rest)) => (name.trim(), Some(rest.strip_suffix(')')?.trim())),
