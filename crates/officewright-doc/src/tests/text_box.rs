@@ -1208,6 +1208,11 @@ fn applies_the_transforms_of_a_colour_in_their_order() {
         // Each in its turn: shaded, then inverted, is not inverted, then shaded.
         line(r#"<a:srgbClr val="FFFFFF"><a:shade val="50000"/><a:inv/></a:srgbClr>"#),
         red(r#"<a:alpha val="50000"/><a:alphaMod val="50000"/><a:alphaOff val="10000"/>"#),
+        // An offset of hue adds to the colour's own hue; the complement of a grey is that
+        // grey, its inverse another; an amount keeps its thousandths of a per cent.
+        line(r#"<a:srgbClr val="00FF00"><a:hueOff val="7200000"/></a:srgbClr>"#),
+        line(r#"<a:srgbClr val="404040"><a:comp/></a:srgbClr>"#),
+        red(r#"<a:alpha val="12345"/>"#),
     ];
     let body = format!("<w:p>{}</w:p>", boxes.concat());
     let document = open(&body);
@@ -1235,6 +1240,9 @@ fn applies_the_transforms_of_a_colour_in_their_order() {
             opaque((0xBC, 0xBC, 0xBC)),
             opaque((0x43, 0x43, 0x43)),
             (Some((0xFF, 0x00, 0x00)), 0.35),
+            opaque((0x00, 0x00, 0xFF)),
+            opaque((0x40, 0x40, 0x40)),
+            (Some((0xFF, 0x00, 0x00)), 0.12345),
         ]
     );
 }
@@ -1763,7 +1771,21 @@ fn takes_the_first_shape_type_of_an_id_and_reports_those_of_embedded_objects() {
 #[test]
 fn reads_vml_dash_lengths_of_a_preset_s_pattern_as_that_preset() {
     // Word writes sysDot and sysDash in VML as lengths (`1 1`, `3 1`).
-    let shapes: String = ["1 1", "3 1", "8 3 1 3 1 3", "2 2", "1 x"]
+    let shapes: String = [
+        "1 3",
+        "4 3",
+        "8 3",
+        "4 3 1 3",
+        "8 3 1 3",
+        "8 3 1 3 1 3",
+        "3 1",
+        "1 1",
+        "3 1 1 1",
+        "3 1 1 1 1 1",
+        "2 2",
+        "1 x",
+        "",
+    ]
         .map(|dashes| {
             format!(
                 r#"<v:shape style="width:1pt;height:1pt"><v:stroke dashstyle="{dashes}"/><v:textbox/></v:shape>"#
@@ -1778,16 +1800,27 @@ fn reads_vml_dash_lengths_of_a_preset_s_pattern_as_that_preset() {
     assert_eq!(
         dashes,
         [
-            LineDash::SystemDot,
-            LineDash::SystemDash,
+            LineDash::Dot,
+            LineDash::Dash,
+            LineDash::LongDash,
+            LineDash::DashDot,
+            LineDash::LongDashDot,
             LineDash::LongDashDotDot,
+            LineDash::SystemDash,
+            LineDash::SystemDot,
+            LineDash::SystemDashDot,
+            LineDash::SystemDashDotDot,
             LineDash::Custom,
+            LineDash::Solid,
             LineDash::Solid
         ]
     );
     assert_eq!(
         reported(&document),
-        [r#"v:stroke dashstyle="1 x" is not valid; it is ignored"#]
+        [
+            r#"v:stroke dashstyle="1 x" is not valid; it is ignored"#,
+            r#"v:stroke dashstyle="" is not valid; it is ignored"#
+        ]
     );
 }
 
@@ -1807,5 +1840,82 @@ fn takes_a_gradient_s_first_stop_only_with_its_position() {
     assert_eq!(
         reported(&document),
         [r##"v:fill colors="x #ff0000;1 #00ff00" is not valid; it is ignored"##]
+    );
+}
+
+#[test]
+fn reads_a_shape_type_s_values_once_however_many_shapes_name_it() {
+    // From the re-check of #471: each shape read its shape type's values again, so that a
+    // type whose colours were 2 MB long, named by 50,000 shapes, took 31 s to read.
+    let (n, long) = (2_000, 200_000);
+    let color = format!("#ff0000{}", " ".repeat(long));
+    let body = format!(
+        "<w:p><w:r>{}</w:r></w:p>",
+        pict(&format!(
+            r##"<v:shapetype id="t" fillcolor="{color}" strokecolor="{color}"/>{}"##,
+            r##"<v:shape type="#t" style="width:1pt;height:1pt"><v:textbox/></v:shape>"##.repeat(n)
+        ))
+    );
+    let document = open(&body);
+    let boxes = vml_text_boxes(&document);
+    assert_eq!(boxes.len(), n);
+    crate::model::drawing::VALUE_BYTES.set(0);
+    let red = boxes
+        .iter()
+        .filter(|text_box| {
+            fill_of(**text_box).and_then(|fill| fill.1) == Some((0xFF, 0, 0))
+                && text_box.outline().and_then(|line| line.color()) == Some((0xFF, 0, 0))
+        })
+        .count();
+    let read = crate::model::drawing::VALUE_BYTES.get();
+    assert_eq!(red, n);
+    // Read again for each shape, the type's values would be 400 KB a shape.
+    assert!(
+        read <= 100 * n,
+        "{read} bytes of values read for {n} shapes"
+    );
+}
+
+#[test]
+fn reports_the_values_of_transforms_not_applied() {
+    // The transforms of single channels are not applied, but a damaged value of theirs is
+    // reported, in a shape and in the theme.
+    let (kind, target, theme) = theme_with_fills(
+        r#"<a:solidFill><a:srgbClr val="00FF00"><a:redMod val="much"/></a:srgbClr></a:solidFill>"#,
+    );
+    let body = format!(
+        "<w:p>{}{}</w:p>",
+        styled_box(
+            r#"<a:solidFill><a:srgbClr val="0000FF"><a:red val="zz"/><a:greenMod val="50000"/><a:gamma/></a:srgbClr></a:solidFill>"#,
+            ""
+        ),
+        styled_box(
+            "",
+            r#"<a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>"#
+        )
+    );
+    let document = with_parts(&body, &[(kind, target, theme)]);
+    let boxes = drawings(&document);
+    assert_eq!(
+        fill_of(boxes[0].text_box().unwrap()),
+        Some((FillKind::Solid, Some((0, 0, 0xFF)), 1.0))
+    );
+    assert_eq!(
+        fill_of(boxes[1].text_box().unwrap()),
+        Some((FillKind::Solid, Some((0, 0xFF, 0)), 1.0))
+    );
+    let messages: Vec<&str> = document.diagnostics().iter().map(|d| d.message()).collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        messages.iter().any(|m| m.starts_with("/word/document.xml")
+            && m.ends_with(r#"a:red val="zz" is not valid; it is ignored"#)),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.starts_with("/word/theme/theme1.xml")
+                && m.ends_with(r#"redMod val="much" is not valid; it is ignored"#)),
+        "{messages:?}"
     );
 }
