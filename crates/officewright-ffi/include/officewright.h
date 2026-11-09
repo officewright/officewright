@@ -163,9 +163,10 @@
 #define OW_REPORT_KIND_OVERFLOW 7
 
 /**
- * A report entry: a font is embedded with what its license or format restricts, or it
- * cannot be embedded and its text is not drawn. Later versions add kinds with new
- * values; existing values never change.
+ * A report entry: a font is embedded with what its license or format restricts; or some
+ * of its glyphs cannot be embedded, and their text is drawn in other fonts or as the
+ * missing-glyph shape; or it cannot be embedded at all, and its text is not drawn. Later
+ * versions add kinds with new values; existing values never change.
  */
 #define OW_REPORT_KIND_FONT_EMBEDDING 8
 
@@ -897,17 +898,21 @@ enum OwStatus ow_doc_document_open_bytes(const uint8_t *data,
  * NULL if the call fails.
  *
  * Fails with `OW_STATUS_IO` if the file cannot be written or a font folder of the
- * options cannot be read, `OW_STATUS_MALFORMED` if a font the PDF embeds is damaged
- * where only embedding looks (a glyph's outline, say), and `OW_STATUS_LIMIT_EXCEEDED`
- * if the document takes more pages than the options allow, nests tables deeper than
- * the layout follows, or uses glyphs of a CFF font that take more than 16,777,216
- * operands, operators and hint mask bytes to decompile, or of all its CFF fonts together
- * more than 33,554,432 (the default of `ow_pdf_document_set_subset_budget`), limits of
- * the library.
+ * options cannot be read, `OW_STATUS_LIMIT_EXCEEDED` if the document takes more pages
+ * than the options allow, nests tables deeper than the layout follows, or uses glyphs
+ * of a CFF font that take more than 16,777,216 operands, operators and hint mask bytes
+ * to decompile, or of all its CFF fonts together more than 33,554,432 (the default of
+ * `ow_pdf_document_set_subset_budget`), limits of the library, and
+ * `OW_STATUS_UNSUPPORTED` if the composite glyphs of a crafted TrueType font name, all
+ * together, more glyphs than a font holds.
  * `OW_STATUS_INVALID_ARGUMENT` here would mean that officewright
  * translated the document wrongly, a defect worth reporting with the document. A font
- * that `ow_pdf_font_open_bytes` would refuse is no error here: its text is not drawn,
- * and the report says so (`OW_REPORT_KIND_FONT_EMBEDDING`).
+ * with glyphs that cannot be embedded, such as a damaged font the document embeds, is
+ * no error here: the text of those glyphs is drawn in other fonts, or as the
+ * missing-glyph shape where no other font has it. Nor is a font that
+ * `ow_pdf_font_open_bytes` would refuse, such as one whose license forbids embedding:
+ * its text is not drawn. The report says so in both cases
+ * (`OW_REPORT_KIND_FONT_EMBEDDING`).
  *
  * # Safety
  *
@@ -999,9 +1004,10 @@ enum OwStatus ow_render_options_add_font_dir(struct OwRenderOptions *options, co
  * `data`, which the library copies; its fonts are used before the folders' and the
  * system's. Fails with `OW_STATUS_MALFORMED` if the data is not a font or every face in
  * it is damaged, leaving the options unchanged. The check reads what identifies the
- * font, not every glyph: a font damaged deeper is accepted here. The conversion that
- * embeds it then fails with `OW_STATUS_MALFORMED`, or, when the font cannot be embedded
- * at all, reports it (`OW_REPORT_KIND_FONT_EMBEDDING`) and does not draw its text.
+ * font, not every glyph: a font damaged deeper is accepted here. The conversion then
+ * draws the text of its glyphs that cannot be embedded in other fonts, or does not
+ * draw its text when the font cannot be embedded at all, and reports it
+ * (`OW_REPORT_KIND_FONT_EMBEDDING`).
  *
  * # Safety
  *

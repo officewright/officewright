@@ -982,9 +982,10 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let Some(Item::Text(run)) = itemized.items.get(item) else {
             return None;
         };
-        let face = self.fonts.face(run.face?)?;
-        // U+2010 when the face has it, as Word draws it, else the hyphen-minus.
-        let hyphen = if face.face().glyph_id('\u{2010}').is_some() {
+        let face = run.face?;
+        // U+2010 when the face has it and can embed it, as Word draws it, else the
+        // hyphen-minus.
+        let hyphen = if self.fonts.has_glyph(face, '\u{2010}') {
             "\u{2010}"
         } else {
             "-"

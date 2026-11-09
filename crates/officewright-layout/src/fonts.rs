@@ -142,8 +142,8 @@ impl<'a> Fonts<'a> {
                 ReportKind::FontEmbedding,
                 Location::default(),
                 format!(
-                    "{name} cannot embed some of its glyphs ({why}); their text is drawn in \
-                     other fonts, and a glyph shaping chose that it cannot embed is left out"
+                    "some glyphs of {name} cannot be embedded ({why}); their text is drawn in \
+                     other fonts, or as the missing-glyph shape where no other font has it"
                 ),
             );
         }
