@@ -480,7 +480,11 @@ impl Painting<'_, '_, '_> {
                         height: Some(height),
                     } => self.object(*item, x, baseline - height.0, &mut front),
                     PieceKind::Object { item, height: None } => {
-                        self.float(*item, (x, (top, top + line.height.0), origin.y.0));
+                        if matches!(itemized.items.get(*item), Some(Item::Separator(..))) {
+                            self.separator(*item, (x, piece.width), baseline, &mut front);
+                        } else {
+                            self.float(*item, (x, (top, top + line.height.0), origin.y.0));
+                        }
                     }
                     PieceKind::Break { .. } => {}
                 }
@@ -929,6 +933,48 @@ impl Painting<'_, '_, '_> {
             color,
         };
         self.leader(look, choice, leader, x, width.0, raised, front);
+    }
+
+    /// The separator of item `item`, `span` its start and width, on `baseline`: a line
+    /// where the font of its run style strikes text out, as thick as that stroke, in the
+    /// style's colour. Word draws it there in the references of `generated/contract-de`,
+    /// `cv-en-academic` and `invoice-en-decimal` (Liberation Sans at 11 and 9 pt,
+    /// Liberation Serif at 12 pt), within the 0.65 pt of their rasters; its thickness is
+    /// a hypothesis until a Word render (`E-footnote-separator.docx`).
+    fn separator(
+        &mut self,
+        item: usize,
+        (x, width): (f64, Pt),
+        baseline: f64,
+        out: &mut Vec<DisplayItem>,
+    ) {
+        let Some(Item::Separator(_, style_id)) = self.layout.itemized.items.get(item) else {
+            return;
+        };
+        let style = self
+            .document
+            .run_style(*style_id)
+            .cloned()
+            .unwrap_or_default();
+        let size = drawn_size(&style, style.size(), false);
+        let choice = self
+            .fonts
+            .choose(style.fonts().ascii(), style.bold(), style.italic());
+        let Some(face) = choice.face.and_then(|id| self.fonts.face(id)) else {
+            return;
+        };
+        let face = face.face();
+        let scale = size.0 / f64::from(face.units_per_em().max(1));
+        let (position, thickness) = decoration(face, Decoration::Strikeout, scale);
+        push_lines(
+            out,
+            vec![(LineStyle::Solid, 1.0, 0.0)],
+            x,
+            x + width.0,
+            baseline - position,
+            thickness,
+            text_color(style.color(), None),
+        );
     }
 
     /// The leader of a tab drawn in `look`, whose font is `choice`, from `x` over

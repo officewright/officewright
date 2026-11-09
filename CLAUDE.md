@@ -64,9 +64,13 @@ crates/
                         and draws floating pictures where they are anchored (stacked behind or in
                         front of the text, which does not wrap around them yet) and text boxes,
                         inline or floating, with their paragraphs (insets, anchoring down the box,
-                        fill and outline), and the numbers of the references of footnotes and
-                        endnotes (the notes' texts are not laid out yet, and references in
-                        headers and footers show no number), behind private modules;
+                        fill and outline), the numbers of the references of footnotes and
+                        endnotes (references in headers and footers show no number), and
+                        footnotes under their separator at the bottom of the page of their
+                        reference or beneath its text, a line moving to the next page with
+                        notes that do not fit below it (not yet: a note is not cut across
+                        pages, and the notes of references in table cells and endnotes are not
+                        laid out), behind private modules;
                         feature `pdf` renders a document into PDF with officewright-pdf (`render_pdf`,
                         hidden in the docs like the IR it takes, and `RenderOptions`);
                         feature `fuzzing` opens entry points for the fuzz targets, examples and the tests

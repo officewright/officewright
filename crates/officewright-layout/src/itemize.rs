@@ -15,8 +15,8 @@ use unicode_script::{Script, UnicodeScript};
 
 use crate::fonts::{Choice, Fonts};
 use crate::ir::{
-    BreakKind, Document, Field, FieldKind, Inline, LevelAlignment, NumberFormat, RunFonts,
-    RunStyle, RunStyleId, Suffix, VerticalPosition,
+    BreakKind, Document, Field, FieldKind, Inline, LevelAlignment, NoteId, NoteKind, NumberFormat,
+    RunFonts, RunStyle, RunStyleId, Suffix, VerticalPosition,
 };
 use crate::lists::Label;
 use crate::notes::NoteNumbers;
@@ -76,8 +76,10 @@ pub(crate) enum Item {
     Anchored(InlinePath),
     /// A note reference, by its path.
     NoteReference(InlinePath, RunStyleId),
-    /// A note's own number or a separator, which the notes layout fills in.
-    NoteMark(RunStyleId),
+    /// The line that separates notes from the text above them: the continuation
+    /// separator's (`true`) above notes continued from the page before, else the
+    /// separator's.
+    Separator(bool, RunStyleId),
 }
 
 /// Where an inline is: its position among the paragraph's inlines, then, for an inline in
@@ -151,6 +153,8 @@ pub(crate) struct FieldValues {
     pub(crate) section_pages: u32,
     /// The numbers of the notes, one table for the whole layout.
     pub(crate) notes: Arc<NoteNumbers>,
+    /// The note whose content is laid out, whose number its own number shows.
+    pub(crate) note: Option<NoteId>,
 }
 
 // The values are compared by the fields that vary from page to page: the notes' numbers
@@ -160,6 +164,7 @@ impl PartialEq for FieldValues {
         (self.page, &self.format, self.pages, self.section_pages)
             == (other.page, &other.format, other.pages, other.section_pages)
             && Arc::ptr_eq(&self.notes, &other.notes)
+            && self.note == other.note
     }
 }
 
@@ -355,9 +360,13 @@ impl Builder<'_, '_, '_> {
                 custom_mark,
                 style,
             } => {
-                self.unsupported(
-                    "footnotes and endnotes are not laid out yet: their texts are left out",
-                );
+                let endnote = self
+                    .document
+                    .note(*note)
+                    .is_some_and(|note| note.kind() == NoteKind::Endnote);
+                if endnote {
+                    self.unsupported("endnotes are not laid out yet: their texts are left out");
+                }
                 // The note's number, unless the text after it is the mark.
                 if !custom_mark {
                     if let Some(values) = self.fields {
@@ -367,7 +376,8 @@ impl Builder<'_, '_, '_> {
                                 self.text(&number, *style);
                             }
                             None if values.notes.framed(*note) => self.unsupported(
-                                "note references in headers and footers show no number",
+                                "note references in headers and footers show no number, and \
+                                 their notes are left out",
                             ),
                             None => {}
                         }
@@ -375,10 +385,19 @@ impl Builder<'_, '_, '_> {
                 }
                 self.item(Item::NoteReference(path, *style));
             }
-            Inline::NoteNumber { style, .. }
-            | Inline::Separator { style, .. }
-            | Inline::ContinuationSeparator { style, .. } => {
-                self.item(Item::NoteMark(*style));
+            // The number of the note being laid out, as its reference shows it.
+            Inline::NoteNumber { style, .. } => {
+                let number = self
+                    .fields
+                    .and_then(|values| values.notes.text(values.note?))
+                    .map(str::to_owned);
+                if let Some(number) = number {
+                    self.text(&number, *style);
+                }
+            }
+            Inline::Separator { style, .. } => self.item(Item::Separator(false, *style)),
+            Inline::ContinuationSeparator { style, .. } => {
+                self.item(Item::Separator(true, *style));
             }
         }
     }

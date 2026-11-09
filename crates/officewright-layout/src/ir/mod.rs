@@ -469,6 +469,13 @@ document_ids! {
     NoteId in notes, "note";
 }
 
+impl NoteId {
+    /// Its place in the document's table of notes, from 0, as locations name it.
+    pub(crate) fn index(self) -> usize {
+        self.index
+    }
+}
+
 impl ImageId {
     /// Its place in the document's table of images, from 0. Only the display list's text
     /// dump uses it until the PDF painter (plan PR 8) does.
