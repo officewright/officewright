@@ -2074,16 +2074,18 @@ PICTURE_FRAME = (
 
 
 def vml_picture(name: str, shape_id: str, style: str, wrap: str | None = None,
-                first: bool = False, props: str = "") -> str:
+                first: bool = False, props: str = "", wrap_attrs: str = "",
+                shape_attrs: str = "") -> str:
     """A run holding a VML picture (w:pict, v:shape of the picture frame type with
-    v:imagedata) of the given CSS style; wrap is the w10:wrap type of a floating one. The
-    first picture of a document defines the shape type (first); props are the children of
-    the run's w:rPr."""
-    wrap_xml = f'<w10:wrap type="{wrap}"/>' if wrap else ""
+    v:imagedata) of the given CSS style; wrap is the w10:wrap type of a floating one, with
+    the further attributes wrap_attrs, and shape_attrs are further attributes of its
+    v:shape. The first picture of a document defines the shape type (first); props are the
+    children of the run's w:rPr."""
+    wrap_xml = f'<w10:wrap type="{wrap}"{wrap_attrs}/>' if wrap else ""
     shape_type = PICTURE_FRAME if first else ""
     r_pr = f"<w:rPr>{props}</w:rPr>" if props else ""
     return (f'<w:r>{r_pr}<w:pict>{shape_type}<v:shape id="{shape_id}" type="#_x0000_t75" '
-            f'style="{style}"><v:imagedata r:id="{media_id(name)}" o:title=""/>{wrap_xml}'
+            f'style="{style}"{shape_attrs}><v:imagedata r:id="{media_id(name)}" o:title=""/>{wrap_xml}'
             "</v:shape></w:pict></w:r>")
 
 
@@ -4484,20 +4486,29 @@ def anchored_drawing(
     height: float,
     graphic_xml: str,
     *,
-    across: tuple[str, float],
-    down: tuple[str, float],
+    across: tuple[str, float | str],
+    down: tuple[str, float | str],
     wrap: str = "<wp:wrapNone/>",
+    dist: tuple[float, float, float, float] = (0, 0, 9, 9),
+    behind: bool = False,
 ) -> str:
     """A floating drawing (wp:anchor) of width x height pt, placed across and down as
-    (relativeFrom, offset in points), in front of the text."""
+    (relativeFrom, offset in points, or a wp:align value such as "center"), dist points from
+    the text above, below, left and right of it (distT, distB, distL, distR), in front of the
+    text or behind it."""
+
+    def position(value: float | str) -> str:
+        if isinstance(value, str):
+            return f"<wp:align>{value}</wp:align>"
+        return f"<wp:posOffset>{emu(value)}</wp:posOffset>"
+
+    distances = " ".join(f'dist{side}="{emu(value)}"' for side, value in zip("TBLR", dist))
     return (
-        '<wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" '
-        f'relativeHeight="{251658240 + n}" behindDoc="0" locked="0" layoutInCell="1" '
-        'allowOverlap="1"><wp:simplePos x="0" y="0"/>'
-        f'<wp:positionH relativeFrom="{across[0]}"><wp:posOffset>{emu(across[1])}'
-        "</wp:posOffset></wp:positionH>"
-        f'<wp:positionV relativeFrom="{down[0]}"><wp:posOffset>{emu(down[1])}'
-        "</wp:posOffset></wp:positionV>"
+        f'<wp:anchor {distances} simplePos="0" '
+        f'relativeHeight="{251658240 + n}" behindDoc="{int(behind)}" locked="0" '
+        'layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/>'
+        f'<wp:positionH relativeFrom="{across[0]}">{position(across[1])}</wp:positionH>'
+        f'<wp:positionV relativeFrom="{down[0]}">{position(down[1])}</wp:positionV>'
         f'{extent(width, height)}{wrap}<wp:docPr id="{n}" name="Drawing {n}"/>'
         f"<wp:cNvGraphicFramePr/>{graphic_xml}</wp:anchor>"
     )
@@ -4782,14 +4793,19 @@ TEXT_BOX_TYPE = (
 
 
 def vml_box(shape_id: str, style: str, content: str, inset: str | None = None,
-            first: bool = False) -> str:
+            first: bool = False, fill: str | None = None, wrap: str | None = None,
+            stroked: bool = True) -> str:
     """A run holding a VML text box (v:shape of the text box type with v:textbox) of the
-    given CSS style and v:textbox inset, with a 0.5 pt outline."""
+    given CSS style and v:textbox inset, with a 0.5 pt outline unless not stroked, filled
+    with the colour fill (#RRGGBB) when given, and the w10:wrap type wrap when given."""
     insets = f' inset="{inset}"' if inset is not None else ""
     shape_type = TEXT_BOX_TYPE if first else ""
+    fill_attrs = f' fillcolor="{fill}"' if fill is not None else ""
+    line = ' strokeweight=".5pt"' if stroked else ' stroked="f"'
+    wrap_xml = f'<w10:wrap type="{wrap}"/>' if wrap else ""
     return (f'<w:r><w:pict>{shape_type}<v:shape id="{shape_id}" type="#_x0000_t202" '
-            f'style="{style}" strokeweight=".5pt"><v:textbox{insets}><w:txbxContent>'
-            f"{content}</w:txbxContent></v:textbox></v:shape></w:pict></w:r>")
+            f'style="{style}"{fill_attrs}{line}><v:textbox{insets}><w:txbxContent>'
+            f"{content}</w:txbxContent></v:textbox>{wrap_xml}</v:shape></w:pict></w:r>")
 
 
 def textbox_vml() -> Doc:
@@ -5828,6 +5844,287 @@ def footnote_start_continuous() -> Doc:
     )
 
 
+# Text wrapped around floating objects (#511; #314, #400): how far Word keeps the text from a
+# floating picture or text box, on which sides, and along which outline, for each wrapping
+# of DrawingML (wp:wrapSquare, wp:wrapTight, wp:wrapTopAndBottom, ECMA-376 Part 1,
+# §20.4.2.15 to §20.4.2.17) and of VML (w10:wrap, ECMA-376 Part 4, §14.3.21). Each case's
+# label is kept with the paragraph after it, which holds the object at its start and text
+# long enough to run beside it and on below it; three cases to a page.
+WRAP_SENTENCES = 12
+
+
+def wrap_text(case: int, sentences: int = WRAP_SENTENCES) -> str:
+    """Sentences numbered within the case, so that each line of the reference names
+    itself."""
+    return " ".join(f"Text {k:02d} of case {case:02d} wraps around the object."
+                    for k in range(1, sentences + 1))
+
+
+def wrap_cases(cases: list[tuple[str, str]], per_page: int = 3,
+               sentences: int = WRAP_SENTENCES) -> str:
+    """Each case's label, then a paragraph that starts with the case's object and goes on
+    with wrap_text; a new page every per_page cases."""
+    return "".join(
+        para(run(f"Case {n:02d}: {label}"), space=spacing(before=12), keep_next=True,
+             page_break_before=n > 1 and (n - 1) % per_page == 0)
+        + para(anchor + run(wrap_text(n, sentences)), space=spacing(after=12))
+        for n, (label, anchor) in enumerate(cases, 1)
+    )
+
+
+def wrap_square(side: str = "bothSides") -> str:
+    return f'<wp:wrapSquare wrapText="{side}"/>'
+
+
+TOP_AND_BOTTOM = "<wp:wrapTopAndBottom/>"
+# Wrapping polygons in the fixed space of 21600 x 21600 Office reads them in, from the
+# object's top left corner (MS-OI29500 2.1.1354: ECMA-376 says EMUs), each closed on its
+# start.
+WHOLE = ((0, 0), (0, 21600), (21600, 21600), (21600, 0), (0, 0))
+POINTING_RIGHT = ((0, 0), (0, 21600), (21600, 10800), (0, 0))
+DIAMOND = ((10800, 0), (0, 10800), (10800, 21600), (21600, 10800), (10800, 0))
+MIDDLE_HALF = ((5400, 5400), (5400, 16200), (16200, 16200), (16200, 5400), (5400, 5400))
+
+
+def wrap_tight(points: tuple[tuple[int, int], ...], edited: bool,
+               side: str = "bothSides") -> str:
+    (x0, y0), *rest = points
+    return (f'<wp:wrapTight wrapText="{side}"><wp:wrapPolygon edited="{int(edited)}">'
+            f'<wp:start x="{x0}" y="{y0}"/>'
+            + "".join(f'<wp:lineTo x="{x}" y="{y}"/>' for x, y in rest)
+            + "</wp:wrapPolygon></wp:wrapTight>")
+
+
+# The pictures of the DrawingML wrap documents: 108 x 108 pt, a grey PNG of 144 x 144 px.
+WRAP_PICTURE = ("image1.png", grey_png(144, 144))
+
+
+def wrapped_picture(n: int, across: tuple[str, float | str], wrap: str,
+                    down: tuple[str, float | str] = ("paragraph", 0),
+                    size: tuple[float, float] = (108, 108), **options) -> str:
+    return picture_run(anchored_drawing(n, *size, drawing_picture("image1.png", *size),
+                                        across=across, down=down, wrap=wrap, **options))
+
+
+def wrap_square_doc() -> Doc:
+    cases = [
+        ("square on both sides, at the left margin (distL and distR 9 pt, distT and distB 0)",
+         wrapped_picture(1, ("margin", 0), wrap_square())),
+        ("square on both sides, at the right margin (wp:align right)",
+         wrapped_picture(2, ("margin", "right"), wrap_square())),
+        ("square on both sides, centred between the margins (wp:align center)",
+         wrapped_picture(3, ("margin", "center"), wrap_square())),
+        ("square, wrapText largest, 120 pt from the left margin: more room on the right",
+         wrapped_picture(4, ("margin", 120), wrap_square("largest"))),
+        ("square, wrapText left, 200 pt from the left margin",
+         wrapped_picture(5, ("margin", 200), wrap_square("left"))),
+        ("square, wrapText right, 200 pt from the left margin",
+         wrapped_picture(6, ("margin", 200), wrap_square("right"))),
+        ("square on both sides, at the left margin, every distance 0",
+         wrapped_picture(7, ("margin", 0), wrap_square(), dist=(0, 0, 0, 0))),
+        ("square on both sides, at the left margin, every distance 18 pt",
+         wrapped_picture(8, ("margin", 0), wrap_square(), dist=(18, 18, 18, 18))),
+        ("square on both sides, at the left margin, 36 pt below the paragraph's top",
+         wrapped_picture(9, ("margin", 0), wrap_square(), down=("paragraph", 36))),
+    ]
+    return Doc(
+        "E-wrap-square",
+        "Where Word puts text wrapped square (wp:wrapSquare) around a floating DrawingML "
+        "picture of 108 x 108 pt: at the left and right margins and centred, on both sides, "
+        "on the largest side, on the left or right only, with distances of 0 and 18 pt, and "
+        "36 pt below the anchor paragraph's top",
+        wrap_cases(cases) + para(run("End of the document.")),
+        media=(WRAP_PICTURE,),
+    )
+
+
+def wrap_tight_doc() -> Doc:
+    cases = [
+        ("tight on both sides, at the left margin, a polygon of the whole picture not edited "
+         "(edited 0, as Word writes it for a picture)",
+         wrapped_picture(1, ("margin", 0), wrap_tight(WHOLE, False))),
+        ("square on both sides, at the left margin (to compare)",
+         wrapped_picture(2, ("margin", 0), wrap_square())),
+        ("tight on both sides, at the left margin, an edited polygon: a triangle pointing "
+         "right, from the left edge to the middle of the right edge",
+         wrapped_picture(3, ("margin", 0), wrap_tight(POINTING_RIGHT, True))),
+        ("tight on both sides, centred between the margins, an edited diamond polygon",
+         wrapped_picture(4, ("margin", "center"), wrap_tight(DIAMOND, True))),
+        ("tight on both sides, at the left margin, an edited polygon of the middle half of "
+         "the picture, which the text may overlap",
+         wrapped_picture(5, ("margin", 0), wrap_tight(MIDDLE_HALF, True))),
+        ("tight on both sides, at the left margin, the whole picture with distT and distB "
+         "of 18 pt, which tight wrapping may ignore",
+         wrapped_picture(6, ("margin", 0), wrap_tight(WHOLE, False), dist=(18, 18, 9, 9))),
+    ]
+    return Doc(
+        "E-wrap-tight",
+        "Where Word puts text wrapped tight (wp:wrapTight) around a floating DrawingML "
+        "picture of 108 x 108 pt, by its wrapping polygon (in the space of 21600 x 21600 of "
+        "MS-OI29500 2.1.1354): the whole picture, a triangle, a diamond and the middle half, "
+        "with square wrapping to compare, and distances above and below",
+        wrap_cases(cases) + para(run("End of the document.")),
+        media=(WRAP_PICTURE,),
+    )
+
+
+def wrap_top_bottom_doc() -> Doc:
+    # The anchor run of case 05 comes after the paragraph's first three sentences.
+    later = (run(" ".join(f"Text {k:02d} of case 05 wraps around the object."
+                          for k in range(1, 4)) + " ")
+             + wrapped_picture(5, ("margin", 0), TOP_AND_BOTTOM, size=(144, 72)))
+    cases = [
+        ("top and bottom, at the left margin, a picture of 144 x 72 pt (distT and distB 0)",
+         wrapped_picture(1, ("margin", 0), TOP_AND_BOTTOM, size=(144, 72))),
+        ("top and bottom, at the left margin, distT and distB 12 pt",
+         wrapped_picture(2, ("margin", 0), TOP_AND_BOTTOM, size=(144, 72),
+                         dist=(12, 12, 9, 9))),
+        ("top and bottom, centred, a picture of 72 x 72 pt: no text beside it",
+         wrapped_picture(3, ("margin", "center"), TOP_AND_BOTTOM, size=(72, 72))),
+        ("top and bottom, at the left margin, 40 pt below the paragraph's top",
+         wrapped_picture(4, ("margin", 0), TOP_AND_BOTTOM, down=("paragraph", 40),
+                         size=(144, 72))),
+        ("top and bottom, the anchor run after the paragraph's first three sentences, "
+         "placed at the paragraph's top", ""),
+        ("top and bottom, on a page of its own, 300 pt below the page's top edge",
+         wrapped_picture(6, ("margin", 0), TOP_AND_BOTTOM, down=("page", 300),
+                         size=(144, 72))),
+    ]
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), space=spacing(before=12), keep_next=True,
+             page_break_before=n in (4, 6))
+        + para((later + run(" ".join(f"Text {k:02d} of case 05 wraps around the object."
+                                    for k in range(4, WRAP_SENTENCES + 1))))
+               if n == 5 else anchor + run(wrap_text(n, 30 if n == 6 else WRAP_SENTENCES)),
+               space=spacing(after=12))
+        for n, (label, anchor) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-wrap-top-bottom",
+        "Where Word puts text wrapped top and bottom (wp:wrapTopAndBottom) around a floating "
+        "DrawingML picture: at the left margin, with distances of 12 pt, a narrow picture "
+        "centred, 40 pt below the paragraph's top, an anchor run in the middle of its "
+        "paragraph, and a picture placed from the page's top",
+        body + para(run("End of the document.")),
+        media=(WRAP_PICTURE,),
+    )
+
+
+# The text boxes of the wrap documents: 180 x 90 pt, filled light grey (BFBFBF), with two
+# short paragraphs.
+BOX_FILL = "BFBFBF"
+
+
+def box_paragraphs(case: int) -> str:
+    return para(run(f"Box of case {case:02d}")) + para(run("Second line of the box"))
+
+
+def wrapped_box(n: int, across: tuple[str, float | str], wrap: str, fill: str = BOX_FILL,
+                line: str = THIN_LINE, **options) -> str:
+    return shape_run(anchored_drawing(
+        n, 180, 90, wps_shape(180, 90, box_paragraphs(n), fill=solid(fill), line=line),
+        across=across, down=("paragraph", 0), wrap=wrap, **options))
+
+
+def wrap_textbox_doc() -> Doc:
+    cases = [
+        ("square on both sides, at the left margin",
+         wrapped_box(1, ("margin", 0), wrap_square())),
+        ("square on both sides, centred between the margins",
+         wrapped_box(2, ("margin", "center"), wrap_square())),
+        ("tight on both sides, at the left margin, a polygon of the whole box not edited",
+         wrapped_box(3, ("margin", 0), wrap_tight(WHOLE, False))),
+        ("top and bottom, at the left margin",
+         wrapped_box(4, ("margin", 0), TOP_AND_BOTTOM)),
+        ("no wrapping, in front of the text, at the left margin: the box covers it",
+         wrapped_box(5, ("margin", 0), "<wp:wrapNone/>")),
+        ("no wrapping, behind the text (behindDoc), at the left margin",
+         wrapped_box(6, ("margin", 0), "<wp:wrapNone/>", behind=True)),
+        ("square on both sides, at the left margin, filled white without an outline, as "
+         "forms draw instruction boxes",
+         wrapped_box(7, ("margin", 0), wrap_square(), fill="FFFFFF", line=NO_LINE)),
+    ]
+    return Doc(
+        "E-wrap-textbox",
+        "Where Word puts text around a floating DrawingML text box (wps:wsp) of 180 x 90 pt "
+        "filled light grey: wrapped square at the margin and centred, tight, top and bottom, "
+        "and not wrapped in front of and behind the text, and a white box without an outline",
+        wrap_cases(cases) + para(run("End of the document.")),
+    )
+
+
+def wrap_vml_doc() -> Doc:
+    def floating(x: str, extra: str = "") -> str:
+        return ("position:absolute;" + x + ";margin-top:0;width:108pt;height:108pt;z-index:1;"
+                "mso-position-horizontal-relative:margin;mso-position-vertical-relative:"
+                "paragraph" + extra)
+
+    left = floating("margin-left:0")
+    cases = [
+        ("square, at the left margin (no wrap distances written)",
+         vml_picture("image1.png", "w1", left, "square", first=True)),
+        ("square, centred between the margins (mso-position-horizontal center)",
+         vml_picture("image1.png", "w2", floating("margin-left:0", ";mso-position-horizontal:"
+                                                  "center"), "square")),
+        ("tight, at the left margin, no wrapcoords written",
+         vml_picture("image1.png", "w3", left, "tight")),
+        ("tight, at the left margin, wrapcoords 0 0, 0 21600, 21600 10800, 0 0 (a triangle "
+         "pointing right)",
+         vml_picture("image1.png", "w4", left, "tight",
+                     shape_attrs=' wrapcoords="0 0 0 21600 21600 10800 0 0"')),
+        ("top and bottom, at the left margin",
+         vml_picture("image1.png", "w5", left, "topAndBottom")),
+        ("square, 200 pt from the left margin, side left: text on the left only",
+         vml_picture("image1.png", "w6", floating("margin-left:200pt"), "square",
+                     wrap_attrs=' side="left"')),
+        ("square, at the left margin, wrap distances of 18 pt on every side "
+         "(mso-wrap-distance-left and the others)",
+         vml_picture("image1.png", "w7", left + ";mso-wrap-distance-left:18pt;"
+                     "mso-wrap-distance-top:18pt;mso-wrap-distance-right:18pt;"
+                     "mso-wrap-distance-bottom:18pt", "square")),
+    ]
+    return Doc(
+        "E-wrap-vml",
+        "Where Word puts text wrapped around a floating VML picture (w:pict, w10:wrap) of "
+        "108 x 108 pt: square at the margin and centred, tight without and with wrapcoords, "
+        "top and bottom, on the left side only, and with wrap distances of 18 pt",
+        wrap_cases(cases) + para(run("End of the document.")),
+        media=(WRAP_PICTURE,),
+    )
+
+
+def wrap_vml_textbox_doc() -> Doc:
+    def floating(extra: str = "") -> str:
+        return ("position:absolute;margin-left:0;margin-top:0;width:180pt;height:90pt;"
+                "z-index:1;mso-position-horizontal-relative:margin;"
+                "mso-position-vertical-relative:paragraph" + extra)
+
+    fill = f"#{BOX_FILL}"
+    cases = [
+        ("square, at the left margin",
+         vml_box("b1", floating(), box_paragraphs(1), first=True, fill=fill, wrap="square")),
+        ("tight, at the left margin",
+         vml_box("b2", floating(), box_paragraphs(2), fill=fill, wrap="tight")),
+        ("top and bottom, at the left margin",
+         vml_box("b3", floating(), box_paragraphs(3), fill=fill, wrap="topAndBottom")),
+        ("no wrapping, in front of the text: the box covers it",
+         vml_box("b4", floating(), box_paragraphs(4), fill=fill, wrap="none")),
+        ("no wrapping, behind the text (a negative z-index)",
+         vml_box("b5", floating().replace("z-index:1", "z-index:-251658240"),
+                 box_paragraphs(5), fill=fill, wrap="none")),
+        ("square, at the left margin, filled white without an outline",
+         vml_box("b6", floating(), box_paragraphs(6), fill="#FFFFFF", wrap="square",
+                 stroked=False)),
+    ]
+    return Doc(
+        "E-wrap-vml-textbox",
+        "Where Word puts text around a floating VML text box (v:textbox, w10:wrap) of "
+        "180 x 90 pt filled light grey: wrapped square, tight, top and bottom, not wrapped "
+        "in front of and behind the text, and a white box without an outline",
+        wrap_cases(cases) + para(run("End of the document.")),
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -6000,6 +6297,12 @@ def documents() -> list[Doc]:
         footnote_header(),
         footnote_hidden(),
         footnote_start_continuous(),
+        wrap_square_doc(),
+        wrap_tight_doc(),
+        wrap_top_bottom_doc(),
+        wrap_textbox_doc(),
+        wrap_vml_doc(),
+        wrap_vml_textbox_doc(),
     ]
 
 

@@ -3134,6 +3134,180 @@ class Packages(unittest.TestCase):
         self.assertEqual(struct.unpack(">II", parts["word/media/image1.png"][16:24]), (96, 48))
         self.assertIn(b'Extension="png"', parts["[Content_Types].xml"])
 
+    def wrap_cases(self, name: str) -> dict[int, tuple[str, ElementTree.Element]]:
+        """Each case of a wrap document by number: its label and the paragraph after it,
+        which holds the case's object."""
+        doc = next(doc for doc in self.docs if doc.name == name)
+        body = ElementTree.fromstring(dict(rules.parts(doc))["word/document.xml"]).find(
+            f"{W}body")
+        paragraphs = body.findall(f"{W}p")
+        cases = {}
+        for p, after in zip(paragraphs, paragraphs[1:]):
+            label = "".join(t.text or "" for t in p.iter(f"{W}t"))
+            if label.startswith("Case "):
+                cases[int(label[5:7])] = (label, after)
+        return cases
+
+    def test_drawingml_wrap_cases_have_the_markup_their_labels_name(self):
+        wp = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+        emu = rules.EMU_PER_PT
+
+        def summary(after: ElementTree.Element) -> tuple:
+            anchor = after.find(f".//{wp}anchor")
+            wrap = next(child for child in anchor
+                        if child.tag.startswith(wp) and child.tag[len(wp):].startswith("wrap"))
+            across, down = (anchor.find(f"{wp}position{axis}") for axis in "HV")
+
+            def place(position):
+                offset = position.find(f"{wp}posOffset")
+                value = (int(offset.text) / emu if offset is not None
+                         else position.find(f"{wp}align").text)
+                return position.get("relativeFrom"), value
+
+            polygon = [(int(point.get("x")), int(point.get("y")))
+                       for point in wrap.iter() if point.tag in (f"{wp}start", f"{wp}lineTo")]
+            edited = wrap.find(f"{wp}wrapPolygon")
+            extent = anchor.find(f"{wp}extent")
+            return (wrap.tag[len(wp):], wrap.get("wrapText"), place(across), place(down),
+                    tuple(int(anchor.get(f"dist{side}")) / emu for side in "TBLR"),
+                    anchor.get("behindDoc"), tuple(polygon),
+                    None if edited is None else edited.get("edited"),
+                    (int(extent.get("cx")) / emu, int(extent.get("cy")) / emu))
+
+        margin = ("margin", 0.0)
+        top = ("paragraph", 0.0)
+        usual = (0.0, 0.0, 9.0, 9.0)
+        square = (108.0, 108.0)
+        expected = {
+            "E-wrap-square": [
+                ("wrapSquare", "bothSides", margin, top, usual, "0", (), None, square),
+                ("wrapSquare", "bothSides", ("margin", "right"), top, usual, "0", (), None,
+                 square),
+                ("wrapSquare", "bothSides", ("margin", "center"), top, usual, "0", (), None,
+                 square),
+                ("wrapSquare", "largest", ("margin", 120.0), top, usual, "0", (), None, square),
+                ("wrapSquare", "left", ("margin", 200.0), top, usual, "0", (), None, square),
+                ("wrapSquare", "right", ("margin", 200.0), top, usual, "0", (), None, square),
+                ("wrapSquare", "bothSides", margin, top, (0.0,) * 4, "0", (), None, square),
+                ("wrapSquare", "bothSides", margin, top, (18.0,) * 4, "0", (), None, square),
+                ("wrapSquare", "bothSides", margin, ("paragraph", 36.0), usual, "0", (), None,
+                 square),
+            ],
+            "E-wrap-tight": [
+                ("wrapTight", "bothSides", margin, top, usual, "0", rules.WHOLE, "0", square),
+                ("wrapSquare", "bothSides", margin, top, usual, "0", (), None, square),
+                ("wrapTight", "bothSides", margin, top, usual, "0", rules.POINTING_RIGHT, "1",
+                 square),
+                ("wrapTight", "bothSides", ("margin", "center"), top, usual, "0", rules.DIAMOND,
+                 "1", square),
+                ("wrapTight", "bothSides", margin, top, usual, "0", rules.MIDDLE_HALF, "1",
+                 square),
+                ("wrapTight", "bothSides", margin, top, (18.0, 18.0, 9.0, 9.0), "0",
+                 rules.WHOLE, "0", square),
+            ],
+            "E-wrap-top-bottom": [
+                ("wrapTopAndBottom", None, margin, top, usual, "0", (), None, (144.0, 72.0)),
+                ("wrapTopAndBottom", None, margin, top, (12.0, 12.0, 9.0, 9.0), "0", (), None,
+                 (144.0, 72.0)),
+                ("wrapTopAndBottom", None, ("margin", "center"), top, usual, "0", (), None,
+                 (72.0, 72.0)),
+                ("wrapTopAndBottom", None, margin, ("paragraph", 40.0), usual, "0", (), None,
+                 (144.0, 72.0)),
+                ("wrapTopAndBottom", None, margin, top, usual, "0", (), None, (144.0, 72.0)),
+                ("wrapTopAndBottom", None, margin, ("page", 300.0), usual, "0", (), None,
+                 (144.0, 72.0)),
+            ],
+            "E-wrap-textbox": [
+                ("wrapSquare", "bothSides", margin, top, usual, "0", (), None, (180.0, 90.0)),
+                ("wrapSquare", "bothSides", ("margin", "center"), top, usual, "0", (), None,
+                 (180.0, 90.0)),
+                ("wrapTight", "bothSides", margin, top, usual, "0", rules.WHOLE, "0",
+                 (180.0, 90.0)),
+                ("wrapTopAndBottom", None, margin, top, usual, "0", (), None, (180.0, 90.0)),
+                ("wrapNone", None, margin, top, usual, "0", (), None, (180.0, 90.0)),
+                ("wrapNone", None, margin, top, usual, "1", (), None, (180.0, 90.0)),
+                ("wrapSquare", "bothSides", margin, top, usual, "0", (), None, (180.0, 90.0)),
+            ],
+        }
+        for name, cases in expected.items():
+            found = self.wrap_cases(name)
+            self.assertEqual(sorted(found), list(range(1, len(cases) + 1)), name)
+            for n, case in enumerate(cases, 1):
+                with self.subTest(name=name, case=n):
+                    self.assertEqual(summary(found[n][1]), case)
+        # The polygons are closed, in the space of 21600 x 21600 (MS-OI29500 2.1.1354).
+        for polygon in (rules.WHOLE, rules.POINTING_RIGHT, rules.DIAMOND, rules.MIDDLE_HALF):
+            self.assertEqual(polygon[0], polygon[-1])
+            self.assertTrue(all(0 <= v <= 21600 for point in polygon for v in point))
+        # Case 05 of E-wrap-top-bottom holds its anchor after the paragraph's third sentence.
+        label, after = self.wrap_cases("E-wrap-top-bottom")[5]
+        runs = after.findall(f"{W}r")
+        self.assertTrue("".join(t.text or "" for t in runs[0].iter(f"{W}t")).endswith(
+            "Text 03 of case 05 wraps around the object. "))
+        self.assertIsNotNone(runs[1].find(f".//{wp}anchor"))
+        # The text boxes are filled light grey with an outline, but the white one of case 07.
+        a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        boxes = self.wrap_cases("E-wrap-textbox")
+        fills = [after.find(f".//{a}solidFill/{a}srgbClr").get("val") for _, after in
+                 (boxes[n] for n in sorted(boxes))]
+        self.assertEqual(fills, ["BFBFBF"] * 6 + ["FFFFFF"])
+        self.assertIsNotNone(boxes[7][1].find(f".//{a}ln/{a}noFill"))
+        # Three cases to a page: cases 04 and 07 start a page in every document but
+        # E-wrap-top-bottom, whose cases 04 and 06 do.
+        for name in expected:
+            doc = next(doc for doc in self.docs if doc.name == name)
+            body = ElementTree.fromstring(dict(rules.parts(doc))["word/document.xml"])
+            starts = []
+            for p in body.iter(f"{W}p"):
+                label = "".join(t.text or "" for t in p.iter(f"{W}t"))
+                if label.startswith("Case ") and p.find(f"{W}pPr/{W}pageBreakBefore") is not None:
+                    starts.append(int(label[5:7]))
+            with self.subTest(name=name):
+                self.assertEqual(starts, [4, 6] if name == "E-wrap-top-bottom"
+                                 else [n for n in (4, 7) if n <= len(expected[name])])
+
+    def test_vml_wrap_cases_have_the_markup_their_labels_name(self):
+        v = "{urn:schemas-microsoft-com:vml}"
+        w10 = "{urn:schemas-microsoft-com:office:word}"
+
+        def summary(after: ElementTree.Element) -> tuple:
+            shape = after.find(f".//{v}shape")
+            style = dict(item.split(":", 1) for item in shape.get("style").split(";"))
+            wrap = shape.find(f"{w10}wrap")
+            distances = tuple(style.get(f"mso-wrap-distance-{side}")
+                              for side in ("left", "top", "right", "bottom"))
+            return (wrap.get("type"), wrap.get("side"), style.get("margin-left"),
+                    style.get("mso-position-horizontal"), shape.get("wrapcoords"), distances,
+                    int(style["z-index"]) < 0, shape.get("fillcolor"), shape.get("stroked"))
+
+        none = (None,) * 4
+        pictures = [
+            ("square", None, "0", None, None, none, False, None, None),
+            ("square", None, "0", "center", None, none, False, None, None),
+            ("tight", None, "0", None, None, none, False, None, None),
+            ("tight", None, "0", None, "0 0 0 21600 21600 10800 0 0", none, False, None, None),
+            ("topAndBottom", None, "0", None, None, none, False, None, None),
+            ("square", "left", "200pt", None, None, none, False, None, None),
+            ("square", None, "0", None, None, ("18pt",) * 4, False, None, None),
+        ]
+        boxes = [
+            ("square", None, "0", None, None, none, False, "#BFBFBF", None),
+            ("tight", None, "0", None, None, none, False, "#BFBFBF", None),
+            ("topAndBottom", None, "0", None, None, none, False, "#BFBFBF", None),
+            ("none", None, "0", None, None, none, False, "#BFBFBF", None),
+            ("none", None, "0", None, None, none, True, "#BFBFBF", None),
+            ("square", None, "0", None, None, none, False, "#FFFFFF", "f"),
+        ]
+        for name, cases in (("E-wrap-vml", pictures), ("E-wrap-vml-textbox", boxes)):
+            found = self.wrap_cases(name)
+            self.assertEqual(sorted(found), list(range(1, len(cases) + 1)), name)
+            for n, case in enumerate(cases, 1):
+                with self.subTest(name=name, case=n):
+                    self.assertEqual(summary(found[n][1]), case)
+        # The wrap follows the text box's v:textbox, inside its v:shape.
+        shape = self.wrap_cases("E-wrap-vml-textbox")[1][1].find(f".//{v}shape")
+        self.assertEqual([child.tag for child in shape], [f"{v}textbox", f"{w10}wrap"])
+
     def test_symbol_font_cases_have_the_markup_their_labels_name(self):
         # The font is the family scripts/make-symbol-font.py names, which Word has installed.
         self.assertEqual(rules.SYMBOL_FONT, load("make-symbol-font").FAMILY)
