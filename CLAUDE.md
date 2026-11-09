@@ -65,9 +65,13 @@ crates/
                         and draws floating pictures where they are anchored (stacked behind or in
                         front of the text, which does not wrap around them yet) and text boxes,
                         inline or floating, with their paragraphs (insets, anchoring down the box,
-                        fill and outline), and the numbers of the references of footnotes and
-                        endnotes (the notes' texts are not laid out yet, and references in
-                        headers and footers show no number), behind private modules;
+                        fill and outline), the numbers of the references of footnotes and
+                        endnotes (references in headers and footers show no number), and
+                        footnotes under their separator at the bottom of the page of their
+                        reference or beneath its text, a line moving to the next page with
+                        notes that do not fit below it (not yet: a note is not cut across
+                        pages, and the notes of references in table cells and endnotes are not
+                        laid out), behind private modules;
                         feature `pdf` renders a document into PDF with officewright-pdf (`render_pdf`,
                         hidden in the docs like the IR it takes, and `RenderOptions`);
                         feature `fuzzing` opens entry points for the fuzz targets, examples and the tests
@@ -115,9 +119,9 @@ tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py, that ev
                         make-dmap-font.py write (Python), and of make-reference.ps1
                         without Word (Windows PowerShell, Windows only); poppler/ checks corpus-import.py's
                         font embedding with the real qpdf and poppler (Linux, macOS)
-tests/scripts/          tests of scripts/check-added-files.sh in a throwaway git repository, of
-                        scripts/nightly.sh's parts with a fake cargo, and of what the start of scripts/check.sh
-                        makes of CORPUS_JOBS (Python)
+tests/scripts/          tests of scripts/check-added-files.sh and scripts/check-corpus-size.py in throwaway git
+                        repositories, of scripts/nightly.sh's parts with a fake cargo, and of what the start of
+                        scripts/check.sh makes of CORPUS_JOBS (Python)
 tests/fonts/            unmodified OFL test fonts with their license files, listed in THIRD-PARTY-NOTICES.md;
                         outside every crate, so never published
 tests/fonts-word/       OFL fonts installed for Word when it renders references, with their license files, listed
@@ -138,6 +142,8 @@ scripts/check-added-files.sh  refuses Python bytecode and files naming a home di
                         staged ones with --staged in .githooks/pre-commit; it does not look inside compressed
                         parts (DOCX, PDF streams) or at UTF-16 text: documents brought in through
                         scripts/corpus-import.py and scripts/import-public-docs.py are checked there
+scripts/check-corpus-size.py  refuses a file of tests/corpus larger than 1 MB and a tests/corpus larger than
+                        100 MB (1 MB = 1,000,000 bytes; the files git tracks, as they are in the working tree)
 scripts/install-capi.sh installs the C library into a prefix with the release archive layout
 scripts/check-capi.sh   checks such a prefix as a user would: files, exports, tests/c, tests/ffi-python
 scripts/package.sh      builds one release archive; release-in-container.sh wraps it for the Linux builds
@@ -188,7 +194,7 @@ Unit and snapshot tests (`insta`) cover small handcrafted inputs. Real-world cor
 
 ### Corpora
 
-- Committed, `tests/corpus/`: a few hundred small files (each < 1 MB, total < 50 MB) chosen for edge cases. Only files whose license allows redistribution; each listed in `SOURCES.md` with origin and license. Never commit personal, customer or copyrighted documents.
+- Committed, `tests/corpus/`: small files (each at most 1 MB, at most 100 MB in all, where 1 MB is 1,000,000 bytes: the sizes of the files git tracks there, as they are in the working tree; `scripts/check-corpus-size.py` checks both in check.sh) chosen for edge cases. Only files whose license allows redistribution; each listed in `SOURCES.md` with origin and license. Never commit personal, customer or copyrighted documents.
 - External, `corpus-ext/`, downloaded by `scripts/fetch-corpus.sh` from the manifest `scripts/corpus-ext.tsv`, used in nightly runs only. Git sources are pinned by commit SHA and fetched as shallow, sparse, partial clones, so git verifies their content (GitHub does not guarantee stable checksums for generated archives, and a sparse clone fetches only the test data); archives are pinned by SHA-256.
   - Apache POI `test-data` (Apache-2.0): DOC, DOCX, XLS, XLSX, PPT, PPTX edge cases.
   - pdf.js `test/pdfs` (Apache-2.0), qpdf test files (Apache-2.0), PDFium testing corpus (BSD-3-Clause): broken and unusual PDFs.
@@ -368,8 +374,9 @@ cargo fmt --check and cargo clippy -D warnings on the fuzz/ workspace (Linux/mac
 cargo deny check && cargo machete
 cargo package --list -p officewright-pdf, -font, -layout, -cli: no third-party data in the published crates
 typos && taplo fmt --check && shellcheck scripts/*.sh .githooks/pre-commit && actionlint
+scripts/check-corpus-size.py: every file of tests/corpus at most 1 MB, tests/corpus at most 100 MB
 scripts/check-added-files.sh: no tracked Python bytecode, no file naming a home directory; its tests, those of
-  nightly.sh's parts and of check.sh's CORPUS_JOBS in tests/scripts
+  check-corpus-size.py, of nightly.sh's parts and of check.sh's CORPUS_JOBS in tests/scripts
 tests/corpus-tools (Python unittest): committed rule documents and their SOURCES.md rows equal make-rule-docs.py output;
   corpus-import.py refusals; every file in tests/fonts and tests/fonts-word is listed with its SHA-256 in
   THIRD-PARTY-NOTICES.md, and check-test-fonts.sh's pins are its; the symbol and DMAP fonts are what

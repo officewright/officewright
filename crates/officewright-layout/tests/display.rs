@@ -75,6 +75,16 @@ fn pair(text: &str, separator: char) -> (i64, i64) {
     (a.parse().unwrap_or(i64::MIN), b.parse().unwrap_or(i64::MIN))
 }
 
+/// Whether a glyph run of the dump is a tab leader: its text is one leader character,
+/// repeated, as the PDF's text of a leader is the characters it is drawn with.
+fn is_leader(item: &str) -> bool {
+    let text = item.split('"').nth(1).unwrap_or("");
+    let mut chars = text.chars();
+    chars.next().is_some_and(|first| {
+        ['.', '-', '\u{B7}', '_'].contains(&first) && chars.all(|ch| ch == first)
+    })
+}
+
 /// The glyph places `ID@X[,Y]` of a glyph run of the dump: x from the run's origin.
 fn glyph_xs(item: &str) -> Vec<i64> {
     item.split(' ')
@@ -457,7 +467,7 @@ fn leaders_stand_on_word_s_grid_from_the_page_edge() -> TestResult {
         let runs = items(&painted, "glyphs");
         let ours = runs
             .iter()
-            .find(|run| run.contains("\"\\t\""))
+            .find(|run| is_leader(run))
             .ok_or(format!("case {case}: no leader in {}", painted.text()))?;
         let xs = glyph_xs(ours);
         // In twips: Word's PDF places text 0.024 pt right of where it lays it out (its
@@ -748,7 +758,7 @@ fn the_leaders_of_a_document_take_a_bounded_number_of_glyphs() -> TestResult {
     let painted = fuzzing::paint(&book, &document, &[paragraph], 1584.0);
     let glyphs: usize = items(&painted, "glyphs")
         .iter()
-        .filter(|run| run.contains("\"\\t\""))
+        .filter(|run| is_leader(run))
         .map(|run| glyph_xs(run).len())
         .sum();
     assert!(glyphs > 0 && glyphs <= 1 << 18, "{glyphs}");
@@ -838,7 +848,7 @@ fn a_tab_in_complex_script_text_has_the_complex_script_font() -> TestResult {
     let painted = paint(&book, &document, &[paragraph]);
     let leader = items(&painted, "glyphs")
         .into_iter()
-        .find(|run| run.contains("\"\\t\""))
+        .find(|run| is_leader(run))
         .ok_or_else(|| painted.text().to_owned())?;
     assert!(
         leader.starts_with("glyphs Liberation Serif 400 "),
@@ -910,7 +920,7 @@ fn the_leader_bound_is_shared_by_the_paragraphs_of_a_document() -> TestResult {
     let leader_glyphs = |painted: &Painted| -> usize {
         items(painted, "glyphs")
             .iter()
-            .filter(|run| run.contains("\"\\t\""))
+            .filter(|run| is_leader(run))
             .map(|run| glyph_xs(run).len())
             .sum()
     };

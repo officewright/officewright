@@ -8,9 +8,9 @@ The checks scripts/corpus-import.py makes at import time are made again over wha
 committed, so a later change cannot slip past them: no person's name, profile path or
 embedded font in a re-saved copy, no language or number format Word added that SOURCES.md
 does not name as accepted, no profile path in geometry.json or formatting.json, no PNG chunk
-the importer does not write, Word's page breaks as the re-saved copy has them, and the
-corpus limits of CLAUDE.md (each file under 1 MB, all under 50 MB). Every document of
-business/ and generated/ has a reference or a SOURCES.md row saying why it has none.
+the importer does not write, and Word's page breaks as the re-saved copy has them. Every
+document of business/ and generated/ has a reference or a SOURCES.md row saying why it has
+none.
 
 The notes of each SOURCES.md row say what the files show: the compatibility mode and the
 w:compat settings Word dropped from the re-saved copy, the fonts the rasters were drawn
@@ -328,13 +328,6 @@ class References(unittest.TestCase):
                         kinds.append(data[position + 4 : position + 8])
                         position += 12 + length
                     self.assertTrue(set(kinds) <= {b"IHDR", b"pHYs", b"IDAT", b"IEND"}, kinds)
-
-    def test_the_corpus_keeps_within_its_limits(self):
-        files = [path for path in CORPUS.rglob("*") if path.is_file()]
-        for path in files:
-            with self.subTest(file=str(path.relative_to(CORPUS))):
-                self.assertLess(path.stat().st_size, 1_000_000)
-        self.assertLess(sum(path.stat().st_size for path in files), 50_000_000)
 
     def test_every_sources_row_has_its_folder(self):
         for path in re.findall(r"^\| reference/([^ |]+)/ \|", self.sources, re.M):

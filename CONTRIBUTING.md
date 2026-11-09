@@ -94,9 +94,9 @@ title becomes the commit message on `main`, so it follows the commit convention 
 
 ## Test documents
 
-- `tests/corpus/` holds small real documents (each under 1 MB) chosen for edge
-  cases. Only add a file whose license allows redistribution, and list it in
-  `tests/corpus/SOURCES.md` with its origin and license. Never commit personal,
-  customer or copyrighted documents.
+- `tests/corpus/` holds small real documents chosen for edge cases: each file at most
+  1 MB, the folder at most 100 MB, which `scripts/check.sh` checks. Only add a file
+  whose license allows redistribution, and list it in `tests/corpus/SOURCES.md` with
+  its origin and license. Never commit personal, customer or copyrighted documents.
 - Large external corpora are not committed. `scripts/fetch-corpus.sh` downloads them
   into `corpus-ext/` (gitignored), pinned by the manifest `scripts/corpus-ext.tsv`.

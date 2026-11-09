@@ -122,6 +122,12 @@ fn shading_underlines_leaders_and_pictures_are_painted() -> TestResult {
     // The PNG picture: an image XObject drawn.
     assert!(pdf.contains("/Subtype /Image") || pdf.contains("/Subtype/Image"));
     assert!(pdf.contains(" Do"), "no image drawn");
+    // The dot leader stands for its periods through the ToUnicode map, with no
+    // replacement text.
+    assert!(
+        !pdf.contains("/ActualText"),
+        "a leader needs no replacement text"
+    );
     assert!(
         rendered
             .report()

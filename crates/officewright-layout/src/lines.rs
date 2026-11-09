@@ -30,6 +30,12 @@ use crate::tabs::{Stop, TabStops};
 /// within the 0.12 pt of the printer's grid.
 const EXACT_BASELINE: f64 = 0.8;
 
+/// The length of the line that separates notes from the text above them, in points: two
+/// inches, as Word draws it in the references of `generated/contract-de`,
+/// `cv-en-academic` and `invoice-en-decimal`, whose columns are 453.5 and 468 pt wide,
+/// within the 0.65 pt of their rasters.
+pub(crate) const SEPARATOR_LENGTH: f64 = 144.0;
+
 /// How far past the end of a line a piece or a tab stop may reach and still fit:
 /// rounding in sums of advances, and in the end itself, which is the page's width less
 /// its margins and indents (612 − 43.2 − 43.2 is just below 525.6). Also how far after
@@ -478,10 +484,23 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                         width,
                     });
                 }
-                Item::NoteReference(..) | Item::NoteMark(_) => units.push(Unit {
+                Item::NoteReference(..) => units.push(Unit {
                     range: start..start + PLACEHOLDER_MARK.len_utf8(),
                     kind: UnitKind::Zero { item: index },
                     width: Pt(0.0),
+                }),
+                // The separator is [`SEPARATOR_LENGTH`] long, or as wide as a narrower
+                // column, the continuation separator as wide as the column. Hypothesis
+                // until a Word render (`E-footnote-long.docx`) for the latter, and for a
+                // column narrower than the separator.
+                Item::Separator(continuation, _) => units.push(Unit {
+                    range: start..start + PLACEHOLDER_MARK.len_utf8(),
+                    kind: UnitKind::Zero { item: index },
+                    width: if *continuation {
+                        self.width
+                    } else {
+                        Pt(SEPARATOR_LENGTH.min(self.width.0))
+                    },
                 }),
                 Item::Anchored(_) => units.push(Unit {
                     range: start..start,
@@ -1881,7 +1900,7 @@ pub(crate) fn break_text(itemized: &Itemized) -> (String, Vec<usize>) {
             Item::Tab(_) => text.push(PLACEHOLDER_TAB),
             Item::Break(..) => text.push(PLACEHOLDER_BREAK),
             Item::Object(_) => text.push(PLACEHOLDER_OBJECT),
-            Item::NoteReference(..) | Item::NoteMark(_) => text.push(PLACEHOLDER_MARK),
+            Item::NoteReference(..) | Item::Separator(..) => text.push(PLACEHOLDER_MARK),
             // An anchored object takes no room and does not change where lines end.
             Item::Anchored(_) => {}
         }
@@ -1971,7 +1990,7 @@ fn item_style(itemized: &Itemized, item: usize) -> Option<RunStyleId> {
         Item::Tab(style)
         | Item::Break(_, style)
         | Item::NoteReference(_, style)
-        | Item::NoteMark(style) => Some(*style),
+        | Item::Separator(_, style) => Some(*style),
         Item::Object(_) | Item::Anchored(_) => None,
     }
 }

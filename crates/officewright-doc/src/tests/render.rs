@@ -287,12 +287,56 @@ fn renamed_where(program: &[u8], name: &str, count: usize) -> Vec<u8> {
 }
 
 #[test]
-fn reports_an_embedded_font_whose_names_the_text_cannot_reach() {
-    // Word renames a subset it embeds; the program answers to none of the font's names.
+fn uses_an_embedded_font_under_the_name_of_the_font_that_embeds_it() {
+    // Word renames a subset it embeds (#216): the program answers to none of the font's
+    // names, and the text, which names the font, is laid out in it all the same.
     let program = named(&test_font(), "___WRD_EMBED_S_17");
     let document = Document::from_bytes(package_with_body_and_fonts(
         &text_in_test_font("A"),
         &font("Officewright Test", r#"<w:embedRegular r:id="rId1"/>"#),
+        &relationship("rId1", "fonts/font1.odttf"),
+        &[("word/fonts/font1.odttf", &program)],
+    ))
+    .unwrap();
+    let (pdf, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+    let listed = entries(&report);
+    assert!(
+        listed
+            .iter()
+            .all(|entry| !entry.contains("Officewright Test")),
+        "{listed:?}"
+    );
+    // The PDF holds the subset under the PostScript name Word keeps.
+    assert!(names(&pdf, b"+OfficewrightTest"));
+
+    // A font name longer than the IR keeps, past what the font book keeps too: the
+    // program answers to the name as the IR cuts it, which the text names.
+    for length in [300, 600] {
+        let long = "L".repeat(length);
+        let document = Document::from_bytes(package_with_body_and_fonts(
+            &format!(
+                r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="{long}" w:hAnsi="{long}"/></w:rPr><w:t>A</w:t></w:r></w:p>"#
+            ),
+            &font(&long, r#"<w:embedRegular r:id="rId1"/>"#),
+            &relationship("rId1", "fonts/font1.odttf"),
+            &[("word/fonts/font1.odttf", &program)],
+        ))
+        .unwrap();
+        let (pdf, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+        let listed = entries(&report);
+        assert!(names(&pdf, b"+OfficewrightTest"), "{length}: {listed:?}");
+        assert!(
+            listed.iter().all(|entry| !entry.contains("cannot reach")
+                && !(entry.contains("LLLL") && entry.contains("no font available"))),
+            "{length}: {listed:?}"
+        );
+    }
+
+    // A font name of white space only names nothing: the text cannot reach the program,
+    // the report says so, and nothing draws the text in the test font.
+    let document = Document::from_bytes(package_with_body_and_fonts(
+        &text_in_test_font("A"),
+        &font("   ", r#"<w:embedRegular r:id="rId1"/>"#),
         &relationship("rId1", "fonts/font1.odttf"),
         &[("word/fonts/font1.odttf", &program)],
     ))
@@ -306,9 +350,8 @@ fn reports_an_embedded_font_whose_names_the_text_cannot_reach() {
     assert_eq!(entry.kind(), ReportKind::FontSubstituted);
     assert_eq!(
         entry.to_string(),
-        "document: the w:embedRegular of the font Officewright Test holds a font named \
-         ___WRD_EMBED_S_17, which the text cannot reach by the font's name, so other fonts \
-         are used"
+        "document: the w:embedRegular of the font     holds a font named ___WRD_EMBED_S_17, \
+         which the text cannot reach by the font's name, so other fonts are used"
     );
     assert!(
         listed.iter().any(|entry| entry == NO_TEST_FONT),
@@ -338,7 +381,8 @@ fn reports_an_embedded_font_whose_names_the_text_cannot_reach() {
         &renamed_where(&test_font(), "___WRD_EMBED_S_17", 1),
         "Officewright Test"
     ));
-    assert!(!reached(&program, "Officewright Test"));
+    // The renamed program is reached by the name of the font that embeds it.
+    assert!(reached(&program, "Officewright Test"));
 }
 
 #[test]
@@ -764,9 +808,9 @@ fn takes_a_program_found_by_an_alias_or_as_a_metric_compatible_substitute() {
 }
 
 #[test]
-fn reports_an_embedded_font_without_a_family_name() {
+fn uses_an_embedded_font_without_a_family_name_and_reports_it_when_unreachable() {
     // The test font with its family and full names (name IDs 1 and 4) made other names:
-    // nothing finds it by "Officewright Test".
+    // none of its own names is "Officewright Test", but the font that embeds it is.
     let mut program = test_font();
     let tables = usize::from(u16::from_be_bytes([program[4], program[5]]));
     let name = (0..tables)
@@ -781,20 +825,39 @@ fn reports_an_embedded_font_without_a_family_name() {
             program[id..id + 2].copy_from_slice(&7u16.to_be_bytes());
         }
     }
-    let document = Document::from_bytes(package_with_body_and_fonts(
-        &text_in_test_font("A"),
-        &font("Officewright Test", r#"<w:embedRegular r:id="rId1"/>"#),
-        &relationship("rId1", "fonts/font1.odttf"),
-        &[("word/fonts/font1.odttf", &program)],
-    ))
-    .unwrap();
-    let (_, report) = document.save_pdf_bytes(&without_system_fonts()).unwrap();
+    let embedding = |name: &str| {
+        Document::from_bytes(package_with_body_and_fonts(
+            &text_in_test_font("A"),
+            &font(name, r#"<w:embedRegular r:id="rId1"/>"#),
+            &relationship("rId1", "fonts/font1.odttf"),
+            &[("word/fonts/font1.odttf", &program)],
+        ))
+        .unwrap()
+    };
+    let (_, report) = embedding("Officewright Test")
+        .save_pdf_bytes(&without_system_fonts())
+        .unwrap();
+    let listed = entries(&report);
+    assert!(
+        listed
+            .iter()
+            .all(|entry| !entry.contains("Officewright Test")),
+        "{listed:?}"
+    );
+    // Under a font name of white space only, the report describes the program, and
+    // nothing draws the text in the test font.
+    let (_, report) = embedding("   ")
+        .save_pdf_bytes(&without_system_fonts())
+        .unwrap();
     let listed = entries(&report);
     assert!(
         listed.iter().any(|entry| entry
-            == "document: the w:embedRegular of the font Officewright Test holds a font without \
-                a family name, which the text cannot reach by the font's name, so other fonts are \
-                used"),
+            == "document: the w:embedRegular of the font     holds a font without a family \
+                name, which the text cannot reach by the font's name, so other fonts are used"),
+        "{listed:?}"
+    );
+    assert!(
+        listed.iter().any(|entry| entry == NO_TEST_FONT),
         "{listed:?}"
     );
 }

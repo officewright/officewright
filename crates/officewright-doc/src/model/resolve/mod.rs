@@ -10,6 +10,7 @@ mod table;
 pub(crate) use character::theme_color;
 pub(crate) use paragraph::list_level;
 
+use officewright_core::Pt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -91,10 +92,10 @@ pub struct Formats<'a> {
     /// A paragraph style's chain laid over a table text, by the table text's id and the
     /// style; at most [`MAX_CELL_LEVELS`] at a time.
     cell_levels: HashMap<(u64, usize), Arc<ParagraphLevel>>,
-    /// Whether a size of 11 or 12 pt and a left justification that the default paragraph
-    /// style gives give way to a table style's ([MS-DOCX] 2.3.x
-    /// `overrideTableStyleFontSizeAndJustification` off), once worked out.
-    table_style_wins: Option<bool>,
+    /// The sizes, and whether the left justification, that the default paragraph style
+    /// gives give way to a table style's ([MS-DOCX] 2.3.1
+    /// `overrideTableStyleFontSizeAndJustification`), once worked out.
+    table_style_wins: Option<TableStyleWins>,
     /// How much work the caches saved, for tests.
     #[cfg(test)]
     work: Work,
@@ -532,15 +533,42 @@ impl Formats<'_> {
         self.cell_levels.clear();
     }
 
-    /// Whether, in a cell, the size of 11 or 12 pt and the left justification that the
-    /// default paragraph style gives give way to the table style's: when the setting
-    /// `overrideTableStyleFontSizeAndJustification` ([MS-DOCX] 2.3.x) is off. Not written,
-    /// it is off below compatibility mode 15, as word-rules/E-table-style-size-12pt-14.docx
-    /// shows (Word draws the cells in the table style's 14 pt over Normal's 12 pt), and on
-    /// from mode 15: Word writes it on when it saves such a document
-    /// (E-table-style-size-12pt-none.docx and the copy Word saved of it), and draws Normal's
-    /// 12 pt.
+    /// Whether, in a cell, the left justification that the default paragraph style gives
+    /// gives way to the table style's: when the setting
+    /// `overrideTableStyleFontSizeAndJustification` ([MS-DOCX] 2.3.1) is off, written so or,
+    /// below compatibility mode 15, not written.
     fn table_style_wins(&mut self) -> bool {
+        self.table_style_override() != TableStyleWins::Never
+    }
+
+    /// The sizes that, in a cell, the default paragraph style gives way with to the table
+    /// style's. None with the setting `overrideTableStyleFontSizeAndJustification` on.
+    ///
+    /// Not written below compatibility mode 15, only 12 pt. Word deviates here from
+    /// [MS-DOCX] 2.3.1, which makes off the default and lets 11 or 12 pt give way: Word
+    /// draws the cells of word-rules/E-table-style-size-12pt-14.docx and
+    /// E-table-style-defaults-size-13-12-14.docx in the table style's 14 pt over Normal's
+    /// 12 pt, and those of E-table-style-defaults-size-14.docx,
+    /// E-table-style-defaults-size-10-11-14.docx and
+    /// E-table-style-defaults-size-right-14.docx in Normal's 11 pt (#506).
+    ///
+    /// Written off, 11 and 12 pt, as [MS-DOCX] 2.3.1 says. That is our choice: no render
+    /// of Word shows the setting written off yet (#532), and the renders without it
+    /// already depart from the specification's 11 pt.
+    fn sizes_giving_way(&mut self) -> &'static [Pt] {
+        match self.table_style_override() {
+            TableStyleWins::Never => &[],
+            TableStyleWins::Off => &[Pt(11.0), Pt(12.0)],
+            TableStyleWins::NotWritten => &[Pt(12.0)],
+        }
+    }
+
+    /// What the setting `overrideTableStyleFontSizeAndJustification` gives, once worked
+    /// out: on, off, or not written below compatibility mode 15, a state of its own
+    /// ([`sizes_giving_way`](Self::sizes_giving_way)). Not written from mode 15, it is on:
+    /// Word writes it on when it saves such a document (E-table-style-size-12pt-none.docx
+    /// and the copy Word saved of it), and draws Normal's 12 pt.
+    fn table_style_override(&mut self) -> TableStyleWins {
         if let Some(wins) = self.table_style_wins {
             return wins;
         }
@@ -552,12 +580,31 @@ impl Formats<'_> {
             .find(|setting| setting.name() == "overrideTableStyleFontSizeAndJustification")
             .and_then(|setting| setting.value())
             .map(|value| matches!(value.trim(), "1" | "true" | "on"));
-        let overrides = written.unwrap_or_else(|| {
-            settings.effective_compatibility_mode() >= super::CompatibilityMode::WORD_2013
-        });
-        self.table_style_wins = Some(!overrides);
-        !overrides
+        let wins = match written {
+            Some(true) => TableStyleWins::Never,
+            Some(false) => TableStyleWins::Off,
+            None if settings.effective_compatibility_mode()
+                >= super::CompatibilityMode::WORD_2013 =>
+            {
+                TableStyleWins::Never
+            }
+            None => TableStyleWins::NotWritten,
+        };
+        self.table_style_wins = Some(wins);
+        wins
     }
+}
+
+/// What the default paragraph style gives way to a table style with, by the setting
+/// `overrideTableStyleFontSizeAndJustification`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TableStyleWins {
+    /// Nothing: the setting is on, written so or, from compatibility mode 15, not written.
+    Never,
+    /// The setting is written off.
+    Off,
+    /// The setting is not written, below compatibility mode 15.
+    NotWritten,
 }
 
 /// How many combinations of a paragraph style and a list level the resolver keeps at a
