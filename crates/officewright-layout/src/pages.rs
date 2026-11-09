@@ -9534,6 +9534,41 @@ mod tests {
     }
 
     #[test]
+    fn the_notes_end_with_the_space_after_the_last() {
+        use crate::ir::NotePosition;
+        // A note of one line with 10 pt after it: the notes' room is 50 pt, the separator
+        // (130 to 150), the note (150 to 170) and its space after, as Word's render of
+        // E-footnote-two-notes case 03 ends its notes the 6 pt after the last above the
+        // bottom of the body. Under four lines its line (100 to 120) fits above that room;
+        // under five, the line (120 to 140) leaves only 40 pt, and moves.
+        let lay = |filler: usize| {
+            let document = with_notes(
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let note = footnote(document, (style, mark), 1, spacing(0.0, 10.0));
+                    vec![
+                        lines(style, filler, spacing(0.0, 0.0)),
+                        referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                    ]
+                },
+            );
+            let (laid, _) = laid(&document, 10);
+            laid.expect("pages")
+                .pages
+                .iter()
+                .map(separators_and_texts)
+                .collect::<Vec<_>>()
+        };
+        let pages = lay(4);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].0, [143.75]);
+        assert_eq!(pages[0].1.last(), Some(&("N".to_owned(), 166.0)));
+        assert_eq!(lay(5).len(), 2);
+    }
+
+    #[test]
     fn a_note_of_paragraphs_keeps_the_space_between_them() {
         use crate::ir::{Note, NoteKind, NotePosition};
         // A note of two paragraphs, 10 pt after the first: its room is 70 pt with the

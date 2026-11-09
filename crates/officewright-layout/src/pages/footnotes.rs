@@ -4,10 +4,12 @@
 //! When the pager places a line, the footnotes it references and no page holds yet go
 //! on its page with it, and their room is taken from the bottom of the body: a line
 //! whose footnotes do not fit below it moves to the next page with them. The notes are
-//! stacked as the paragraphs of a header are, with the space between them; the space
-//! before the separator and after the last note are not counted. Hypotheses until Word
-//! renders `E-footnote-two-notes.docx` and `E-footnote-no-room.docx`: the spacing, and
-//! that a note is never cut, which Word does where a note does not fit (15c).
+//! stacked as the paragraphs of a header are, with the space between them and the space
+//! after the last, as Word's render of `E-footnote-two-notes.docx` shows (case 03: two
+//! notes of 6 pt before and after end 6 pt above the bottom of the body, 6 pt apart and 6
+//! pt under the separator); the space before the separator is not counted, a hypothesis.
+//! A note is never cut yet, which Word does where a note does not fit
+//! (`E-footnote-long.docx`, plan 15c).
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -46,13 +48,14 @@ impl<'d> NoteLayout<'d> {
     }
 }
 
-/// A footnote on a page: which, its layout, its top from the top of the notes' room, and
-/// the room the notes take down to its bottom, the separator's included.
+/// A footnote on a page: which, its layout, its top and its bottom from the top of the
+/// notes' room, and the space after it, which the room ends with when it is the last.
 struct PageNote<'d> {
     note: NoteId,
     layout: Rc<NoteLayout<'d>>,
     top: f64,
-    room: f64,
+    bottom: f64,
+    after: f64,
 }
 
 /// The footnotes on a page, in the order of their references, under the separator.
@@ -65,7 +68,9 @@ pub(super) struct PageNotes<'d> {
 impl PageNotes<'_> {
     /// The room the notes take, the separator's included; none without notes.
     pub(super) fn room(&self) -> f64 {
-        self.notes.last().map_or(0.0, |note| note.room)
+        self.notes
+            .last()
+            .map_or(0.0, |note| note.bottom + note.after)
     }
 
     /// How many notes it holds.
@@ -176,10 +181,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         top: f64,
     ) -> Result<(usize, bool)> {
         let bottom = self.body()?.bottom.0;
-        let (mut room, mut tail) = match self.footnotes.last().and_then(|page| page.notes.last()) {
-            Some(last) => (last.room, Some(Rc::clone(&last.layout))),
+        // The bottom of the last note in the notes' room, and that note.
+        let (mut end, mut tail) = match self.footnotes.last().and_then(|page| page.notes.last()) {
+            Some(last) => (last.bottom, Some(Rc::clone(&last.layout))),
             None => (0.0, None),
         };
+        let mut room = self.footnotes.last().map_or(0.0, PageNotes::room);
         let mut taken: HashSet<NoteId> = HashSet::new();
         let mut y = top;
         let mut count = 0;
@@ -189,7 +196,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     continue;
                 }
                 let laid = self.note_layout(note, section)?;
-                room = self.room_after(room, tail.as_deref(), &laid, section)?.1;
+                end = self.room_after(end, tail.as_deref(), &laid, section)?.1;
+                room = end + self.space_after(&laid);
                 tail = Some(laid);
             }
             if y + line.height.0 > bottom - room + EPSILON {
@@ -207,19 +215,18 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         Ok((count, false))
     }
 
-    /// The top of `note` in the notes' room and the room down to its bottom, the notes
-    /// taking `room` down to the bottom of `tail` before it, or nothing when it is the
-    /// first, which goes under the separator of section `section`.
+    /// The top and the bottom of `note` in the notes' room, under `tail`, which ends at
+    /// `end`, or, when it is the first, under the separator of section `section`.
     fn room_after(
         &mut self,
-        room: f64,
+        end: f64,
         tail: Option<&NoteLayout<'d>>,
         note: &NoteLayout<'d>,
         section: usize,
     ) -> Result<(f64, f64)> {
         let (room, gap) = match tail {
             Some(tail) => (
-                room,
+                end,
                 note.first()
                     .map_or(0.0, |below| self.gap(tail.last(), below)),
             ),
@@ -233,6 +240,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         };
         let top = room + gap;
         Ok((top, top + note.height))
+    }
+
+    /// The space after `note`, the last of a stack.
+    fn space_after(&self, note: &NoteLayout<'_>) -> f64 {
+        note.last()
+            .map_or(0.0, |last| super::trailing_space(self.document, last))
     }
 
     /// The space between `above` and `below` in a stack of notes.
@@ -251,11 +264,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         for line in lines {
             for note in self.line_footnotes(paragraph, layout, line) {
                 let laid = self.note_layout(note, section)?;
-                let (room, tail) = match self.footnotes.last().and_then(|page| page.notes.last()) {
-                    Some(last) => (last.room, Some(Rc::clone(&last.layout))),
+                let (end, tail) = match self.footnotes.last().and_then(|page| page.notes.last()) {
+                    Some(last) => (last.bottom, Some(Rc::clone(&last.layout))),
                     None => (0.0, None),
                 };
-                let (top, room) = self.room_after(room, tail.as_deref(), &laid, section)?;
+                let (top, bottom) = self.room_after(end, tail.as_deref(), &laid, section)?;
+                let after = self.space_after(&laid);
                 let separator = match tail {
                     Some(_) => None,
                     None => Some(self.separator_layout(section)?),
@@ -269,7 +283,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         note,
                         layout: laid,
                         top,
-                        room,
+                        bottom,
+                        after,
                     });
                 }
             }
