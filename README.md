@@ -64,8 +64,10 @@ columns fitted to their content as Word fits them (the grid's widths in fixed la
 merged cells, borders and shading, and their rows are cut across pages with the header
 rows repeated. It draws inline PNG and JPEG pictures and floating ones where they are
 anchored, text boxes in the line and floating with their paragraphs, insets, fill and
-line, the numbers of references to footnotes and endnotes, and underlines,
-strikethrough, highlight and shading.
+line, the numbers of references to footnotes and endnotes, footnotes under their
+separator at the bottom of the page of their reference, or beneath its text where the
+section places them so (a line whose notes do not fit below it moves to the next page
+with them), and underlines, strikethrough, highlight and shading.
 Much of what it shows otherwise than Word would, such as a substituted font or something
 not laid out yet, it reports: the command line prints it as notes, and the C library and
 Rust return it as a report.
@@ -79,8 +81,8 @@ The main things not laid out yet:
   rows of such a table are not repeated);
 - list numbers in formats such as Hebrew letters or Chinese counting, which are written in
   decimal, and picture bullets, for which the level's text stands in;
-- the texts of footnotes and endnotes, and the numbers of references to them in headers
-  and footers;
+- endnotes, the notes of references in table cells and in headers and footers (where
+  references show no number), and footnotes cut across pages;
 - text wrapping around floating pictures and text boxes (it runs over or under them),
   floating pictures and text boxes in table cells, and shapes, charts, SmartArt, VML
   shapes other than pictures and text boxes, and equations;
