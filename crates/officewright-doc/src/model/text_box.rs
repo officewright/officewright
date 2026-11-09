@@ -9,7 +9,7 @@ use officewright_core::Pt;
 use super::color::{
     Paint, VmlColor, color_element, color_of_element, drawing_color, read_color, resolve, vml_color,
 };
-use super::drawing::{Offsets, boolean, child, coordinate, value};
+use super::drawing::{self, Anchor, Offsets, attribute, boolean, child, coordinate, value};
 use super::properties::xml_enum;
 use super::theme::{StyleFill, StyleLine};
 use super::views::{Block, blocks};
@@ -80,17 +80,31 @@ pub struct TextBox<'a> {
     document: &'a Document,
     /// The `wps:wsp`, or the VML shape.
     shape: Element<'a>,
-    /// For a VML shape, its `v:textbox`.
-    vml: Option<Element<'a>>,
+    /// Where the shape is: in a drawing, its frame; in VML, its `v:textbox`.
+    place: Place<'a>,
     blocks: &'a [u32],
+}
+
+/// Where the shape of a text box is.
+#[derive(Clone, Copy, Debug)]
+enum Place<'a> {
+    /// In a drawing (`w:drawing`), with its frame (`wp:inline` or `wp:anchor`).
+    Drawing(Option<Element<'a>>),
+    /// In VML, with its `v:textbox`, and whether it is in a group (`v:group`).
+    Vml(Element<'a>, bool),
 }
 
 impl<'a> TextBox<'a> {
     /// The text box of a drawing (`w:drawing`), if its shape has one whose content was
     /// read.
     pub(crate) fn in_drawing(document: &'a Document, drawing: Element<'a>) -> Option<Self> {
-        let shape = drawing_shape(drawing, &document.names)?;
-        Self::new(document, shape, None)
+        let names = &document.names;
+        let shape = drawing_shape(drawing, names)?;
+        Self::new(
+            document,
+            shape,
+            Place::Drawing(drawing::frame(drawing, names)),
+        )
     }
 
     /// The text boxes of a VML drawing (`w:pict`) whose content was read, those of the
@@ -99,14 +113,20 @@ impl<'a> TextBox<'a> {
         document: &'a Document,
         pict: Element<'a>,
     ) -> impl Iterator<Item = Self> + 'a {
-        vml_shapes(pict, &document.names)
-            .into_iter()
-            .filter_map(move |(shape, text_box)| Self::new(document, shape, Some(text_box)))
+        vml_shapes(pict, &document.names).into_iter().filter_map(
+            move |(shape, text_box, in_group)| {
+                Self::new(document, shape, Place::Vml(text_box, in_group))
+            },
+        )
     }
 
     /// The text box of a shape; none when it has content that was not read, as a text
     /// box in another has.
-    fn new(document: &'a Document, shape: Element<'a>, vml: Option<Element<'a>>) -> Option<Self> {
+    fn new(document: &'a Document, shape: Element<'a>, place: Place<'a>) -> Option<Self> {
+        let vml = match place {
+            Place::Drawing(_) => None,
+            Place::Vml(text_box, _) => Some(text_box),
+        };
         let blocks = match content(shape, vml, &document.names) {
             Some(content) => {
                 let stories = &document.text_boxes;
@@ -121,9 +141,71 @@ impl<'a> TextBox<'a> {
         Some(Self {
             document,
             shape,
-            vml,
+            place,
             blocks,
         })
+    }
+
+    /// For a VML shape, its `v:textbox`.
+    fn vml(self) -> Option<Element<'a>> {
+        match self.place {
+            Place::Drawing(_) => None,
+            Place::Vml(text_box, _) => Some(text_box),
+        }
+    }
+
+    /// The width of its frame: that of its drawing (`wp:extent`'s `cx`), or the `width` in
+    /// the `style` of its VML shape; none when not written or not a length Word takes, and
+    /// for a VML shape in a group (`v:group`), which gives it in the group's own units.
+    pub fn width(self) -> Option<Pt> {
+        self.side("cx", "width")
+    }
+
+    /// The height of its frame (`wp:extent`'s `cy`, or `height`), as
+    /// [`width`](Self::width) says.
+    pub fn height(self) -> Option<Pt> {
+        self.side("cy", "height")
+    }
+
+    fn side(self, extent: &str, style: &str) -> Option<Pt> {
+        let names = &self.document.names;
+        match self.place {
+            Place::Drawing(frame) => drawing::extent(frame?, names, extent, &mut |_, _, _| {}),
+            Place::Vml(_, false) => {
+                vml::shape_style(self.shape).read(style, vml::size, &mut |_, _, _| {})
+            }
+            Place::Vml(_, true) => None,
+        }
+    }
+
+    /// Where a floating box is and how text wraps around it: its drawing's `wp:anchor`, or
+    /// the `style` of its VML shape when it says `position:absolute`, read as
+    /// [`VmlPicture::anchor`](super::VmlPicture::anchor) reads a picture's. None for a box
+    /// in the line, and for a VML shape in a group, which the group places.
+    pub fn anchor(self) -> Option<Anchor> {
+        let names = &self.document.names;
+        match self.place {
+            Place::Drawing(frame) => {
+                let frame = frame.filter(|frame| frame.is(&names.wp, "anchor"))?;
+                Some(drawing::anchor(frame, names, &mut |_, _, _| {}))
+            }
+            Place::Vml(_, false) => vml::anchor(self.shape, names, &mut |_, _, _| {}),
+            Place::Vml(_, true) => None,
+        }
+    }
+
+    /// Whether it is a VML shape in a group (`v:group`), which places and sizes the shapes
+    /// in it in units of its own: such a box has no [`width`](Self::width),
+    /// [`height`](Self::height) or [`anchor`](Self::anchor) of its own. A box in a group
+    /// of a drawing (`wpg:wgp`) is not read as a text box.
+    pub fn is_in_group(self) -> bool {
+        matches!(self.place, Place::Vml(_, true))
+    }
+
+    /// Whether it is hidden (`visibility:hidden` in the `style` of its VML shape), which
+    /// Word does not show.
+    pub fn is_hidden(self) -> bool {
+        matches!(self.place, Place::Vml(..)) && vml::is_hidden(self.shape)
     }
 
     /// Its paragraphs, tables and other blocks; none for a box later in a chain of linked
@@ -138,7 +220,7 @@ impl<'a> TextBox<'a> {
     pub fn insets(self) -> Offsets {
         insets(
             self.shape,
-            self.vml,
+            self.vml(),
             &self.document.names,
             &mut |_, _, _| {},
         )
@@ -149,7 +231,7 @@ impl<'a> TextBox<'a> {
     pub fn vertical_anchor(self) -> TextBoxAnchor {
         vertical_anchor(
             self.shape,
-            self.vml,
+            self.vml(),
             &self.document.names,
             &mut |_, _, _| {},
         )
@@ -160,7 +242,7 @@ impl<'a> TextBox<'a> {
     pub fn grows_to_fit(self) -> bool {
         grows_to_fit(
             self.shape,
-            self.vml,
+            self.vml(),
             &self.document.names,
             &mut |_, _, _| {},
         )
@@ -172,7 +254,7 @@ impl<'a> TextBox<'a> {
     pub fn clips_overflow(self) -> bool {
         clips_overflow(
             self.shape,
-            self.vml,
+            self.vml(),
             &self.document.names,
             &mut |_, _, _| {},
         )
@@ -183,7 +265,7 @@ impl<'a> TextBox<'a> {
     pub fn rotation(self) -> f64 {
         rotation(
             self.shape,
-            self.vml,
+            self.vml(),
             &self.document.names,
             &mut |_, _, _| {},
         )
@@ -194,7 +276,7 @@ impl<'a> TextBox<'a> {
     pub fn text_direction(self) -> TextBoxDirection {
         text_direction(
             self.shape,
-            self.vml,
+            self.vml(),
             &self.document.names,
             &mut |_, _, _| {},
         )
@@ -205,7 +287,7 @@ impl<'a> TextBox<'a> {
     pub fn is_word_art(self) -> bool {
         is_word_art(
             self.shape,
-            self.vml,
+            self.vml(),
             &self.document.names,
             &mut |_, _, _| {},
         )
@@ -215,7 +297,7 @@ impl<'a> TextBox<'a> {
     pub fn columns(self) -> u32 {
         columns(
             self.shape,
-            self.vml,
+            self.vml(),
             &self.document.names,
             &mut |_, _, _| {},
         )
@@ -227,7 +309,7 @@ impl<'a> TextBox<'a> {
     pub fn fill(self) -> Option<ShapeFill> {
         let document = Some(self.document);
         let names = &self.document.names;
-        match self.vml {
+        match self.vml() {
             Some(_) => vml_fill(self.shape, self.shape_type(), names, &mut |_, _, _| {}),
             None => drawing_fill(self.shape, names, document, &mut |_, _, _| {}),
         }
@@ -240,7 +322,7 @@ impl<'a> TextBox<'a> {
     pub fn outline(self) -> Option<ShapeOutline> {
         let document = Some(self.document);
         let names = &self.document.names;
-        match self.vml {
+        match self.vml() {
             Some(_) => vml_outline(self.shape, self.shape_type(), names, &mut |_, _, _| {}),
             None => drawing_outline(self.shape, names, document, &mut |_, _, _| {}),
         }
@@ -258,7 +340,37 @@ impl<'a> TextBox<'a> {
     /// next: the first (`wps:txbx`'s `id`, or `mso-next-textbox` in the `style` of the
     /// `v:textbox` naming another shape) or a later one (`wps:linkedTxbx`).
     pub fn is_linked(self) -> bool {
-        is_linked(self.shape, self.vml, &self.document.names)
+        is_linked(self.shape, self.vml(), &self.document.names)
+    }
+
+    /// Whether it is drawn other than as a rectangle: in a drawing, a shape of an
+    /// `a:prstGeom` other than `rect`, such as a rounded rectangle or a callout, or of an
+    /// `a:custGeom`; in VML, a shape other than `v:rect`, such as `v:roundrect` or
+    /// `v:oval`, or a `v:shape` whose shape type (its `o:spt`, else that of the
+    /// `v:shapetype` its `type` names) is known and neither a rectangle (1) nor a text box
+    /// (202). The layout draws a box as a rectangle.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn is_shaped(self) -> bool {
+        let names = &self.document.names;
+        match self.vml() {
+            Some(_) => vml_shaped(self.shape, self.shape_type(), names, &mut |_, _, _| {}),
+            None => drawing_shaped(self.shape, names),
+        }
+    }
+
+    /// Whether it has a shadow, a reflection, a glow, soft edges or a 3-D effect: in its
+    /// `wps:spPr`, as a picture has them in its `pic:spPr`, or, in VML, a `v:shadow` that is
+    /// on. The effects of the theme's format scheme its style names (`a:effectRef`) are
+    /// not read. The layout does not draw them.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn has_effects(self) -> bool {
+        let names = &self.document.names;
+        match self.vml() {
+            Some(_) => vml::has_shadow(self.shape, names, &mut |_, _, _| {}),
+            None => drawing_effects(self.shape, names, &mut |_, _, _| {}),
+        }
     }
 }
 
@@ -346,6 +458,7 @@ pub struct ShapeOutline {
     opacity: f64,
     dash: LineDash,
     compound: CompoundLine,
+    alignment: LineAlignment,
 }
 
 impl ShapeOutline {
@@ -374,6 +487,12 @@ impl ShapeOutline {
     /// `linestyle`).
     pub fn compound(&self) -> CompoundLine {
         self.compound
+    }
+
+    /// Where it is drawn: centred on the shape's edge, or inside it (`a:ln`'s `algn`;
+    /// a VML line is centred).
+    pub fn alignment(&self) -> LineAlignment {
+        self.alignment
     }
 }
 
@@ -479,6 +598,16 @@ impl LineDash {
 }
 
 xml_enum! {
+    /// Where a line is drawn on the edge of its shape (ST_PenAlignment).
+    LineAlignment {
+        /// Centred on the edge.
+        Center = "ctr",
+        /// Inside the edge.
+        Inside = "in",
+    }
+}
+
+xml_enum! {
     /// Whether a line is one line or several side by side (ST_CompoundLine).
     CompoundLine {
         Single = "sng",
@@ -495,11 +624,14 @@ xml_enum! {
 /// (`w:pict`) that the readers do not take, as the document opens; the readers read them
 /// again when asked for, as not written.
 pub(crate) fn check(holder: Element<'_>, names: &Names, report: Report<'_>) {
-    let drawing = drawing_shape(holder, names).map(|shape| (shape, None));
+    let drawing = drawing_shape(holder, names).map(|shape| (shape, None, false));
     let shapes = vml_shapes(holder, names)
         .into_iter()
-        .map(|(shape, text_box)| (shape, Some(text_box)));
-    for (shape, vml) in drawing.into_iter().chain(shapes) {
+        .map(|(shape, text_box, in_group)| (shape, Some(text_box), in_group));
+    // A VML drawing's picture has its frame and shadow read with it (`vml::check`), and a
+    // drawing's frame is read with the drawing.
+    let picture = vml::picture(holder, names).map(Element::index);
+    for (shape, vml, in_group) in drawing.into_iter().chain(shapes) {
         insets(shape, vml, names, report);
         vertical_anchor(shape, vml, names, report);
         grows_to_fit(shape, vml, names, report);
@@ -512,13 +644,70 @@ pub(crate) fn check(holder: Element<'_>, names: &Names, report: Report<'_>) {
             Some(_) => {
                 vml_fill(shape, None, names, report);
                 vml_outline(shape, None, names, report);
+                vml_shaped(shape, None, names, report);
+                if picture != Some(shape.index()) {
+                    vml::has_shadow(shape, names, report);
+                    if !in_group {
+                        let style = vml::shape_style(shape);
+                        style.read("width", vml::size, report);
+                        style.read("height", vml::size, report);
+                        vml::anchor(shape, names, report);
+                    }
+                }
             }
             None => {
                 drawing_fill(shape, names, None, report);
                 drawing_outline(shape, names, None, report);
+                drawing_effects(shape, names, report);
             }
         }
     }
+}
+
+/// Whether the shape of a text box in a drawing is drawn other than as a rectangle
+/// ([`TextBox::is_shaped`]).
+fn drawing_shaped(shape: Element<'_>, names: &Names) -> bool {
+    child(shape, names, &[names.wps], "spPr").is_some_and(|properties| {
+        properties
+            .children_through_alternates(names.mc)
+            .any(|part| match part.local_in(&names.a) {
+                Some("prstGeom") => part.attribute(&[None], "prst") != Some("rect"),
+                Some("custGeom") => true,
+                _ => false,
+            })
+    })
+}
+
+/// Whether the shape of a text box in a drawing has an effect the layout does not draw
+/// ([`TextBox::has_effects`]).
+fn drawing_effects(shape: Element<'_>, names: &Names, report: Report<'_>) -> bool {
+    child(shape, names, &[names.wps], "spPr")
+        .is_some_and(|properties| drawing::shape_effects(properties, names, report))
+}
+
+/// The shape types of VML (`o:spt`) drawn as rectangles: a rectangle and a text box.
+const RECTANGLES: [f64; 2] = [1.0, 202.0];
+
+/// Whether a VML shape is drawn other than as a rectangle ([`TextBox::is_shaped`]), with
+/// `shape_type`, the values of the shape type it names.
+fn vml_shaped(
+    shape: Element<'_>,
+    shape_type: Option<ShapeTypeValues>,
+    names: &Names,
+    report: Report<'_>,
+) -> bool {
+    match shape.local_name() {
+        "rect" => false,
+        "shape" => attribute(shape, names, (&names.o, "o:"), "spt", shape_kind, report)
+            .or(shape_type.and_then(|values| values.kind))
+            .is_some_and(|kind| !RECTANGLES.contains(&kind)),
+        _ => true,
+    }
+}
+
+/// A VML shape type (`o:spt`, an xsd:float).
+fn shape_kind(value: &str) -> Option<f64> {
+    value.parse::<f64>().ok().filter(|kind| kind.is_finite())
 }
 
 /// The content (`w:txbxContent`) of each text box of a drawing or a VML drawing.
@@ -529,7 +718,7 @@ pub(crate) fn contents<'a>(
     let drawing = drawing_shape(holder, names).map(|shape| (shape, None));
     let shapes = vml_shapes(holder, names)
         .into_iter()
-        .map(|(shape, text_box)| (shape, Some(text_box)));
+        .map(|(shape, text_box, _)| (shape, Some(text_box)));
     drawing
         .into_iter()
         .chain(shapes)
@@ -547,19 +736,19 @@ fn drawing_shape<'a>(drawing: Element<'a>, names: &Names) -> Option<Element<'a>>
 }
 
 /// The shapes of a VML drawing that are text boxes, with their `v:textbox` (Office takes
-/// at most one, MS-OI29500, Part 4, §19.1.2.22(j): the first), those of its groups
-/// (`v:group`) included, in document order: found in one pass over the drawing, however
-/// deep its groups nest.
-fn vml_shapes<'a>(pict: Element<'a>, names: &Names) -> Vec<(Element<'a>, Element<'a>)> {
+/// at most one, MS-OI29500, Part 4, §19.1.2.22(j): the first) and whether each is in a
+/// group (`v:group`), those of its groups included, in document order: found in one pass
+/// over the drawing, however deep its groups nest.
+fn vml_shapes<'a>(pict: Element<'a>, names: &Names) -> Vec<(Element<'a>, Element<'a>, bool)> {
     let group = |namespace, local: &str| local == "group" && names.v.contains(&namespace);
     pict.descendants_through_alternates(names.mc, group)
         .into_iter()
-        .filter(|shape| shape.local_in(&names.v).is_some())
-        .filter_map(|shape| {
+        .filter(|(shape, _)| shape.local_in(&names.v).is_some())
+        .filter_map(|(shape, in_group)| {
             let text_box = shape
                 .children_through_alternates(names.mc)
                 .find(|part| part.is(&names.v, "textbox"))?;
-            Some((shape, text_box))
+            Some((shape, text_box, in_group))
         })
         .collect()
 }
@@ -1000,6 +1189,7 @@ pub(crate) fn style_line_entry(
     let width = value(entry, names, "w", line_width_emus, report);
     let compound = value(entry, names, "cmpd", CompoundLine::from_xml, report);
     let dash = line_dash(entry, names, report);
+    let alignment = value(entry, names, "algn", LineAlignment::from_xml, report);
     let (fill, over) = match fill_element(entry, names, &LINE_FILLS) {
         Some(fill) => {
             let (fill, over) = style_fill_entry(fill, names, report);
@@ -1011,6 +1201,7 @@ pub(crate) fn style_line_entry(
         width,
         compound,
         dash,
+        alignment,
         fill,
     };
     (line, over)
@@ -1056,9 +1247,12 @@ fn drawing_outline(
     let own_compound =
         own.and_then(|line| value(line, names, "cmpd", CompoundLine::from_xml, report));
     let own_dash = own.and_then(|line| line_dash(line, names, report));
+    let own_alignment =
+        own.and_then(|line| value(line, names, "algn", LineAlignment::from_xml, report));
     let width = own_width.or(style.and_then(|(line, _)| line.width));
     let compound = own_compound.or(style.and_then(|(line, _)| line.compound));
     let dash = own_dash.or(style.and_then(|(line, _)| line.dash));
+    let alignment = own_alignment.or(style.and_then(|(line, _)| line.alignment));
     let paint = match own.and_then(|line| fill_element(line, names, &LINE_FILLS)) {
         Some(fill) => match fill.local_name() {
             "noFill" => return None,
@@ -1083,6 +1277,7 @@ fn drawing_outline(
         opacity: paint.map_or(1.0, |paint| paint.opacity),
         dash: dash.unwrap_or(LineDash::Solid),
         compound: compound.unwrap_or(CompoundLine::Single),
+        alignment: alignment.unwrap_or(LineAlignment::Center),
     })
 }
 
@@ -1139,6 +1334,14 @@ pub(crate) fn check_shape_types(holder: Element<'_>, names: &Names, report: Repo
 
 /// The values of a shape type that its shapes take.
 fn check_shape_type(shape_type: Element<'_>, names: &Names, report: Report<'_>) {
+    attribute(
+        shape_type,
+        names,
+        (&names.o, "o:"),
+        "spt",
+        shape_kind,
+        report,
+    );
     value(shape_type, names, "filled", vml::true_false, report);
     value(shape_type, names, "fillcolor", vml_color, report);
     value(shape_type, names, "stroked", vml::true_false, report);
@@ -1150,6 +1353,8 @@ fn check_shape_type(shape_type: Element<'_>, names: &Names, report: Report<'_>) 
 /// none of their own.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ShapeTypeValues {
+    /// The shape type (`o:spt`).
+    kind: Option<f64>,
     filled: Option<bool>,
     fill_color: Option<VmlColor>,
     stroked: Option<bool>,
@@ -1163,6 +1368,14 @@ pub(crate) struct ShapeTypeValues {
 pub(crate) fn shape_type_values(shape_type: Element<'_>, names: &Names) -> ShapeTypeValues {
     let quiet = &mut |_: &str, _: &str, _: &str| {};
     ShapeTypeValues {
+        kind: attribute(
+            shape_type,
+            names,
+            (&names.o, "o:"),
+            "spt",
+            shape_kind,
+            quiet,
+        ),
         filled: value(shape_type, names, "filled", vml::true_false, quiet),
         fill_color: value(shape_type, names, "fillcolor", vml_color, quiet),
         stroked: value(shape_type, names, "stroked", vml::true_false, quiet),
@@ -1316,5 +1529,6 @@ fn vml_outline(
         opacity: opacity.unwrap_or(1.0).clamp(0.0, 1.0),
         dash: dash.unwrap_or(LineDash::Solid),
         compound: compound.unwrap_or(CompoundLine::Single),
+        alignment: LineAlignment::Center,
     })
 }

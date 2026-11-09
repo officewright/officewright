@@ -8,7 +8,8 @@
 //! It prints the settings; each section's page and columns, its headers and footers; each
 //! paragraph's formatting, list item and mark; and its content, each piece with its run
 //! style, and each note reference with its note's text and whether a mark of its own
-//! follows it; each table's properties, borders and rows, and each cell's span, alignment,
+//! follows it, and each text box with its insets, anchoring, fill and outline, then its
+//! blocks; each table's properties, borders and rows, and each cell's span, alignment,
 //! shading, and its own margins and borders.
 //! Then it lists what the translation left out, and whether the IR passes `validate`.
 
@@ -172,6 +173,14 @@ fn print_paragraph(ir: &ir::Document, paragraph: &ir::Paragraph, margin: &str) {
     println!("{margin}  mark {}", style(ir, paragraph.mark()));
     for inline in paragraph.inlines() {
         println!("{margin}  {}", describe(ir, inline));
+        let content = match inline {
+            ir::Inline::Object(object) => object.content(),
+            ir::Inline::Anchored(object) => object.content(),
+            _ => continue,
+        };
+        if let ir::ObjectContent::TextBox(text_box) = content {
+            print_blocks(ir, text_box.blocks(), &format!("{margin}    "));
+        }
     }
 }
 
@@ -209,12 +218,14 @@ fn describe(ir: &ir::Document, inline: &ir::Inline) -> String {
         }
         ir::Inline::Object(object) => {
             format!(
-                "picture in the line {}",
+                "{} in the line {}",
+                object_kind(object.content()),
                 object_text(ir, object.content(), object.size())
             )
         }
         ir::Inline::Anchored(object) => format!(
-            "floating picture {}, across {:?} {:?}, down {:?} {:?}, wrap {:?}",
+            "floating {} {}, across {:?} {:?}, down {:?} {:?}, wrap {:?}",
+            object_kind(object.content()),
             object_text(ir, object.content(), object.size()),
             object.horizontal().relative_to(),
             object.horizontal().placement(),
@@ -226,10 +237,33 @@ fn describe(ir: &ir::Document, inline: &ir::Inline) -> String {
     }
 }
 
+/// What an object shows: a picture or a text box.
+fn object_kind(content: &ir::ObjectContent) -> &'static str {
+    match content {
+        ir::ObjectContent::TextBox(_) => "text box",
+        _ => "picture",
+    }
+}
+
 /// What an object shows and its size, briefly.
 fn object_text(ir: &ir::Document, content: &ir::ObjectContent, size: ir::Size) -> String {
     let image = match content {
         ir::ObjectContent::Picture(picture) => ir.image(picture.image()),
+        ir::ObjectContent::TextBox(text_box) => {
+            let insets = text_box.insets();
+            return format!(
+                "{:.1}x{:.1}pt, insets {}/{}/{}/{} pt, text at {:?}, fill {:?}, outline {:?}",
+                size.width().0,
+                size.height().0,
+                insets.left().0,
+                insets.top().0,
+                insets.right().0,
+                insets.bottom().0,
+                text_box.anchor(),
+                text_box.fill(),
+                text_box.outline()
+            );
+        }
         _ => None,
     };
     let image = image.map_or_else(

@@ -261,16 +261,17 @@ impl<'d> Element<'d> {
 
     /// The children of the element, as [`children_through_alternates`] reads them, and
     /// the children of every such child of a namespace and local name `descend` takes,
-    /// in its place, however deep those nest; in document order. One pass over the
-    /// element's tokens: a walk that looked at the children of each child in turn would
-    /// look at the tokens of the deepest once for every level above them.
+    /// in its place, however deep those nest; in document order, each with whether it is
+    /// in such a child. One pass over the element's tokens: a walk that looked at the
+    /// children of each child in turn would look at the tokens of the deepest once for
+    /// every level above them.
     ///
     /// [`children_through_alternates`]: Self::children_through_alternates
     pub(crate) fn descendants_through_alternates(
         self,
         mc: Option<Sym>,
         descend: impl Fn(Option<Sym>, &str) -> bool,
-    ) -> Vec<Element<'d>> {
+    ) -> Vec<(Element<'d>, bool)> {
         /// What an open element is to the walk.
         #[derive(Clone, Copy, PartialEq)]
         enum Role {
@@ -288,6 +289,8 @@ impl<'d> Element<'d> {
         }
         let mut found = Vec::new();
         let mut open = vec![Role::Container];
+        // How many children descended into are open.
+        let mut descended = 0_usize;
         for (i, token) in self.tokens.iter().enumerate().skip(1) {
             #[cfg(test)]
             STEPS.set(STEPS.get() + 1);
@@ -305,6 +308,7 @@ impl<'d> Element<'d> {
                             } else if *in_place {
                                 Role::InPlace
                             } else if descend(name.namespace, local_name) {
+                                descended += 1;
                                 Role::Container
                             } else {
                                 Role::Taken(i)
@@ -314,17 +318,20 @@ impl<'d> Element<'d> {
                     };
                     open.push(role);
                 }
-                Token::End => {
-                    if let Some(Role::Taken(start)) = open.pop() {
+                Token::End => match open.pop() {
+                    Some(Role::Taken(start)) => {
                         if let Some(tokens) = self.tokens.get(start..=i) {
-                            found.push(Element {
+                            let element = Element {
                                 tokens,
                                 strings: self.strings,
                                 index: self.index + start,
-                            });
+                            };
+                            found.push((element, descended > 0));
                         }
                     }
-                }
+                    Some(Role::Container) => descended = descended.saturating_sub(1),
+                    _ => {}
+                },
                 Token::Text(_)
                 | Token::Comment(_)
                 | Token::ProcessingInstruction { .. }

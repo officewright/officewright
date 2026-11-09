@@ -1952,3 +1952,194 @@ fn takes_the_line_values_of_a_shape_type() {
         document.diagnostics()
     );
 }
+
+#[test]
+fn reads_the_frame_of_a_text_box_from_its_drawing_or_its_own_vml_shape() {
+    let floating = format!(
+        r#"<w:drawing {SHAPES}><wp:anchor simplePos="0" relativeHeight="3" behindDoc="1" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>center</wp:align></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>12700</wp:posOffset></wp:positionV><wp:extent cx="25400" cy="38100"/><wp:wrapNone/><wp:docPr id="1" name="Text Box 1"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp>{}<wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#,
+        txbx(&p("Floating"))
+    );
+    let body = format!(
+        "<w:p><w:r>{}</w:r><w:r>{floating}</w:r><w:r>{}</w:r><w:r>{}</w:r></w:p>",
+        // A style on a drawing's shape, which DrawingML does not give it, hides nothing.
+        drawing(&format!("{}<wps:bodyPr/>", txbx(&p("Inline"))))
+            .replace("<wps:wsp>", r#"<wps:wsp style="visibility:hidden">"#),
+        pict(&format!(
+            "{}{}",
+            vml_box("width:10pt;height:20pt", "", &p("In the line")),
+            vml_box(
+                "position:absolute;margin-left:5pt;margin-top:6pt;width:30pt;height:40pt;z-index:-1;visibility:hidden",
+                "",
+                &p("Hidden"),
+            ),
+        )),
+        pict(&format!(
+            r#"<v:group style="position:absolute;width:10pt;height:10pt" coordsize="100,100">{}</v:group>"#,
+            vml_box("position:absolute;width:50;height:50", "", &p("Grouped"))
+        )),
+    );
+    let document = open(&body);
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+    let frames: Vec<_> = drawings(&document)
+        .into_iter()
+        .filter_map(Drawing::text_box)
+        .chain(vml_text_boxes(&document))
+        .map(|text_box| {
+            (
+                texts(text_box),
+                text_box.width(),
+                text_box.height(),
+                text_box.anchor(),
+                text_box.is_in_group(),
+                text_box.is_hidden(),
+            )
+        })
+        .collect();
+    let drawn = drawings(&document)[1].anchor();
+    assert_eq!(drawn.map(|anchor| anchor.z_order()), Some(3));
+    let vml_anchor = vml_text_boxes(&document)[1].anchor().unwrap();
+    assert_eq!(
+        (
+            vml_anchor.horizontal_offset(),
+            vml_anchor.vertical_offset(),
+            vml_anchor.behind_text()
+        ),
+        (Some(Pt(5.0)), Some(Pt(6.0)), true)
+    );
+    let text = |text: &str| vec![text.to_owned()];
+    assert_eq!(
+        frames,
+        [
+            (
+                text("Inline"),
+                Some(Pt(100.0)),
+                Some(Pt(50.0)),
+                None,
+                false,
+                false
+            ),
+            (
+                text("Floating"),
+                Some(Pt(2.0)),
+                Some(Pt(3.0)),
+                drawn,
+                false,
+                false
+            ),
+            (
+                text("In the line"),
+                Some(Pt(10.0)),
+                Some(Pt(20.0)),
+                None,
+                false,
+                false
+            ),
+            (
+                text("Hidden"),
+                Some(Pt(30.0)),
+                Some(Pt(40.0)),
+                Some(vml_anchor),
+                false,
+                true
+            ),
+            // A group places and sizes its shapes in units of its own.
+            (text("Grouped"), None, None, None, true, false),
+        ]
+    );
+}
+
+#[test]
+fn reports_the_frame_shape_and_shadow_of_a_vml_text_box_once() {
+    let picture_with_text = format!(
+        r#"<v:shape style="width:1q;height:1pt" stroked="f"><v:imagedata r:id="rIdPng"/><v:shadow on="maybe"/><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape>"#,
+        p("Picture")
+    );
+    let body = format!(
+        "<w:p><w:r>{}</w:r><w:r>{}</w:r><w:r>{}</w:r></w:p>",
+        pict(&format!(
+            r#"<v:shapetype id="t" o:spt="x"/>{}"#,
+            vml_box(
+                "position:absolute;width:2q;height:1pt;margin-left:3q",
+                "",
+                &p("Box"),
+            )
+            .replace("<v:shape ", r#"<v:shape o:spt="y" type="t" "#)
+            .replace("<v:textbox", r#"<v:shadow on="perhaps"/><v:textbox"#)
+        )),
+        pict(&picture_with_text),
+        // A shape in a group is not read for its frame: these are the group's units.
+        pict(&format!(
+            r#"<v:group style="width:10pt;height:10pt" coordsize="100,100">{}</v:group>"#,
+            vml_box("width:50;height:50;margin-left:7", "", &p("Grouped"))
+        )),
+    );
+    let document = super::drawing::with_images(&body);
+    assert_eq!(
+        reported(&document),
+        [
+            r#"v:shape o:spt="y" is not valid; it is ignored"#,
+            r#"v:shadow on="perhaps" is not valid; it is ignored"#,
+            r#"v:shape style="width:2q" is not valid; it is ignored"#,
+            r#"v:shape style="margin-left:3q" is not valid; it is ignored"#,
+            r#"v:shapetype o:spt="x" is not valid; it is ignored"#,
+            r#"v:shape style="width:1q" is not valid; it is ignored"#,
+            r#"v:shadow on="maybe" is not valid; it is ignored"#,
+        ]
+    );
+    let boxes = vml_text_boxes(&document);
+    assert_eq!(boxes[0].width(), None);
+    assert_eq!(boxes[0].height(), Some(Pt(1.0)));
+}
+
+#[test]
+fn reads_where_a_drawing_text_box_s_line_is_drawn_value_by_value() {
+    // The theme's third line is drawn inside the shape's edge.
+    let (kind, target, theme) = shape_theme();
+    let theme = theme.replace(
+        r#"<a:ln w="19050" cmpd="dbl">"#,
+        r#"<a:ln w="19050" cmpd="dbl" algn="in">"#,
+    );
+    let inside_style = r#"<a:lnRef idx="3"><a:schemeClr val="accent1"/></a:lnRef>"#;
+    let black = r#"<a:solidFill><a:srgbClr val="000000"/></a:solidFill>"#;
+    let boxes = [
+        // The style's, its own over it, and its own alone.
+        styled_box("", inside_style),
+        styled_box(r#"<a:ln algn="ctr"/>"#, inside_style),
+        styled_box(&format!(r#"<a:ln w="12700" algn="in">{black}</a:ln>"#), ""),
+        // Centred where nothing says otherwise, and for a value not taken, which is
+        // reported.
+        styled_box(&format!(r#"<a:ln w="12700">{black}</a:ln>"#), ""),
+        styled_box(&format!(r#"<a:ln w="12700" algn="out">{black}</a:ln>"#), ""),
+    ];
+    let body = format!("<w:p>{}</w:p>", boxes.concat());
+    let document = with_parts(&body, &[(kind, target, theme)]);
+    let alignments: Vec<LineAlignment> = drawings(&document)
+        .into_iter()
+        .map(|drawing| drawing.text_box().unwrap().outline().unwrap().alignment())
+        .collect();
+    assert_eq!(
+        alignments,
+        [
+            LineAlignment::Inside,
+            LineAlignment::Center,
+            LineAlignment::Inside,
+            LineAlignment::Center,
+            LineAlignment::Center,
+        ]
+    );
+    assert_eq!(
+        reported(&document),
+        [r#"a:ln algn="out" is not valid; it is ignored"#]
+    );
+    // A VML line is centred.
+    let document = open(&format!(
+        "<w:p><w:r>{}</w:r></w:p>",
+        pict(&vml_box("width:10pt;height:10pt", "", &p("VML")))
+    ));
+    let outline = vml_text_boxes(&document)[0].outline().unwrap();
+    assert_eq!(outline.alignment(), LineAlignment::Center);
+}

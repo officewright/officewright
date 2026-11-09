@@ -67,6 +67,7 @@ pub(crate) struct StyleLine {
     pub(crate) width: Option<u32>,
     pub(crate) compound: Option<super::text_box::CompoundLine>,
     pub(crate) dash: Option<super::text_box::LineDash>,
+    pub(crate) alignment: Option<super::text_box::LineAlignment>,
     /// Its fill, if it writes one.
     pub(crate) fill: Option<StyleFill>,
 }

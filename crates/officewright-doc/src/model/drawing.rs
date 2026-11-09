@@ -535,7 +535,7 @@ pub(super) fn child<'a>(
 }
 
 /// The frame of a `w:drawing`: its `wp:inline` or `wp:anchor`.
-fn frame<'a>(drawing: Element<'a>, names: &Names) -> Option<Element<'a>> {
+pub(super) fn frame<'a>(drawing: Element<'a>, names: &Names) -> Option<Element<'a>> {
     drawing
         .children_through_alternates(names.mc)
         .find(|child| child.is(&names.wp, "inline") || child.is(&names.wp, "anchor"))
@@ -666,7 +666,12 @@ pub(super) fn qualified_name(element: Element<'_>, names: &Names) -> String {
 }
 
 /// A side of a frame (`wp:extent`'s `cx` or `cy`), which is not negative.
-fn extent(frame: Element<'_>, names: &Names, attribute: &str, report: Report<'_>) -> Option<Pt> {
+pub(super) fn extent(
+    frame: Element<'_>,
+    names: &Names,
+    attribute: &str,
+    report: Report<'_>,
+) -> Option<Pt> {
     let extent = child(frame, names, &names.wp, "extent")?;
     value(
         extent,
@@ -693,7 +698,7 @@ fn effect_extent(frame: Element<'_>, names: &Names, report: Report<'_>) -> Offse
 }
 
 /// Where a floating frame (`wp:anchor`) is and how text wraps around it.
-fn anchor(frame: Element<'_>, names: &Names, report: Report<'_>) -> Anchor {
+pub(super) fn anchor(frame: Element<'_>, names: &Names, report: Report<'_>) -> Anchor {
     let mut anchor = Anchor {
         horizontal_reference: None,
         horizontal_align: None,
@@ -833,21 +838,27 @@ fn has_color_effects(picture: Element<'_>, names: &Names, report: Report<'_>) ->
 }
 
 /// Whether a picture's `pic:spPr` has an effect the layout does not draw
-/// ([`is_effect`]). Every part is read, so that each value not taken is reported.
+/// ([`is_effect`]).
 fn has_effects(picture: Element<'_>, names: &Names, report: Report<'_>) -> bool {
-    child(picture, names, &names.pic, "spPr").is_some_and(|shape| {
-        shape
-            .children_through_alternates(names.mc)
-            .fold(false, |effects, part| {
-                is_effect(part, names, report) | effects
-            })
-    })
+    child(picture, names, &names.pic, "spPr")
+        .is_some_and(|properties| shape_effects(properties, names, report))
 }
 
-/// Whether a part of a picture's `pic:spPr` is a shadow, a reflection, a glow, soft
-/// edges or a 3-D effect: an `a:effectLst` or `a:effectDag` that lists one, an
-/// `a:scene3d` that turns the picture, an `a:sp3d` that gives it a bevel, depth or
-/// contour.
+/// Whether the properties of a shape (`pic:spPr`, `wps:spPr`) have an effect the layout
+/// does not draw ([`is_effect`]). Every part is read, so that each value not taken is
+/// reported.
+pub(super) fn shape_effects(properties: Element<'_>, names: &Names, report: Report<'_>) -> bool {
+    properties
+        .children_through_alternates(names.mc)
+        .fold(false, |effects, part| {
+            is_effect(part, names, report) | effects
+        })
+}
+
+/// Whether a part of a shape's properties (`pic:spPr`, `wps:spPr`) is a shadow, a
+/// reflection, a glow, soft edges or a 3-D effect: an `a:effectLst` or `a:effectDag`
+/// that lists one, an `a:scene3d` that turns the shape, an `a:sp3d` that gives it a
+/// bevel, depth or contour.
 fn is_effect(part: Element<'_>, names: &Names, report: Report<'_>) -> bool {
     match part.local_in(&names.a) {
         // Word writes an empty a:effectLst for a picture without effects.
