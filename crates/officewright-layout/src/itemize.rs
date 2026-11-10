@@ -986,8 +986,8 @@ fn uppercase(ch: char, turkic: bool) -> Vec<char> {
 
 /// The capital of a Greek small letter with a tonos, without it, as Word draws Greek in
 /// small capitals (`business/form-ec-state-aid-notification-el`, whose "Νομικό καθεστώς"
-/// Word draws as "ΝΟΜΙΚΟ ΚΑΘΕΣΤΩΣ"), keeping a dialytika; in capitals too, a hypothesis
-/// until a rule document (#555).
+/// Word draws as "ΝΟΜΙΚΟ ΚΑΘΕΣΤΩΣ"), keeping a dialytika; in capitals too, and by the
+/// characters whatever the run's language, hypotheses until a rule document (#555).
 fn greek_capital_without_tonos(ch: char) -> Option<char> {
     Some(match ch {
         '\u{3AC}' => '\u{391}',
