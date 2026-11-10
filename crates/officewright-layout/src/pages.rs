@@ -156,15 +156,30 @@ struct Walk<'a, 'w> {
     out: &'w mut Vec<Flowed<'a>>,
 }
 
-/// Reports, once, at the first of them, labels with a number written in decimal because
-/// its format is one the layout does not write.
+/// Reports, once each, at the first of them, labels with a number written otherwise than
+/// its format says: in decimal because the layout does not write the format or the format
+/// cannot represent the number, or in English for a language without words, and labels
+/// that are cut.
 pub(crate) fn report_list_formats(counters: &Counters, fonts: &mut Fonts<'_>) {
-    if let Some(location) = &counters.unsupported_format {
-        fonts.report_once(
-            ReportKind::FeatureUnsupported,
-            location,
-            "list numbers in a format the layout does not write are written in decimal".to_owned(),
-        );
+    let departures = [
+        (
+            &counters.unsupported_format,
+            "list numbers in a format the layout does not write are written in decimal",
+        ),
+        (
+            &counters.unrepresentable,
+            "list numbers that their format cannot represent are written in decimal",
+        ),
+        (
+            &counters.other_language,
+            "list numbers in words and ordinals in languages other than English and German \
+             are written in English",
+        ),
+    ];
+    for (first, message) in departures {
+        if let Some(location) = first {
+            fonts.report_once(ReportKind::FeatureUnsupported, location, message.to_owned());
+        }
     }
     if let Some(location) = &counters.long_label {
         fonts.report_once(
@@ -344,12 +359,29 @@ pub(crate) fn paginate_into<S: PageSink>(
 /// Reports, once, the numbers of notes that the layout writes otherwise than the document
 /// says.
 fn report_note_numbers(notes: &NoteNumbers, fonts: &mut Fonts<'_>) {
-    if notes.decimal {
-        fonts.report_once(
-            ReportKind::FeatureUnsupported,
-            &Location::default(),
-            "numbers in a format the layout does not write are written as decimal".to_owned(),
-        );
+    let departures = [
+        (
+            notes.departures.unsupported,
+            "numbers in a format the layout does not write are written as decimal",
+        ),
+        (
+            notes.departures.unrepresentable,
+            "note numbers that their format cannot represent are written as decimal",
+        ),
+        (
+            notes.departures.language,
+            "note numbers in words and ordinals in languages other than English and German \
+             are written in English",
+        ),
+    ];
+    for (departs, message) in departures {
+        if departs {
+            fonts.report_once(
+                ReportKind::FeatureUnsupported,
+                &Location::default(),
+                message.to_owned(),
+            );
+        }
     }
     if notes.each_page {
         fonts.report_once(
@@ -6512,6 +6544,214 @@ mod tests {
         assert_eq!(footers, ["I 5 2", "II 5 2", "c 5 3", "d 5 3", "e 5 3"]);
     }
 
+    #[test]
+    fn labels_and_notes_report_each_way_their_numbers_depart_from_the_format() {
+        use crate::numbers::Departures;
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let mut counters = Counters::default();
+        counters.unsupported_format = Some(Location::default());
+        counters.unrepresentable = Some(Location::default());
+        counters.other_language = Some(Location::default());
+        report_list_formats(&counters, &mut fonts);
+        let mut notes = NoteNumbers::default();
+        notes.departures = Departures {
+            unsupported: true,
+            unrepresentable: true,
+            language: true,
+        };
+        report_note_numbers(&notes, &mut fonts);
+        assert_eq!(
+            messages(&fonts.into_report()),
+            [
+                "list numbers in a format the layout does not write are written in decimal",
+                "list numbers that their format cannot represent are written in decimal",
+                "list numbers in words and ordinals in languages other than English and German \
+                 are written in English",
+                "numbers in a format the layout does not write are written as decimal",
+                "note numbers that their format cannot represent are written as decimal",
+                "note numbers in words and ordinals in languages other than English and German \
+                 are written in English",
+            ]
+        );
+        // Nothing departs: nothing is reported.
+        let mut fonts = Fonts::new(&book);
+        report_list_formats(&Counters::default(), &mut fonts);
+        report_note_numbers(&NoteNumbers::default(), &mut fonts);
+        assert!(messages(&fonts.into_report()).is_empty());
+        // Each way a note's number departs gives its own message, and only that.
+        let none = Departures::default();
+        let each = [
+            (
+                Departures {
+                    unsupported: true,
+                    ..none
+                },
+                "numbers in a format the layout does not write are written as decimal",
+            ),
+            (
+                Departures {
+                    unrepresentable: true,
+                    ..none
+                },
+                "note numbers that their format cannot represent are written as decimal",
+            ),
+            (
+                Departures {
+                    language: true,
+                    ..none
+                },
+                "note numbers in words and ordinals in languages other than English and German \
+                 are written in English",
+            ),
+        ];
+        for (departures, message) in each {
+            let mut fonts = Fonts::new(&book);
+            let mut notes = NoteNumbers::default();
+            notes.departures = departures;
+            report_note_numbers(&notes, &mut fonts);
+            assert_eq!(messages(&fonts.into_report()), [message]);
+        }
+    }
+
+    #[test]
+    fn page_fields_write_numbers_in_words_dashes_and_the_language_of_their_style() {
+        use crate::ir::{Field, FieldKind, Language, NumberFormat, PageNumbering};
+        // Each field a paragraph of its own: in English, German and French, and a number
+        // too large for letters, as E-number-formats has them.
+        let in_language = |tag: &str| {
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0))
+                .with_language(Language::default().with_latin(Some(tag.into())))
+        };
+        let mut document = Document::default();
+        let english = document.add_run_style(in_language("en-US"));
+        let german = document.add_run_style(in_language("de-DE"));
+        let french = document.add_run_style(in_language("fr-FR"));
+        let paragraph = |style, kind, format| -> Block {
+            Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0))
+                .with_inlines([Inline::Field(
+                    Field::new(kind, style).with_format(Some(format)),
+                )])
+                .into()
+        };
+        document.add_section(
+            Section::new(setup())
+                .with_page_numbering(PageNumbering::default().with_start(Some(27)))
+                .with_blocks(vec![
+                    paragraph(english, FieldKind::Page, NumberFormat::OrdinalText),
+                    paragraph(german, FieldKind::Page, NumberFormat::CardinalText),
+                    paragraph(german, FieldKind::Page, NumberFormat::Ordinal),
+                    paragraph(english, FieldKind::Page, NumberFormat::NumberInDash),
+                    paragraph(english, FieldKind::NumPages, NumberFormat::Hex),
+                ]),
+        );
+        document.add_section(
+            Section::new(setup())
+                .with_page_numbering(PageNumbering::default().with_start(Some(781)))
+                .with_blocks(vec![
+                    paragraph(english, FieldKind::Page, NumberFormat::UpperLetter),
+                    paragraph(french, FieldKind::Page, NumberFormat::CardinalText),
+                ]),
+        );
+        let (result, report) = laid(&document, 100);
+        let paginated = result.expect("pages");
+        let pages: Vec<String> = paginated
+            .pages
+            .iter()
+            .map(|page| texts(page).concat().replace(' ', ""))
+            .collect();
+        assert_eq!(
+            pages,
+            [
+                "twenty-seventhSiebenundzwanzig27.-27-2",
+                "Error!Numbercannotberepresentedinspecifiedformat.sevenhundredeighty-one",
+            ]
+        );
+        // Word writes its error text in bold, which the test font draws by stroking; the
+        // numbers keep the field's own formatting.
+        let bold: Vec<(String, bool)> = paginated
+            .pages
+            .iter()
+            .flat_map(|page| &page.items)
+            .filter_map(|item| match item {
+                DisplayItem::Glyphs(run) => Some((
+                    run.clusters.iter().map(|c| c.text.as_str()).collect(),
+                    run.synthetic_bold,
+                )),
+                _ => None,
+            })
+            .filter(|(text, _): &(String, bool)| !text.trim().is_empty())
+            .map(|(text, bold)| (text.trim().to_owned(), bold))
+            .collect();
+        let runs: Vec<(&str, bool)> = bold.iter().map(|(t, b)| (t.as_str(), *b)).collect();
+        assert_eq!(
+            runs,
+            [
+                ("twenty-seventh", false),
+                ("Siebenundzwanzig", false),
+                ("27.", false),
+                ("- 27 -", false),
+                ("2", false),
+                ("Error! Number cannot be represented in specified", true),
+                ("format.", true),
+                ("seven hundred eighty-one", false),
+            ]
+        );
+        // The test font has no glyph for most of these characters, which is reported too.
+        let languages: Vec<String> = messages(&report)
+            .into_iter()
+            .filter(|message| message.contains("language"))
+            .collect();
+        assert_eq!(
+            languages,
+            [
+                "numbers in words and ordinals in languages other than English and German are \
+              written in English"
+            ]
+        );
+        // In a run of complex script, the error text is bold in its complex script slot.
+        let mut document = Document::default();
+        let complex = document.add_run_style(in_language("en-US").with_complex_script(true));
+        document.add_section(
+            Section::new(setup())
+                .with_page_numbering(PageNumbering::default().with_start(Some(781)))
+                .with_blocks(vec![paragraph(
+                    complex,
+                    FieldKind::Page,
+                    NumberFormat::UpperLetter,
+                )]),
+        );
+        let (result, _) = laid(&document, 100);
+        let runs: Vec<bool> = result.expect("pages").pages[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Glyphs(run) => Some(run.synthetic_bold),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !runs.is_empty() && runs.iter().all(|&bold| bold),
+            "{runs:?}"
+        );
+        // A format without words has no language to report.
+        let mut document = Document::default();
+        let french = document.add_run_style(in_language("fr-FR"));
+        document.add_section(Section::new(setup()).with_blocks(vec![paragraph(
+            french,
+            FieldKind::Page,
+            NumberFormat::Hex,
+        )]));
+        let (_, report) = laid(&document, 100);
+        assert!(
+            !messages(&report).iter().any(|m| m.contains("language")),
+            "{report:?}"
+        );
+    }
+
     /// A paragraph of the fields `kinds`, in the test font.
     fn fields(style: RunStyleId, kinds: Vec<crate::ir::FieldKind>) -> Block {
         Paragraph::new(style)
@@ -7886,11 +8126,9 @@ mod tests {
         assert!(reported(&split(7, &[false, true], decimal.clone())));
         // The field is on the second of the paragraph's two lines on page 1.
         assert!(!reported(&split(6, &[false, true, false, false], decimal)));
-        // On page 2 the field shows nothing: Chicago marks stop at 116.
-        let chicago = PageNumbering::default()
-            .with_format(NumberFormat::Chicago)
-            .with_start(Some(117));
-        assert!(!reported(&split(7, &[false, true], chicago)));
+        // On page 2 the field shows nothing: the format writes no number.
+        let none = PageNumbering::default().with_format(NumberFormat::None);
+        assert!(!reported(&split(7, &[false, true], none)));
     }
 
     #[test]

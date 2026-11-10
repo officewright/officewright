@@ -434,6 +434,11 @@ pub(super) fn number_format(format: NumberFormat) -> ir::NumberFormat {
         NumberFormat::LowerRoman => ir::NumberFormat::LowerRoman,
         NumberFormat::UpperRoman => ir::NumberFormat::UpperRoman,
         NumberFormat::Ordinal => ir::NumberFormat::Ordinal,
+        NumberFormat::NumberInDash => ir::NumberFormat::NumberInDash,
+        NumberFormat::CardinalText => ir::NumberFormat::CardinalText,
+        NumberFormat::OrdinalText => ir::NumberFormat::OrdinalText,
+        NumberFormat::DollarText => ir::NumberFormat::DollarText,
+        NumberFormat::Hex => ir::NumberFormat::Hex,
         NumberFormat::Chicago => ir::NumberFormat::Chicago,
         NumberFormat::Bullet => ir::NumberFormat::Bullet,
         NumberFormat::None => ir::NumberFormat::None,
@@ -498,5 +503,23 @@ mod tests {
         let with = weight(&[paragraph(vec![anchored])]);
         let without = weight(&[paragraph(Vec::new())]);
         assert!(with - without >= size_of::<ir::Inline>() + size_of::<ir::AnchoredObject>());
+    }
+
+    #[test]
+    fn passes_the_formats_of_numbers_in_dashes_words_and_hex_and_others_by_name() {
+        let formats = [
+            (NumberFormat::NumberInDash, ir::NumberFormat::NumberInDash),
+            (NumberFormat::CardinalText, ir::NumberFormat::CardinalText),
+            (NumberFormat::OrdinalText, ir::NumberFormat::OrdinalText),
+            (NumberFormat::DollarText, ir::NumberFormat::DollarText),
+            (NumberFormat::Hex, ir::NumberFormat::Hex),
+            (
+                NumberFormat::Hebrew1,
+                ir::NumberFormat::Other("hebrew1".into()),
+            ),
+        ];
+        for (format, expected) in formats {
+            assert_eq!(number_format(format), expected, "{format:?}");
+        }
     }
 }

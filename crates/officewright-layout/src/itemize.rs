@@ -20,7 +20,7 @@ use crate::ir::{
 };
 use crate::lists::Label;
 use crate::notes::NoteNumbers;
-use crate::numbers::number_text;
+use crate::numbers::{UNREPRESENTABLE, Words, Written, in_language, written};
 use crate::report::{Location, ReportKind};
 use crate::shape::{Features, ShapeRequest, ShapedRun, Shaper, ShapingFace, combining_class};
 use crate::slot::{Slot, slot};
@@ -740,16 +740,29 @@ impl Builder<'_, '_, '_> {
             _ => (values.page, &values.format),
         };
         let format = field.format().as_ref().unwrap_or(default);
-        let (text, decimal) = number_text(number, format);
-        if decimal {
-            self.fonts.report_once(
-                ReportKind::FeatureUnsupported,
-                self.location,
-                "numbers in a format the layout does not write are written as decimal".to_owned(),
+        let style = self.style(field.style());
+        let (words, known) = Words::of(style.language().latin());
+        if !known && in_language(format) {
+            self.unsupported(
+                "numbers in words and ordinals in languages other than English and German are \
+                 written in English",
             );
         }
         let start = self.out.text.len();
-        self.text(&text, field.style());
+        match written(number, format, words) {
+            Written::Text(text) => self.text_in(&text, field.style(), &style),
+            Written::Decimal(text) => {
+                self.unsupported(
+                    "numbers in a format the layout does not write are written as decimal",
+                );
+                self.text_in(&text, field.style(), &style);
+            }
+            // Word writes its error text in bold.
+            Written::Unrepresentable => {
+                let bold = style.with_bold(true).with_bold_complex_script(true);
+                self.text_in(UNREPRESENTABLE, field.style(), &bold);
+            }
+        }
         if *field.kind() == FieldKind::Page {
             self.out.page_fields.push(start..self.out.text.len());
         }

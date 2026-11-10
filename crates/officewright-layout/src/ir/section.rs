@@ -299,6 +299,8 @@ pub enum NumberFormat {
     Decimal,
     /// 01, 02, 03: at least two digits.
     DecimalZero,
+    /// - 1 -, - 2 -, - 3 -: decimal between dashes.
+    NumberInDash,
     /// a, b, c, …, z, aa, bb.
     LowerLetter,
     /// A, B, C, …, Z, AA, BB.
@@ -307,8 +309,20 @@ pub enum NumberFormat {
     LowerRoman,
     /// I, II, III.
     UpperRoman,
-    /// 1st, 2nd, 3rd.
+    /// 1st, 2nd, 3rd; in German 1., 2., 3. The language is that of the style of the
+    /// field, the list label or the note reference; for a language other than English and
+    /// German, English, which the layout reports.
     Ordinal,
+    /// one, two, three: in words, in English or German as [`Ordinal`](Self::Ordinal) says.
+    CardinalText,
+    /// first, second, third: in words, in English or German as
+    /// [`Ordinal`](Self::Ordinal) says.
+    OrdinalText,
+    /// one and 00/100, two and 00/100: in words as on a cheque, in English or German as
+    /// [`Ordinal`](Self::Ordinal) says.
+    DollarText,
+    /// 1, …, 9, A, …, F, 10: hexadecimal, in capitals.
+    Hex,
     /// *, †, ‡, §, then the same doubled.
     Chicago,
     /// A bullet: the template of the list level, without a number.
