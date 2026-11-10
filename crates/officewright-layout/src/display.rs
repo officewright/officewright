@@ -723,6 +723,9 @@ impl Painting<'_, '_, '_> {
         } else {
             clusters(itemized, run, &placed, piece, None)
         };
+        if clusters.is_empty() {
+            return None;
+        }
         Some(GlyphItem {
             face,
             size: run.size,
@@ -1319,16 +1322,25 @@ fn clusters(
             end += 1;
         }
         let glyphs = placed.get(index..end).unwrap_or(&[]).to_vec();
-        let text = if hyphen {
-            // The hyphen drawn at a soft hyphen stands for no text of its own.
-            String::new()
+        // Word's PDF text has a hyphen-minus where a line breaks at a soft hyphen, and
+        // neither soft hyphens nor zero-width spaces anywhere (E-underline,
+        // E-soft-hyphen-font, E-spacing-condensed).
+        let text: String = if hyphen {
+            "-".to_owned()
         } else if let Some(tables) = tables.filter(|_| run.sources.is_empty()) {
             tables.source_of(itemized, run, first.cluster..text_end(first.cluster))
         } else {
             expanded_source(itemized, run, first.cluster..text_end(first.cluster))
         };
-        out.push((text, glyphs));
+        let invisible = |ch: char| matches!(ch, '\u{AD}' | '\u{200B}');
         index = end;
+        if !text.is_empty() && text.chars().all(invisible) {
+            // Nothing is drawn for them either, as in Word's PDF: glyphs with no text
+            // would cut their word in two for a reader of the PDF's text.
+            continue;
+        }
+        let text = text.chars().filter(|&ch| !invisible(ch)).collect();
+        out.push((text, glyphs));
     }
     out
 }

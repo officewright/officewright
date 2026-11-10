@@ -620,7 +620,15 @@ impl Builder<'_, '_, '_> {
         style: &RunStyle,
         small: bool,
     ) {
-        if self.attach(ch, &source) {
+        // A soft hyphen of another run than the character before it keeps its own font
+        // and size, which the hyphen drawn at a break there takes (E-soft-hyphen-font:
+        // Word draws it in Noto Sans 20 pt after letters in Calibri 11 pt).
+        let own_run = ch == '\u{00AD}'
+            && self
+                .pending
+                .last()
+                .is_some_and(|previous| previous.look.style != id);
+        if !own_run && self.attach(ch, &source) {
             return;
         }
         let slot = slot(ch, style);
@@ -1391,15 +1399,42 @@ mod tests {
         let (itemized, _, _) = setup.run(&[
             Inline::text("A", style),
             Inline::text("\u{301}\u{200D}", other),
-            Inline::soft_hyphen(other),
             Inline::text("A", other),
         ]);
         assert_eq!(
             runs(&itemized),
             [
-                ("A\u{301}\u{200D}\u{AD}", "A\u{301}\u{200D}\u{AD}", 10.0),
+                ("A\u{301}\u{200D}", "A\u{301}\u{200D}", 10.0),
                 ("A", "A", 20.0)
             ]
+        );
+    }
+
+    #[test]
+    fn keeps_a_soft_hyphen_with_the_character_before_it_only_in_the_same_run_style() {
+        let mut setup = Setup::new(vec![minimal()]);
+        let style = setup.style(plain(TEST));
+        let other = setup.style(plain(TEST).with_size(Pt(20.0)));
+        // Of the style of the A before it: in its run.
+        let (itemized, _, _) = setup.run(&[
+            Inline::text("A", style),
+            Inline::soft_hyphen(style),
+            Inline::text("A", other),
+        ]);
+        assert_eq!(
+            runs(&itemized),
+            [("A\u{AD}", "A\u{AD}", 10.0), ("A", "A", 20.0)]
+        );
+        // Of another style, after a mark that goes with the A: in its own size, as Word
+        // draws the hyphen of E-soft-hyphen-font, and here with the A after it.
+        let (itemized, _, _) = setup.run(&[
+            Inline::text("A\u{301}", style),
+            Inline::soft_hyphen(other),
+            Inline::text("A", other),
+        ]);
+        assert_eq!(
+            runs(&itemized),
+            [("A\u{301}", "A\u{301}", 10.0), ("\u{AD}A", "\u{AD}A", 20.0)]
         );
     }
 
