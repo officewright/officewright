@@ -268,3 +268,16 @@ Version 2.0.
   (SHA-256 `a89ff8b670bcacd3e98ebee64979e0569181c7942e9ad795f4222b25e5637a61`).
 - They are test input of `tools/corpus-runner` (run by `scripts/check.sh`) and seed the
   `docx_open` fuzz target; they sit outside every crate and are never published.
+
+## QR Code generator library (Project Nayuki)
+
+- Source: `python/qrcodegen.py` of <https://github.com/nayuki/QR-Code-generator> at commit
+  `777682a64202fdb837b50e351b25b7ddb27852c4`.
+- License: MIT License. Copyright (c) Project Nayuki. The library's copyright and permission
+  notice is reproduced in full above `qr_version1_m` in `scripts/make-rule-docs.py`.
+- What is taken: `qr_version1_m` in `scripts/make-rule-docs.py`, the QR encoder of the rule
+  documents' barcode pictures, is written after the library: its computation of the format
+  bits and their placement, the zigzag placement of the codewords and the Reed-Solomon
+  remainder follow the library's. No file of the library is committed. The script is a
+  development tool that writes `tests/corpus/word-rules/`; it is part of no crate and is
+  never published.

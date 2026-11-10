@@ -6376,7 +6376,8 @@ def table_cell_margins_style() -> Doc:
 # 2026-11-10 under the maintainer's delegation): as PNG pictures, as EMF and WMF pictures
 # drawn from rectangles, and as Word's DISPLAYBARCODE field. The codes are encoded here, so
 # that a scanner reads the reference's pictures: Code 128 code set B (ISO/IEC 15417) and a
-# QR code of version 1, error correction level M, mask 0 (ISO/IEC 18004).
+# QR code of version 1, error correction level M, mask 0 (ISO/IEC 18004), its encoder
+# written after Project Nayuki's QR Code generator library (notice at qr_version1_m).
 
 # The bar and space widths of the Code 128 symbols 0 to 105, and of the stop symbol (106,
 # with its final bar), in modules.
@@ -6414,6 +6415,30 @@ def ean13_check(digits: str) -> str:
     return digits + str((10 - total % 10) % 10)
 
 
+# qr_version1_m is written after the Python version of Project Nayuki's QR Code generator
+# library (python/qrcodegen.py of https://github.com/nayuki/QR-Code-generator at commit
+# 777682a64202fdb837b50e351b25b7ddb27852c4): its computation of the format bits and their
+# placement, the zigzag placement of the codewords and the Reed-Solomon remainder follow
+# that library's. THIRD-PARTY-NOTICES.md lists it. The library's notice:
+#
+# Copyright (c) Project Nayuki. (MIT License)
+# https://www.nayuki.io/page/qr-code-generator-library
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy of
+# this software and associated documentation files (the "Software"), to deal in
+# the Software without restriction, including without limitation the rights to
+# use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+# the Software, and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+# - The above copyright notice and this permission notice shall be included in
+#   all copies or substantial portions of the Software.
+# - The Software is provided "as is", without warranty of any kind, express or
+#   implied, including but not limited to the warranties of merchantability,
+#   fitness for a particular purpose and noninfringement. In no event shall the
+#   authors or copyright holders be liable for any claim, damages or other
+#   liability, whether in an action of contract, tort or otherwise, arising from,
+#   out of or in connection with the Software or the use or other dealings in the
+#   Software.
 def qr_version1_m(value: str) -> list[list[bool]]:
     """The 21 x 21 modules of a QR code of version 1, level M, mask 0, holding value in byte
     mode, without its quiet zone."""
