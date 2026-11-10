@@ -318,6 +318,15 @@ impl<'d> PageNotes<'d> {
         self.notes.iter().map(|placed| placed.note)
     }
 
+    /// The notes whose references are on the page, those going on from the page before
+    /// left out.
+    pub(super) fn referenced(&self) -> impl Iterator<Item = NoteId> + '_ {
+        self.notes
+            .iter()
+            .filter(|placed| !placed.continued)
+            .map(|placed| placed.note)
+    }
+
     /// What of its notes goes on to the next page.
     pub(super) fn going_on(&self) -> Vec<Waiting<'d>> {
         self.notes
