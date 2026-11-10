@@ -775,7 +775,8 @@ struct Checkpoint {
     /// they could still lay out.
     frame_budget: usize,
     frame_laid_budget: usize,
-    /// Whether nothing was on the page yet, not even notes going on from the page before.
+    /// Whether nothing was on the page yet, not even notes going on from the page before,
+    /// beside which a chain may move on (a hypothesis, see `footnotes`).
     at_top: bool,
 }
 
@@ -1347,7 +1348,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         loop {
             let empty = self.page_is_empty();
             // Whether nothing moves the paragraph further: the page holds no text, nor
-            // notes going on from the page before, which leave the next page more room.
+            // notes going on from the page before, which leave the next page more room (a
+            // hypothesis, see `footnotes`).
             let bare = empty && !self.holds_continued_notes();
             // Space above: between this paragraph and the one above it on the page, or
             // its own below a table; at the top of a page only at the start of the
@@ -10076,6 +10078,14 @@ mod tests {
             .iter()
             .any(|m| m.starts_with("the rest of a footnote cut on a page of another width"));
         assert_eq!(reported, rest.first() != expected.get(first.len()));
+        // Page 1 ends with W28; at 100 pt, W29 is on the line that starts with W25, and
+        // the rest starts there: W25 to W28 are drawn again, within that line.
+        assert_eq!(first.last().map(String::as_str), Some("W28"));
+        assert_eq!(
+            separators_and_texts(&pages[1]).1.first(),
+            Some(&at("W25 W26 W27 W28 W29", 56.0))
+        );
+        assert!(reported);
     }
 
     #[test]
@@ -10278,45 +10288,102 @@ mod tests {
         // second (80 to 100) referencing a note of four lines with widow control: two lines
         // of the note stay below it, and still below the third line (100 to 120); under the
         // fourth only one would, which widow control does not allow, so the fourth goes to
-        // the next page.
-        let document = with_notes(
-            setup(),
-            NotePosition::PageBottom,
-            Inline::separator,
-            |document, style, mark| {
-                let note = footnote(document, (style, mark), 4, spacing(0.0, 0.0));
-                vec![
-                    lines(style, 2, spacing(0.0, 0.0)),
-                    referencing(
-                        style,
-                        (1, 2),
-                        &[note],
-                        spacing(0.0, 0.0).with_widow_control(false),
+        // the next page. So in Word 2010 too: the note it cuts does not go wholly to the
+        // next page for a later line.
+        for mode in [CompatMode::Word2013, CompatMode::Word2010] {
+            let document = with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let note = footnote(document, (style, mark), 4, spacing(0.0, 0.0));
+                    vec![
+                        lines(style, 2, spacing(0.0, 0.0)),
+                        referencing(
+                            style,
+                            (1, 2),
+                            &[note],
+                            spacing(0.0, 0.0).with_widow_control(false),
+                        ),
+                    ]
+                },
+            );
+            let (pages, _) = noted_pages(&document);
+            let mut first: Vec<_> = (0..3)
+                .map(|n| at("A", 36.0 + 20.0 * f64::from(n)))
+                .collect();
+            first.extend([
+                at("A1", 96.0),
+                at("A", 116.0),
+                at("1", raised(156.0)),
+                at("N", 156.0),
+                at("N", 176.0),
+            ]);
+            assert_eq!(
+                pages,
+                [
+                    (vec![133.75], first),
+                    (
+                        vec![133.75],
+                        vec![at("A", 36.0), at("N", 156.0), at("N", 176.0)]
                     ),
-                ]
-            },
-        );
-        let (pages, _) = noted_pages(&document);
-        let mut first: Vec<_> = (0..3)
-            .map(|n| at("A", 36.0 + 20.0 * f64::from(n)))
-            .collect();
+                ],
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_later_line_cuts_again_the_note_it_cut_under_the_notes_before_it_from_its_start() {
+        use crate::ir::NotePosition;
+        // A paragraph of seven lines (20 to 160) without widow control, the first
+        // referencing a note of nine lines, without widow control, after a note of one line,
+        // or, alone, with 10 pt before it. Under each later line the long note is cut again
+        // under the short one, or with its space before: after the fifth line one line of it
+        // is left, and the sixth goes to the next page.
+        let lay = |short: bool| {
+            let document = with_notes(
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let props =
+                        spacing(if short { 0.0 } else { 10.0 }, 0.0).with_widow_control(false);
+                    let mut notes = Vec::new();
+                    if short {
+                        notes.push(footnote(document, (style, mark), 1, spacing(0.0, 0.0)));
+                    }
+                    notes.push(footnote(document, (style, mark), 9, props));
+                    vec![referencing(
+                        style,
+                        (0, 6),
+                        &notes,
+                        spacing(0.0, 0.0).with_widow_control(false),
+                    )]
+                },
+            );
+            noted_pages(&document).0
+        };
+        let text = |first: &str| {
+            let mut texts = vec![at(first, 36.0)];
+            texts.extend((1..5).map(|n| at("A", 36.0 + 20.0 * f64::from(n))));
+            texts
+        };
+        let pages = lay(true);
+        let mut first = text("A1");
+        first.insert(1, at("2", 36.0));
         first.extend([
-            at("A1", 96.0),
-            at("A", 116.0),
             at("1", raised(156.0)),
             at("N", 156.0),
+            at("2", raised(176.0)),
             at("N", 176.0),
         ]);
-        assert_eq!(
-            pages,
-            [
-                (vec![133.75], first),
-                (
-                    vec![133.75],
-                    vec![at("A", 36.0), at("N", 156.0), at("N", 176.0)]
-                ),
-            ]
-        );
+        assert_eq!(pages[0], (vec![133.75], first));
+        let pages = lay(false);
+        let mut first = text("A1");
+        first.extend([at("1", raised(176.0)), at("N", 176.0)]);
+        assert_eq!(pages[0], (vec![143.75], first));
     }
 
     #[test]

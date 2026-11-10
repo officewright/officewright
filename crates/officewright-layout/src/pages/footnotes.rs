@@ -33,9 +33,12 @@
 //! reported, where only the part fits on a page that holds nothing else; the rest of a note
 //! on the next page is cut again only where it does not fit that page's whole body, its
 //! text taking what is left; a blank page that an odd or even section start puts in takes
-//! none of it; and on a page of another width it is laid out again at that width, going on
+//! none of it; on a page of another width it is laid out again at that width, going on
 //! from the start of the line its cut falls in, which repeats part of that line where it
-//! starts elsewhere there, and is reported.
+//! starts elsewhere there, and is reported; and a page that holds only the rests of notes
+//! is not the top of a page for the text: a line, a table's row, a paragraph kept together
+//! or a chain kept with the next that does not fit beside them moves to the next page, as
+//! from a page with text, and may leave the page with no text at all.
 //!
 //! A line whose note cannot start on the page, where not even its first part fits, moves
 //! to the next page with its notes in Word 2013 and later (mode 15: `E-footnote-no-room.docx`
