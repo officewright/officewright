@@ -1319,14 +1319,20 @@ fn clusters(
             end += 1;
         }
         let glyphs = placed.get(index..end).unwrap_or(&[]).to_vec();
-        let text = if hyphen {
-            // The hyphen drawn at a soft hyphen stands for no text of its own.
-            String::new()
+        // Word's PDF text has a hyphen-minus where a line breaks at a soft hyphen, and
+        // neither soft hyphens nor zero-width spaces anywhere (E-underline,
+        // E-soft-hyphen-font, E-spacing-condensed).
+        let text: String = if hyphen {
+            "-".to_owned()
         } else if let Some(tables) = tables.filter(|_| run.sources.is_empty()) {
             tables.source_of(itemized, run, first.cluster..text_end(first.cluster))
         } else {
             expanded_source(itemized, run, first.cluster..text_end(first.cluster))
         };
+        let text = text
+            .chars()
+            .filter(|ch| !matches!(ch, '\u{AD}' | '\u{200B}'))
+            .collect();
         out.push((text, glyphs));
         index = end;
     }
