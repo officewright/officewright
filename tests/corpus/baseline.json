@@ -1174,9 +1174,9 @@
     "tests/corpus/word-rules/E-header-cut.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9738,
-      "ssim_min": 0.9314,
-      "text_score": 0.9184
+      "ssim_mean": 0.9843,
+      "ssim_min": 0.9382,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-header-negative-margin.docx": {
       "line_agreement": 1.0,
@@ -1186,11 +1186,11 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-header-no-room.docx": {
-      "line_agreement": 0.9386,
+      "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9769,
-      "ssim_min": 0.9769,
-      "text_score": 0.8434
+      "ssim_mean": 0.9912,
+      "ssim_min": 0.9912,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-header-space-after.docx": {
       "line_agreement": 1.0,
@@ -1214,11 +1214,11 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-header-taller-than-page.docx": {
-      "line_agreement": 0.9714,
-      "page_break_agreement": 0.1111,
-      "ssim_mean": 0.9388,
-      "ssim_min": 0.9388,
-      "text_score": 0.4121
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9965,
+      "ssim_min": 0.9965,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-hidden-pictures.docx": {
       "line_agreement": 0.8571,

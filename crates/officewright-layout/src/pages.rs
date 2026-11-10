@@ -301,6 +301,9 @@ struct Laid<S> {
     /// How many times a header or footer was laid out in the last pass.
     #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
     frames_laid: usize,
+    /// How many times where a header or footer is cut was worked out in the last pass.
+    #[cfg_attr(not(test), allow(dead_code))] // reason: read by the test of the cut's cost only
+    frames_cut: usize,
     /// The pieces of lines painting headers and footers walked in the last pass.
     #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
     frames_walked: usize,
@@ -430,6 +433,7 @@ fn paginate_with<S: PageSink>(
             layouts_held: 0,
             most_layouts: 0,
             frames_laid: 0,
+            frames_cut: 0,
             frames_walked: 0,
             headers_laid: 0,
             headers_copied: 0,
@@ -470,6 +474,7 @@ fn paginate_with<S: PageSink>(
                 lines,
                 most_held: (pager.most_held, pager.most_layouts),
                 frames_laid: pager.frames_laid,
+                frames_cut: pager.frames_cut,
                 frames_walked: pager.frames_walked,
                 headers_laid: pager.headers_laid,
                 headers_copied: pager.headers_copied,
@@ -706,25 +711,38 @@ const MAX_FRAME_DRAWN: usize = 1 << 20;
 /// it on every page (#374).
 const MAX_FRAME_LAID: usize = 1 << 20;
 
+/// The room under which the header and footer of a page leave its body no room, and are
+/// cut to [`FRAME_CUT_SHARE`] of the page's height. Word cut them with 7.9 pt of room left
+/// (`E-header-cut.docx`, A5) and with none (`E-header-no-room.docx`,
+/// `E-header-taller-than-page.docx`), but not with 204 pt or more: a hypothesis of one
+/// line of the 12 pt its body text has there, until the rule documents of #548.
+const LEAST_BODY_ROOM: f64 = 12.0;
+
+/// How much of the page's height a header and a footer that leave the body no room are
+/// each drawn down to, in whole lines: 28 lines of 12 pt on A4 and 19 on A5 in Word's
+/// renders (`E-header-no-room.docx`, `E-header-cut.docx`).
+const FRAME_CUT_SHARE: f64 = 0.4;
+
 /// A header or footer as each pass prepares it once: the paragraphs that may be drawn,
-/// in order (the first [`MAX_FRAME_WORK`] of a header, the last of a footer), each
-/// with whether it has a field the layout computes; whether any of them has a `PAGE`
-/// field; whether it is a header; and where it is, for the report.
+/// in order (the first [`MAX_FRAME_WORK`]), each with whether it has a field the layout
+/// computes; whether any of them has a `PAGE` field; and where it is, for the report.
 struct Candidates<'d> {
     parts: Vec<(Flowed<'d>, bool)>,
     page_field: bool,
-    header: bool,
     location: Location,
 }
 
 /// A header or footer laid out for a page: its candidates; the paragraphs drawn, each by
 /// its place among the candidates, with its layout and its top from the frame's top; its
-/// height; and, when it has a `PAGE` field, the field values it was laid out with.
+/// height; when it has a `PAGE` field, the field values it was laid out with; and where
+/// it is cut on a page whose body it leaves no room, worked out once with the layout, as
+/// the frame is drawn on every page.
 struct Frame<'d> {
     candidates: Rc<Candidates<'d>>,
     parts: Vec<(usize, Rc<FramePart>, f64)>,
     height: f64,
     values: Option<FieldValues>,
+    cut: Option<FrameCut>,
 }
 
 /// A paragraph of a header or footer laid out, with the pieces painting it walks (one for
@@ -732,6 +750,16 @@ struct Frame<'d> {
 enum FramePart {
     Paragraph(ParagraphLayout, usize),
     Table(Drawn),
+}
+
+/// Where a header or footer cut at a height ends: the parts drawn whole, by their place in
+/// the frame's parts, then the first lines of the next part when it is a paragraph that
+/// crosses the height, and the bottom of what is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FrameCut {
+    whole: usize,
+    lines: usize,
+    bottom: f64,
 }
 
 impl FramePart {
@@ -874,9 +902,10 @@ struct Pager<'d, 'f, 'b, S> {
     /// The paragraph layouts held, and the most at once.
     layouts_held: usize,
     most_layouts: usize,
-    /// How many times a header or footer was laid out, and the pieces of lines painting them
-    /// walked.
+    /// How many times a header or footer was laid out, where one is cut was worked out,
+    /// and the pieces of lines painting them walked.
     frames_laid: usize,
+    frames_cut: usize,
     frames_walked: usize,
     /// How many times header rows to repeat were laid out, and copied onto a page.
     headers_laid: usize,
@@ -2032,6 +2061,29 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         .to_owned(),
                 );
             }
+            // Where they leave the body less room than a line, Word draws each only down to
+            // a share of the page's height, in whole lines, a cut footer ending at its
+            // distance from the bottom; the body stays where the uncut header puts it
+            // (`E-header-no-room.docx`, `E-header-taller-than-page.docx`, case 5 of
+            // `E-header-cut.docx`).
+            let (header_cut, footer_cut) = if body.bottom.0 - body.top.0 < LEAST_BODY_ROOM {
+                (header.cut, footer.cut)
+            } else {
+                (None, None)
+            };
+            for (cut, frame) in [(header_cut, &header), (footer_cut, &footer)] {
+                if cut.is_some() {
+                    self.fonts.report_once(
+                        ReportKind::Overflow,
+                        &frame.candidates.location,
+                        format!(
+                            "a header or footer that leaves the body of its page no room is \
+                             drawn down to {FRAME_CUT_SHARE} of the page's height, as Word \
+                             draws it"
+                        ),
+                    );
+                }
+            }
             let page = page_box(setup, number);
             self.paint_frame(
                 &header,
@@ -2040,9 +2092,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     y: Pt(header_top),
                 },
                 (&mut items, &mut floats),
-                page,
+                (page, header_cut),
             );
-            let footer_top = footer_bottom - footer.height;
+            let footer_top = footer_bottom - footer_cut.map_or(footer.height, |cut| cut.bottom);
             self.paint_frame(
                 &footer,
                 Point {
@@ -2050,7 +2102,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     y: Pt(footer_top),
                 },
                 (&mut items, &mut floats),
-                page,
+                (page, footer_cut),
             );
         }
         // The header's and footer's floating objects are stacked at once with them: nothing
@@ -2218,12 +2270,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             candidates: Rc::new(Candidates {
                 parts: Vec::new(),
                 page_field: false,
-                header,
                 location: Location::default(),
             }),
             parts: Vec::new(),
             height: 0.0,
             values: None,
+            cut: None,
         })
     }
 
@@ -2260,10 +2312,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         };
         walk.blocks(blocks)?;
         report_list_formats(&counters, self.fonts);
-        // A header is laid out from its first paragraph, a footer from its last, which is
-        // nearest its distance. A table counts its paragraphs, rows, cells and grid
-        // columns, nested tables' too, as it is laid out again on every page where a field
-        // in it changes.
+        // A header or footer is laid out from its first paragraph, as Word leaves out the
+        // last lines of a footer it cuts (`E-header-no-room.docx`). A table counts its
+        // paragraphs, rows, cells and grid columns, nested tables' too, as it is laid out
+        // again on every page where a field in it changes.
         let weight = |part: &Flowed<'_>| match &part.content {
             Content::Paragraph(..) => 1,
             Content::Table(table, _) => tables::table_work(table),
@@ -2273,19 +2325,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             taken = taken.saturating_add(weight(part));
             taken <= MAX_FRAME_WORK
         };
-        let kept = if header {
-            flowed.iter().take_while(|part| fits(part)).count()
-        } else {
-            flowed.iter().rev().take_while(|part| fits(part)).count()
-        };
-        let past = flowed.len().saturating_sub(kept);
-        if past > 0 {
+        let kept = flowed.iter().take_while(|part| fits(part)).count();
+        if kept < flowed.len() {
             self.report_cut(&location);
-            if header {
-                flowed.truncate(kept);
-            } else {
-                flowed.drain(..past);
-            }
+            flowed.truncate(kept);
         }
         let kinds = |part: &Flowed<'_>| match &part.content {
             Content::Paragraph(paragraph, _) => paragraph_field_kinds(paragraph),
@@ -2307,7 +2350,6 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         Ok(Candidates {
             parts,
             page_field,
-            header,
             location,
         })
     }
@@ -2329,8 +2371,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// between them, the space before the first and after the last included. The layouts
     /// of its paragraphs without fields are taken from `last` when it has them. Paragraphs
     /// that would start past the page's height `room.1`, spacing included, are left out,
-    /// and reported: the last ones of a header, the first ones of a footer, which grows up
-    /// from its distance.
+    /// and reported: the last ones, of a footer too, as Word leaves out the last lines of
+    /// a footer it cuts (`E-header-no-room.docx`).
     fn frame(
         &mut self,
         candidates: Rc<Candidates<'d>>,
@@ -2350,30 +2392,14 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             })
             .map(|(index, part, _)| (*index, Rc::clone(part)))
             .collect();
-        let count = candidates.parts.len();
-        let order: Vec<usize> = if candidates.header {
-            (0..count).collect()
-        } else {
-            (0..count).rev().collect()
-        };
         let mut kept: Vec<(usize, Rc<FramePart>)> = Vec::new();
         let mut taken = 0.0;
-        // The part laid out before, next to this one: above it in a header, below it in
-        // a footer.
+        // The part laid out before, above this one.
         let mut before: Option<&Flowed<'d>> = None;
-        for index in order {
-            let Some((part, _)) = candidates.parts.get(index) else {
-                continue;
-            };
-            // The space between it and the part before, or before a header's first and
-            // after a footer's last: a part that would start past the page's height is
-            // not laid out, nor any after it.
-            let gap = match (before, candidates.header) {
-                (None, true) => stack_space(document, None, part),
-                (None, false) => trailing_space(document, part),
-                (Some(above), true) => stack_space(document, Some(above), part),
-                (Some(below), false) => stack_space(document, Some(part), below),
-            };
+        for (index, (part, _)) in candidates.parts.iter().enumerate() {
+            // The space between it and the part before, or before the first: a part that
+            // would start past the page's height is not laid out, nor any after it.
+            let gap = stack_space(document, before, part);
             if taken + gap >= page_height.0 {
                 self.report_cut(&candidates.location);
                 break;
@@ -2395,7 +2421,6 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             before = Some(part);
             kept.push((index, laid));
         }
-        kept.sort_by_key(|(index, _)| *index);
         let mut parts = Vec::new();
         let mut height = 0.0;
         let mut above: Option<&Flowed<'d>> = None;
@@ -2412,12 +2437,61 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         if let Some(last) = above {
             height += trailing_space(document, last);
         }
+        let cut = self.frame_cut(&parts, FRAME_CUT_SHARE * page_height.0);
         Ok(Frame {
             candidates,
             parts,
             height,
             values: shown,
+            cut,
         })
+    }
+
+    /// Where the frame of `parts` ends cut at `limit` below its top, in whole lines, or
+    /// `None` when all of it is within it. A table crossing the limit is left out whole. Its
+    /// first line, or its first table, is kept however tall: no reference shows Word cutting
+    /// a frame whose first line alone passes the limit (#548).
+    fn frame_cut(&mut self, parts: &[(usize, Rc<FramePart>, f64)], limit: f64) -> Option<FrameCut> {
+        self.frames_cut += 1;
+        let mut bottom = 0.0;
+        for (whole, (_, laid, top)) in parts.iter().enumerate() {
+            let first = whole == 0;
+            match laid.as_ref() {
+                FramePart::Paragraph(layout, _) => {
+                    let mut end = *top;
+                    let mut lines = 0;
+                    for line in &layout.lines {
+                        if end + line.height.0 > limit + EPSILON && !(first && lines == 0) {
+                            break;
+                        }
+                        end += line.height.0;
+                        lines += 1;
+                    }
+                    if lines < layout.lines.len() {
+                        if lines > 0 {
+                            bottom = end;
+                        }
+                        return Some(FrameCut {
+                            whole,
+                            lines,
+                            bottom,
+                        });
+                    }
+                    bottom = end;
+                }
+                FramePart::Table(drawn) => {
+                    if top + drawn.height.0 > limit + EPSILON && !first {
+                        return Some(FrameCut {
+                            whole,
+                            lines: 0,
+                            bottom,
+                        });
+                    }
+                    bottom = top + drawn.height.0;
+                }
+            }
+        }
+        None
     }
 
     /// A paragraph of a header or footer laid out `width` wide, or a table of it drawn,
@@ -2448,18 +2522,26 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         }
     }
 
-    /// Adds to `items` what `frame` draws, its top left corner at `origin`, as far as the
-    /// budget of what frames draw goes: a part that would take more than is left is not
-    /// drawn, nor is anything of a frame after it. A paragraph costs what it draws, or the
-    /// pieces painting walks where those are more.
+    /// Adds to `items` what `frame` draws, its top left corner at `origin`, down to where
+    /// `cut` ends it, and as far as the budget of what frames draw goes: a part that would
+    /// take more than is left is not drawn, nor is anything of a frame after it. A
+    /// paragraph costs what it draws, or the pieces painting walks where those are more.
     fn paint_frame(
         &mut self,
         frame: &Frame<'d>,
         origin: Point,
         (items, floats): (&mut Vec<DisplayItem>, &mut Vec<Float>),
-        page: PageBox,
+        (page, cut): (PageBox, Option<FrameCut>),
     ) {
-        for (index, laid, top) in &frame.parts {
+        for (at_part, (index, laid, top)) in frame.parts.iter().enumerate() {
+            // The lines of a paragraph drawn: all, or the first of the one the cut crosses.
+            let drawn_lines = match cut {
+                Some(cut) if at_part > cut.whole || (at_part == cut.whole && cut.lines == 0) => {
+                    break;
+                }
+                Some(cut) if at_part == cut.whole => Some(cut.lines),
+                _ => None,
+            };
             let Some((part, _)) = frame.candidates.parts.get(*index) else {
                 continue;
             };
@@ -2492,7 +2574,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                             // bar tabs reach only through the lines.
                             bar_reach: (0.0, 0.0),
                         };
-                        let lines = 0..layout.lines.len();
+                        let lines = 0..drawn_lines.unwrap_or(layout.lines.len());
                         painting.paint_shading(lines.clone(), at, items);
                         painting.paint(lines, at, items);
                         anchored = painting.floats;
@@ -6409,6 +6491,308 @@ mod tests {
         assert_eq!(fixed.expect("pages").pages[0].body.top, Pt(20.0));
     }
 
+    /// The baselines of the glyph runs of `page`, top to bottom.
+    fn run_baselines(page: &Page) -> Vec<Pt> {
+        let mut baselines: Vec<Pt> = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Glyphs(run) => Some(run.origin.y),
+                _ => None,
+            })
+            .collect();
+        baselines.sort_by(|a, b| a.0.total_cmp(&b.0));
+        baselines
+    }
+
+    #[test]
+    fn a_header_and_footer_that_leave_the_body_no_room_are_drawn_down_to_a_share_of_the_page() {
+        // Issue #496: 6 lines of 20 pt each from 10 pt of the edges of a page 200 pt high:
+        // the header reaches 130 and the footer starts at 70. Word draws each down to 0.4
+        // of the page's height in whole lines, 4 here, the footer's first 4 ending at its
+        // distance (`E-header-no-room.docx`); the body stays under the whole header.
+        let document = document(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(frame_of(style, 6)))
+                    .with_footers(HeaderFooterSet::default().with_primary(frame_of(style, 6)))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, report) = laid(&document, 100);
+        let page = &laid.expect("pages").pages[0];
+        assert_eq!(page.body.top, Pt(130.0));
+        assert_eq!(page.fragments[0].top, Pt(130.0));
+        // The header's lines from 10 to 90, the footer's from 110 to 190, the body's line
+        // from 130 among them.
+        let baselines = run_baselines(page);
+        let within = |top: f64, bottom: f64| {
+            baselines
+                .iter()
+                .filter(|y| y.0 > top && y.0 < bottom)
+                .count()
+        };
+        assert_eq!(baselines.len(), 9, "{baselines:?}");
+        assert_eq!(within(10.0, 90.0), 4, "{baselines:?}");
+        assert_eq!(within(90.0, 110.0), 0, "{baselines:?}");
+        assert_eq!(within(110.0, 190.0), 5, "{baselines:?}");
+        assert!(
+            report.iter().any(|entry| entry.message()
+                == "a header or footer that leaves the body of its page no room is drawn \
+                    down to 0.4 of the page's height, as Word draws it"),
+            "{:?}",
+            report.entries()
+        );
+    }
+
+    #[test]
+    fn a_header_is_cut_only_where_it_leaves_the_body_less_room_than_a_line() {
+        // From 10 pt, 7 lines of 20 pt end at 150 and leave the body 30 pt down to 180:
+        // drawn whole. 8 end at 170 and leave 10 pt: cut to 4 lines, as Word cut a header
+        // that left 7.9 pt (case 5 of `E-header-cut.docx`) but not one that left 204 pt.
+        // In paragraphs of 3 lines, the cut keeps the first paragraph and a line of the
+        // second; in paragraphs of 2, the first two.
+        let drawn = |count: usize, each: usize| {
+            let document = document(|style| {
+                let header: Vec<Block> = (0..count / each)
+                    .map(|_| lines(style, each, spacing(0.0, 0.0)))
+                    .collect();
+                vec![
+                    Section::new(close_frames())
+                        .with_headers(HeaderFooterSet::default().with_primary(header))
+                        .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+                ]
+            });
+            let (laid, _) = laid(&document, 100);
+            let page = &laid.expect("pages").pages[0];
+            run_baselines(page).len() - 1
+        };
+        assert_eq!(drawn(7, 7), 7);
+        assert_eq!(drawn(8, 8), 4);
+        assert_eq!(drawn(9, 3), 4);
+        assert_eq!(drawn(8, 2), 4);
+    }
+
+    /// Exact lines of `height`.
+    fn exact(height: f64) -> ParagraphProps {
+        ParagraphProps::default()
+            .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(height))))
+    }
+
+    /// The number of glyph runs of the first page of `sections`.
+    fn runs_drawn(sections: impl Fn(RunStyleId) -> Vec<Section>) -> usize {
+        let (laid, _) = laid(&document(sections), 100);
+        run_baselines(&laid.expect("pages").pages[0]).len()
+    }
+
+    #[test]
+    fn a_cut_frame_is_drawn_in_whole_lines_down_to_0_4_of_the_page() {
+        // Six lines of 18 pt in a header and a footer leave no room: 0.4 of the 200 pt
+        // page is 80 pt, four lines of each, where 0.45 would take five.
+        let frame = |style| vec![lines(style, 6, exact(18.0))];
+        let drawn = runs_drawn(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(frame(style)))
+                    .with_footers(HeaderFooterSet::default().with_primary(frame(style)))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        assert_eq!(drawn, 4 + 4 + 1);
+    }
+
+    #[test]
+    fn a_table_of_a_cut_frame_is_drawn_whole_or_left_out() {
+        // Headers of 160 pt from 10 pt leave the body 10 pt: each is drawn down to 80 pt.
+        let header = |style: RunStyleId, blocks: Vec<Block>| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(blocks))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        };
+        let table = |style, cell: usize| -> Block {
+            table_with(vec![row_of(style, &[cell], false)], 0.0).into()
+        };
+        // Two lines, a table of one line from 40 to 60, a line to 80: all drawn; of the
+        // four lines after, none.
+        let within = runs_drawn(|style| {
+            header(
+                style,
+                vec![
+                    lines(style, 2, spacing(0.0, 0.0)),
+                    table(style, 1),
+                    lines(style, 1, spacing(0.0, 0.0)),
+                    lines(style, 4, spacing(0.0, 0.0)),
+                ],
+            )
+        });
+        assert_eq!(within, 2 + 1 + 1 + 1);
+        // Three lines, then a table of two lines from 60 to 100, which crosses 80: left
+        // out, with what follows it.
+        let crossing = runs_drawn(|style| {
+            header(
+                style,
+                vec![
+                    lines(style, 3, spacing(0.0, 0.0)),
+                    table(style, 2),
+                    lines(style, 3, spacing(0.0, 0.0)),
+                ],
+            )
+        });
+        assert_eq!(crossing, 3 + 1);
+    }
+
+    #[test]
+    fn a_cut_footer_ends_at_its_distance_where_it_is_cut_between_paragraphs() {
+        // One-line paragraphs of 20 pt with 30 pt after each: from its top, the footer's
+        // second ends at 70 pt and its third would start at 100, past 80. Its first two
+        // are drawn, the second ending at the footer's distance at 190.
+        let document = document(|style| {
+            let footer: Vec<Block> = (0..4)
+                .map(|_| lines(style, 1, spacing(0.0, 30.0)))
+                .collect();
+            vec![
+                Section::new(close_frames())
+                    .with_footers(HeaderFooterSet::default().with_primary(footer))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let baselines = run_baselines(&laid.expect("pages").pages[0]);
+        // The body's line from 20, the footer's from 120 to 140 and from 170 to 190.
+        assert_eq!(baselines.len(), 3, "{baselines:?}");
+        assert!(
+            baselines[1].0 > 120.0 && baselines[1].0 < 140.0,
+            "{baselines:?}"
+        );
+        assert!(
+            baselines[2].0 > 170.0 && baselines[2].0 < 190.0,
+            "{baselines:?}"
+        );
+    }
+
+    #[test]
+    fn a_cut_frame_keeps_its_first_line_however_tall() {
+        // A header and a footer of a line of 100 pt and a line of 20 pt each leave no
+        // room, and their first lines pass 80 pt alone: those are still drawn, and
+        // nothing after them.
+        let frame = |style| {
+            vec![
+                lines(style, 1, exact(100.0)),
+                lines(style, 1, spacing(0.0, 0.0)),
+            ]
+        };
+        let drawn = runs_drawn(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(frame(style)))
+                    .with_footers(HeaderFooterSet::default().with_primary(frame(style)))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        assert_eq!(drawn, 3);
+    }
+
+    #[test]
+    fn a_cut_frame_keeps_its_first_table_however_tall() {
+        // A header of a table of one cell of 5 lines, from 0 to 100 past 80, then 4
+        // lines leaves the body no room: the table is kept whole, nothing after it.
+        let drawn = runs_drawn(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(vec![
+                        table_with(vec![row_of(style, &[5], false)], 0.0).into(),
+                        lines(style, 4, spacing(0.0, 0.0)),
+                    ]))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        assert_eq!(drawn, 5 + 1);
+    }
+
+    #[test]
+    fn a_cut_frame_keeps_only_the_first_line_of_its_first_paragraph_past_the_limit() {
+        // A first paragraph of two lines of 70 pt, then 4 lines: its first line passes
+        // nothing yet and is kept; its second ends at 140, past 80, and is not.
+        let drawn = runs_drawn(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(vec![
+                        lines(style, 2, exact(70.0)),
+                        lines(style, 4, spacing(0.0, 0.0)),
+                    ]))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        assert_eq!(drawn, 1 + 1);
+    }
+
+    #[test]
+    fn a_cut_footer_ends_at_its_distance_where_it_is_cut_after_a_table() {
+        // A footer of 2 lines, a table of one cell of 2 lines from 40 to 80, and 5 lines:
+        // the cut falls after the table, at 80, so the footer is drawn from 110 to 190.
+        let document = document(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_footers(HeaderFooterSet::default().with_primary(vec![
+                        lines(style, 2, spacing(0.0, 0.0)),
+                        table_with(vec![row_of(style, &[2], false)], 0.0).into(),
+                        lines(style, 5, spacing(0.0, 0.0)),
+                    ]))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let baselines = run_baselines(&laid.expect("pages").pages[0]);
+        // The body's line from 20, then the footer's four.
+        assert_eq!(baselines.len(), 5, "{baselines:?}");
+        assert!(
+            baselines[1..].iter().all(|y| y.0 > 110.0 && y.0 < 190.0),
+            "{baselines:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_is_cut_once_for_all_the_pages_it_is_drawn_on() {
+        // A header of 50,000 lines of 0.0001 pt, all within the cut, on each of 2,000
+        // pages whose margins leave the body 10 pt: where it is cut is worked out once
+        // with its layout, not on every page, which cost lines times pages.
+        let setup = PageSetup::new(PageSize::new(Pt(300.0), Pt(200.0))).with_margins(
+            Margins::default()
+                .with_top(Pt(95.0))
+                .with_bottom(Pt(95.0))
+                .with_left(Pt(20.0))
+                .with_right(Pt(20.0))
+                .with_header(Pt(10.0)),
+        );
+        let document = document(|style| {
+            vec![
+                Section::new(setup)
+                    .with_headers(HeaderFooterSet::default().with_primary(vec![lines(
+                        style,
+                        50_000,
+                        exact(0.0001),
+                    )]))
+                    .with_blocks(
+                        (0..2_000)
+                            .map(|_| lines(style, 1, spacing(0.0, 0.0)))
+                            .collect::<Vec<Block>>(),
+                    ),
+            ]
+        });
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let bounds = (MAX_FRAME_DRAWN, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN);
+        let laid = paginate_with(&document, &mut fonts, &mut shaper, 3_000, bounds, Vec::new)
+            .expect("pages");
+        assert_eq!(laid.sink.len(), 2_000);
+        // The header and the empty footer, laid out once each.
+        assert_eq!(laid.frames_laid, 2);
+        assert_eq!(laid.frames_cut, laid.frames_laid);
+    }
+
     #[test]
     fn a_header_s_height_takes_the_space_around_its_paragraphs() {
         // A header line of 20 pt, 3 pt above it and 5 pt below, from 10 pt: the body
@@ -7187,8 +7571,10 @@ mod tests {
     }
 
     #[test]
-    fn a_footer_taller_than_its_page_keeps_its_last_paragraphs() {
-        // A footer grows up from its distance: what is cut is its top.
+    fn a_footer_taller_than_its_page_keeps_its_first_lines() {
+        // Thirty paragraphs of 20 pt on a page 200 pt high leave the body no room: the
+        // footer is drawn down to 80 pt, its first four paragraphs, as Word leaves out the
+        // last lines of a footer it cuts (`E-header-no-room.docx`).
         let document = document(|style| {
             let footer = (0..30)
                 .map(|n| text_paragraph(style, &format!("F{n}"), spacing(0.0, 0.0)))
@@ -7201,14 +7587,13 @@ mod tests {
         });
         let (laid, _) = laid(&document, 100);
         let drawn = texts(&laid.expect("pages").pages[0]);
-        assert!(drawn.iter().any(|text| text == "F29"), "{drawn:?}");
-        assert!(!drawn.iter().any(|text| text == "F0"), "{drawn:?}");
+        assert_eq!(drawn, ["F0", "F1", "F2", "F3", "A"]);
     }
 
     #[test]
     fn a_frame_of_too_many_paragraphs_is_cut() {
-        // Exact lines of 0.1 pt: three hundred paragraphs fit the page, 256 are drawn, the
-        // first ones of a header and the last ones of a footer.
+        // Exact lines of 0.1 pt: three hundred paragraphs fit the page, the first 256 are
+        // drawn, of a header and of a footer.
         let frame = |style| {
             let tiny = ParagraphProps::default()
                 .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(0.1))));
@@ -7230,13 +7615,8 @@ mod tests {
             let (laid, report) = laid(&document, 100);
             let drawn = texts(&laid.expect("pages").pages[0]);
             assert_eq!(drawn.len(), MAX_FRAME_WORK + 1);
-            let (kept, left_out) = if header {
-                ("F0", "F299")
-            } else {
-                ("F299", "F0")
-            };
-            assert!(drawn.iter().any(|text| text == kept), "{drawn:?}");
-            assert!(!drawn.iter().any(|text| text == left_out), "{drawn:?}");
+            assert!(drawn.iter().any(|text| text == "F255"), "{drawn:?}");
+            assert!(!drawn.iter().any(|text| text == "F256"), "{drawn:?}");
             assert!(
                 messages(&report).iter().any(|m| m.contains("cut")),
                 "{report:?}"
@@ -8132,18 +8512,18 @@ mod tests {
     }
 
     #[test]
-    fn a_footer_cut_from_its_top_paints_each_paragraph_with_its_own_properties() {
+    fn a_cut_footer_paints_each_paragraph_with_its_own_properties() {
         use crate::ir::{ColorValue, Shading};
         use officewright_core::Color;
-        // Thirty footer paragraphs of 20 pt on a page 200 pt high, only the last shaded:
-        // the last ten are drawn, and one shading with them.
+        // Thirty footer paragraphs of 20 pt on a page 200 pt high, only the second shaded:
+        // the first four are drawn, and one shading with them.
         let document = document(|style| {
             let shaded = spacing(0.0, 0.0).with_shading(Some(
                 Shading::default().with_fill(ColorValue::Rgb(Color::rgb(0, 0, 255))),
             ));
             let footer = (0..30)
                 .map(|n| {
-                    let props = if n == 29 {
+                    let props = if n == 1 {
                         shaded.clone()
                     } else {
                         spacing(0.0, 0.0)
@@ -8165,13 +8545,22 @@ mod tests {
             .filter(|item| matches!(item, DisplayItem::Rect { color, .. } if *color == Color::rgb(0, 0, 255)))
             .count();
         assert_eq!(shading, 1);
-        assert!(texts(page).iter().any(|text| text == "F29"));
+        assert_eq!(texts(page), ["F0", "F1", "F2", "F3", "A"]);
     }
 
     #[test]
     fn the_cut_counts_the_spacing_on_each_side_of_a_paragraph() {
         // One-line paragraphs of 20 pt on a page 200 pt high, with 80 pt after every
-        // other one; what a frame keeps depends on which space lies between which.
+        // other one; what a frame keeps depends on which space lies between which. The
+        // margins are fixed, so that the frames leave the body its room and are not cut
+        // to a share of the page.
+        let fixed = || {
+            let margins = close_frames()
+                .margins()
+                .with_top(Pt(-20.0))
+                .with_bottom(Pt(-20.0));
+            close_frames().with_margins(margins)
+        };
         let frame = |style, last_after: f64| {
             (0..10)
                 .map(|n| {
@@ -8190,7 +8579,7 @@ mod tests {
         // 220.
         let header = document(|style| {
             vec![
-                Section::new(close_frames())
+                Section::new(fixed())
                     .with_headers(HeaderFooterSet::default().with_primary(frame(style, 0.0)))
                     .with_blocks(vec![text_paragraph(style, "B", spacing(0.0, 0.0))]),
             ]
@@ -8200,20 +8589,20 @@ mod tests {
             texts(&header_laid.expect("pages").pages[0]),
             ["P0", "P1", "P2", "B"]
         );
-        // A footer, from its distance up: P9's 90 after it and P9 to 110, P8's 80 after
-        // it and P8 to 210; P7 would start at 210.
+        // A footer the same, from its first paragraph: P0 to P2, and P2's 80 pt after it,
+        // so that it starts 220 pt above its distance at 190 and P2 ends at 110.
         let footer = document(|style| {
             vec![
-                Section::new(close_frames())
+                Section::new(fixed())
                     .with_footers(HeaderFooterSet::default().with_primary(frame(style, 90.0)))
                     .with_blocks(vec![text_paragraph(style, "B", spacing(0.0, 0.0))]),
             ]
         });
         let (footer_laid, _) = laid(&footer, 100);
-        assert_eq!(
-            texts(&footer_laid.expect("pages").pages[0]),
-            ["P8", "P9", "B"]
-        );
+        let page = &footer_laid.expect("pages").pages[0];
+        assert_eq!(texts(page), ["P0", "P1", "P2", "B"]);
+        let lowest = run_baselines(page).last().copied().unwrap_or(Pt(0.0));
+        assert!(lowest.0 > 90.0 && lowest.0 < 110.0, "{lowest:?}");
     }
 
     #[test]
