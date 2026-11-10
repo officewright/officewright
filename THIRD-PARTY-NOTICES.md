@@ -276,8 +276,9 @@ Version 2.0.
 - License: MIT License. Copyright (c) Project Nayuki. The library's copyright and permission
   notice is reproduced in full above `qr_version1_m` in `scripts/make-rule-docs.py`.
 - What is taken: `qr_version1_m` in `scripts/make-rule-docs.py`, the QR encoder of the rule
-  documents' barcode pictures, is written after the library: its computation of the format
-  bits and their placement, the zigzag placement of the codewords and the Reed-Solomon
-  remainder follow the library's. No file of the library is committed. The script is a
+  documents' barcode pictures, is written after the library: the terminator and the padding
+  to whole bytes, the Reed-Solomon remainder, the finder patterns with their separators, the
+  setting of function modules, the computation of the format bits and their placement, and
+  the zigzag placement of the codewords follow the library's. No file of the library is committed. The script is a
   development tool that writes `tests/corpus/word-rules/`; it is part of no crate and is
   never published.

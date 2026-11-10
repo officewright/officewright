@@ -6417,9 +6417,11 @@ def ean13_check(digits: str) -> str:
 
 # qr_version1_m is written after the Python version of Project Nayuki's QR Code generator
 # library (python/qrcodegen.py of https://github.com/nayuki/QR-Code-generator at commit
-# 777682a64202fdb837b50e351b25b7ddb27852c4): its computation of the format bits and their
-# placement, the zigzag placement of the codewords and the Reed-Solomon remainder follow
-# that library's. THIRD-PARTY-NOTICES.md lists it. The library's notice:
+# 777682a64202fdb837b50e351b25b7ddb27852c4): the terminator and the padding to whole bytes,
+# the Reed-Solomon remainder, the finder patterns with their separators, the setting of
+# function modules (put), the computation of the format bits and their placement, and the
+# zigzag placement of the codewords follow that library's. THIRD-PARTY-NOTICES.md lists it.
+# The library's notice:
 #
 # Copyright (c) Project Nayuki. (MIT License)
 # https://www.nayuki.io/page/qr-code-generator-library

@@ -3688,12 +3688,15 @@ class Packages(unittest.TestCase):
         self.assertIn("- " * 76, texts)
         self.assertIn("✂ " + "- " * 73, texts)
         self.assertIn("_" * 80, texts)
-        # Each fits on one line of the column in Carlito, the scissors given a generous
-        # 15 pt, as Carlito has no glyph for them.
+        # The document's lines of characters each fit on one line of the column in Carlito,
+        # the scissors given a generous 15 pt, as Carlito has no glyph for them.
         column = rules.TEXT_W / 20
-        self.assertLess(carlito_width("- " * 76), column)
-        self.assertLess(15 + carlito_width(" " + "- " * 73), column)
-        self.assertLess(carlito_width("_" * 80), column)
+        lines = [t for t in texts if t and set(t) <= set("- _\u2702")]
+        self.assertEqual(len(lines), 3)
+        for line in lines:
+            scissors = line.count("\u2702")
+            self.assertLess(15 * scissors + carlito_width(line.replace("\u2702", "")), column,
+                            line)
         leaders = [(t.get(f"{W}val"), t.get(f"{W}pos"), t.get(f"{W}leader"))
                    for t in body.iter(f"{W}tab") if t.get(f"{W}val")]
         self.assertEqual(leaders, [("right", str(rules.TEXT_W), leader)
