@@ -448,6 +448,9 @@ class Doc:
     # Values other than 1 of the compatibility settings Word writes in mode 15
     # (MODE_15_SETTINGS), such as (("enableOpenTypeFeatures", 0),); None leaves one out.
     compat_values: tuple[tuple[str, int | None], ...] = ()
+    # Whether compat_values may name settings in a mode other than 15, where Word does not
+    # write them (#532).
+    settings_in_any_mode: bool = False
     # Header and footer parts, as (part name under word/, root element), such as
     # header_part("header1.xml", ...); sections name them through section(). With
     # even_and_odd_headers, pages of even numbers take the sections' even headers.
@@ -455,7 +458,7 @@ class Doc:
     even_and_odd_headers: bool = False
     # The last section's w:sectPr, when it is not sect_pr()'s.
     last_section: str = ""
-    # Pictures under word/media/, as (file name, PNG bytes); the body names each by the
+    # Pictures under word/media/, as (file name, PNG, EMF or WMF bytes); the body names each by the
     # relationship id media_id() gives it.
     media: tuple[tuple[str, bytes], ...] = ()
     # The contents of the footnotes and the endnotes (note()), each kind numbered from id 1
@@ -2047,6 +2050,11 @@ def grey_png(width_px: int, height_px: int, level: int = 160) -> bytes:
             + chunk(b"IDAT", stored_zlib(rows)) + chunk(b"IEND", b""))
 
 
+# The content type of each kind of picture part, by its extension (ECMA-376 Part 2 gives no
+# list; these are the types Word writes).
+MEDIA_TYPES = {"png": "image/png", "emf": "image/x-emf", "wmf": "image/x-wmf"}
+
+
 def stored_zlib(data: bytes) -> bytes:
     """data as a zlib stream of stored (uncompressed) deflate blocks (RFC 1950 and 1951,
     §3.2.4): unlike zlib.compress, the same bytes whatever zlib the platform has."""
@@ -3582,17 +3590,19 @@ WRAPPING = "text long enough to wrap inside its cell, to show where its lines st
 
 
 def margined_table(
-    tbl_cell_mar: str, cells: list[tuple[str, str]], grid: list[int], style: str = ""
+    tbl_cell_mar: str, cells: list[tuple[str, str]], grid: list[int], style: str = "",
+    look_attrs: str = "",
 ) -> str:
     """A one-row table with fixed layout and single borders, in the table style style (or in
-    none), the table's cell margins tbl_cell_mar (a w:tblCellMar, or ""), and per cell its
-    text and w:tcMar (or "")."""
+    none), the table's cell margins tbl_cell_mar (a w:tblCellMar, or ""), a w:tblLook of the
+    attributes look_attrs when given, and per cell its text and w:tcMar (or "")."""
     sides = ("top", "left", "bottom", "right", "insideH", "insideV")
     tbl_pr = (
         (f'<w:tblStyle w:val="{style}"/>' if style else "")
         + f'<w:tblW w:w="{sum(grid)}" w:type="dxa"/><w:tblInd w:w="0" w:type="dxa"/>'
         "<w:tblBorders>" + "".join(border(s) for s in sides) + "</w:tblBorders>"
         '<w:tblLayout w:type="fixed"/>' + tbl_cell_mar
+        + (f"<w:tblLook {look_attrs}/>" if look_attrs else "")
     )
     tcs = "".join(
         f'<w:tc><w:tcPr><w:tcW w:w="{width}" w:type="dxa"/>{tc_mar}</w:tcPr>'
@@ -6160,6 +6170,692 @@ def wrap_vml_textbox_doc() -> Doc:
     )
 
 
+# Batch 12. The height of a paragraph mark and of the run of a line break larger than the
+# text, in table cells (#537, for #359): out of cells Word gives a line the height of its
+# text alone (E-smallcaps-15), while the letterhead rows of generated/invoice-en-standard
+# and letter-uk are taller than their text. Every run, mark and break is Liberation Sans,
+# the document defaults too, so that only the sizes differ.
+CELL_FONT = "Liberation Sans"
+
+
+def sized(size: float) -> str:
+    """The w:rPr content of Liberation Sans at size pt, for a paragraph mark."""
+    hp = half_points(size)
+    return f'<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>'
+
+
+def nine(value: str) -> str:
+    return run(value, size=9)
+
+
+def mark_cells(case: int) -> list[str]:
+    """Case 01's cells: 9 pt text with the default 11 pt mark, and with a 20 pt mark."""
+    return [para(nine(f"Case {case:02d} cell 1: 9 pt text, 11 pt mark")),
+            para(nine(f"Case {case:02d} cell 2: 9 pt text, 20 pt mark"), mark=sized(20))]
+
+
+def break_cells(case: int) -> list[str]:
+    """Case 02's cells: three lines of 9 pt text broken by w:br in runs of 9, 11 and 20 pt,
+    the mark 9 pt."""
+    cells = []
+    for n, size in enumerate((9, 11, 20), 1):
+        line = f"Case {case:02d} cell {n}"
+        brk = f"<w:r>{rpr(size=size)}<w:br/></w:r>"
+        cells.append(para(
+            nine(f"{line} line 1") + brk + nine(f"{line} line 2, {size} pt break")
+            + brk + nine(f"{line} line 3"), mark=sized(9)))
+    return cells
+
+
+def cell_mark_height(mode: int) -> Doc:
+    thirds = [TEXT_W // 3] * 3
+    halves = [TEXT_W // 2] * 2
+
+    def after(case: int) -> str:
+        return para(run(f"The paragraph after the table of case {case:02d}."))
+
+    two_paragraphs = [
+        para(nine("Case 03 cell 1: first paragraph, 9 pt mark"), mark=sized(9))
+        + para(nine("Case 03 cell 1: last paragraph, 20 pt mark"), mark=sized(20)),
+        para(nine("Case 03 cell 2: first paragraph, 9 pt mark"), mark=sized(9))
+        + para(nine("Case 03 cell 2: last paragraph, 9 pt mark"), mark=sized(9)),
+    ]
+    body = (
+        para(run("Case 01: one row of two cells; 9 pt text, its paragraph mark 11 pt (the "
+                 "document default) and 20 pt"))
+        + table(mark_cells(1), halves) + after(1)
+        + para(run("Case 02: one row of three cells; 9 pt text broken by w:br into three "
+                   "lines, the breaks' runs 9, 11 and 20 pt, the marks 9 pt"))
+        + table(break_cells(2), thirds) + after(2)
+        + para(run("Case 03: one row of two cells, each of two paragraphs of 9 pt text: the "
+                   "last mark 20 pt in the first cell, 9 pt in the second"))
+        + table(two_paragraphs, halves) + after(3)
+        + para(run("Case 04: the paragraphs of cases 01 and 02 in the body, not in a table"))
+        + "".join(mark_cells(4)) + "".join(break_cells(4))
+        + para(run("Case 05: the header holds the tables of cases 01 and 02, as letterheads "
+                   "do; the body starts below the header"))
+        + para(run("End of the document."))
+    )
+    header = (table(mark_cells(5), halves)
+              + para(nine("Between the header's tables"), mark=sized(9))
+              + table(break_cells(5), thirds)
+              + para(nine("After the header's tables"), mark=sized(9)))
+    suffix = "" if mode == 15 else f"-{mode}"
+    return Doc(
+        f"E-cell-mark-height{suffix}",
+        "How tall Word makes the lines and the row of a table cell whose paragraph mark, or the "
+        "run of whose line break, is larger than its 9 pt text: marks of 11 and 20 pt, breaks "
+        "of 9, 11 and 20 pt, a last paragraph's 20 pt mark, the same in the body and in a "
+        f"table of the header; Liberation Sans, compatibility mode {mode}",
+        body,
+        mode=mode,
+        run_default_fonts=" ".join(f'w:{slot}="{CELL_FONT}"'
+                                   for slot in ("ascii", "hAnsi", "eastAsia", "cs")),
+        headers=(header_part("header1.xml", header),),
+        last_section=section(refs=(("headerReference", "default", "header1.xml"),)),
+    )
+
+
+# Inline VML text boxes in a paragraph with space before (#465's comment of 2026-11-09, for
+# #521): E-textbox-vml's case 05 shows Word drawing such a box 6 pt higher than we do, but
+# has no text on the box's line or after it on its page.
+def textbox_vml_inline() -> Doc:
+    box_text = para(run("Box text"))
+    vml_size = "width:216pt;height:90pt"
+    cases = [
+        ("an inline VML text box of 216 x 90 pt, in a paragraph with 0 pt space before", 0,
+         vml_box("t1", vml_size, box_text, first=True)),
+        ("the same inline VML text box, in a paragraph with 12 pt space before", 12,
+         vml_box("t2", vml_size, box_text)),
+        ("an inline VML picture of 72 x 36 pt, in a paragraph with 12 pt space before", 12,
+         vml_picture("image1.png", "p1", "width:72pt;height:36pt", first=True)),
+        ("an inline DrawingML text box of 216 x 90 pt, in a paragraph with 12 pt space "
+         "before (to compare)", 12, inline_box(1, 216, 90, box_text)),
+    ]
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), keep_next=True)
+        + para(run(f"Before the object of case {n:02d} ") + obj
+               + run(f" after the object of case {n:02d}."), space=spacing(before=before))
+        + para(run(f"The paragraph after case {n:02d}."), space=spacing(after=12))
+        for n, (label, before, obj) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-textbox-vml-inline",
+        "Where Word puts an inline VML text box in a paragraph with 0 and 12 pt space before, "
+        "with text before and after it on its line and a paragraph after it, beside an inline "
+        "VML picture and an inline DrawingML text box with 12 pt space before",
+        body + para(run("End of the document.")),
+        media=(("image1.png", grey_png(96, 48)),),
+    )
+
+
+# overrideTableStyleFontSizeAndJustification written off (#532): [MS-DOCX] 2.3.1 says that
+# with the setting off a Normal style of 11 or 12 pt gives way to a table style's size and
+# a justification of left to its justification. Each a document of its own: the table style
+# is 14 pt and centred, the document defaults right-aligned, so Normal's values are its own.
+def table_style_override_off(normal: int, mode: int) -> Doc:
+    big = table_style(
+        "Big", [],
+        whole='<w:pPr><w:jc w:val="center"/></w:pPr>'
+        '<w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr>',
+    )
+    defaults = normal + 1
+    hp = half_points(normal)
+    body = table_case(
+        1, f"a table in the style Big (14 pt, centred); document defaults {defaults} pt and "
+        f"right-aligned, Normal {normal} pt and left-aligned; the setting "
+        f"overrideTableStyleFontSizeAndJustification written 0, compatibility mode {mode}",
+        styled_table("Big", named_cells(2, 2), widths=[TEXT_W // 2] * 2),
+    ) + para(run("Case 02: a paragraph after the table, in Normal"))
+    suffix = f"-{normal}pt" if mode == 15 else f"-{normal}pt-{mode}"
+    return Doc(
+        f"E-table-style-override-off{suffix}",
+        f"Whether a Normal style of {normal} pt, aligned left, overrides the 14 pt and the "
+        "centring of a table style when the setting overrideTableStyleFontSizeAndJustification "
+        f"is written 0, in compatibility mode {mode}; and whether Word keeps the 0",
+        body,
+        styles=big,
+        normal_props=f'<w:pPr><w:jc w:val="left"/></w:pPr>'
+        f'<w:rPr><w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/></w:rPr>',
+        run_default_size=defaults,
+        paragraph_defaults_extra='<w:jc w:val="right"/>',
+        mode=mode,
+        compat_values=(("overrideTableStyleFontSizeAndJustification", 0),),
+        settings_in_any_mode=mode != 15,
+    )
+
+
+# A cell's own margins of type nil, pct and auto over a table style's cell margins (#535):
+# with no margins from a style, such a side takes the table's (E-table-cell-margins); here
+# the table's are 5 pt and its style gives 15 pt, in its whole-table w:tcPr or, in case 05,
+# in its firstCol conditional format.
+def table_cell_margins_style() -> Doc:
+    def margins(width: int, kind: str = "dxa", element: str = "w:tcMar") -> str:
+        return (f"<{element}>" + "".join(cell_margin(s, width, kind) for s in SIDES)
+                + f"</{element}>")
+
+    table_mar = margins(100, element="w:tblCellMar")
+    whole = table_style("Margins15", [], cell=f"<w:tcPr>{margins(300)}</w:tcPr>")
+    first_col = (
+        '<w:style w:type="table" w:customStyle="1" w:styleId="FirstColMargins15">'
+        '<w:name w:val="FirstColMargins15"/><w:basedOn w:val="TableNormal"/><w:tblPr>'
+        "<w:tblBorders>" + "".join(border(s) for s in ("top", "left", "bottom", "right",
+                                                        "insideH", "insideV"))
+        + "</w:tblBorders></w:tblPr>"
+        f'<w:tblStylePr w:type="firstCol"><w:tcPr>{margins(300)}</w:tcPr></w:tblStylePr>'
+        "</w:style>"
+    )
+    kinds = [("nil", 0), ("pct", 500), ("auto", 200)]
+    cells = [(f"own margins of type {kind}: " + WRAPPING, margins(width, kind))
+             for kind, width in kinds] + [("no margins of its own: " + WRAPPING, "")]
+    body = table_case(
+        1, "the table's cell margins 5 pt on every side, its style Margins15 15 pt in its "
+        "whole-table w:tcPr; cells with their own margins of type nil, pct (w:w 500) and "
+        "auto (w:w 200), and one without (cases 01 to 04)",
+        margined_table(table_mar, cells, [TEXT_W // 4] * 4, style="Margins15"),
+    ) + table_case(
+        5, "the table's cell margins 5 pt, its style FirstColMargins15 15 pt in its firstCol "
+        "conditional format, the first column on (w:tblLook); the first cell with its own "
+        "margins of type nil, the second without",
+        margined_table(table_mar, [("own margins of type nil: " + WRAPPING, margins(0, "nil")),
+                                   ("second column, no margins of its own: " + WRAPPING, "")],
+                       [TEXT_W // 2] * 2, style="FirstColMargins15",
+                       look_attrs=look(0, 0, 1, 0, 0, 0)),
+    )
+    return Doc(
+        "E-table-cell-margins-style",
+        "A cell's own margins (w:tcMar) of type nil, pct and auto when the cell's table style "
+        "gives cell margins of 15 pt, in its whole-table w:tcPr or its firstCol conditional "
+        "format, and the table's are 5 pt: where each cell's text starts and ends",
+        body,
+        styles=whole + first_col,
+    )
+
+
+# Barcodes and QR codes in receipts and invoices (batch 12, the advisor's addition of
+# 2026-11-10 under the maintainer's delegation): as PNG pictures, as EMF and WMF pictures
+# drawn from rectangles, and as Word's DISPLAYBARCODE field. The codes are encoded here, so
+# that a scanner reads the reference's pictures: Code 128 code set B (ISO/IEC 15417) and a
+# QR code of version 1, error correction level M, mask 0 (ISO/IEC 18004), its encoder
+# written after Project Nayuki's QR Code generator library (notice at qr_version1_m).
+
+# The bar and space widths of the Code 128 symbols 0 to 105, and of the stop symbol (106,
+# with its final bar), in modules.
+CODE128 = (
+    "212222 222122 222221 121223 121322 131222 122213 122312 132212 221213 221312 231212 "
+    "112232 122132 122231 113222 123122 123221 223211 221132 221231 213212 223112 312131 "
+    "311222 321122 321221 312212 322112 322211 212123 212321 232121 111323 131123 131321 "
+    "112313 132113 132311 211313 231113 231311 112133 112331 132131 113123 113321 133121 "
+    "313121 211331 231131 213113 213311 213131 311123 311321 331121 312113 312311 332111 "
+    "314111 221411 431111 111224 111422 121124 121421 141122 141221 112214 112412 122114 "
+    "122411 142112 142211 241211 221114 413111 241112 134111 111242 121142 121241 114212 "
+    "124112 124211 411212 421112 421211 212141 214121 412121 111143 111341 131141 114113 "
+    "114311 411113 411311 113141 114131 311141 411131 211412 211214 211232 2331112"
+).split()
+CODE128_START_B = 104
+
+
+def code128_modules(value: str) -> list[bool]:
+    """The modules of value in Code 128 code set B, dark ones True, with its start, check
+    and stop symbols and quiet zones of 10 modules."""
+    if not all(32 <= ord(c) < 127 for c in value):
+        raise ValueError(f"{value!r} is not in Code 128 code set B")
+    symbols = [CODE128_START_B] + [ord(c) - 32 for c in value]
+    check = (symbols[0] + sum(n * v for n, v in enumerate(symbols[1:], 1))) % 103
+    modules = [False] * 10
+    for symbol in [*symbols, check, 106]:
+        for n, width in enumerate(CODE128[symbol]):
+            modules += [n % 2 == 0] * int(width)
+    return modules + [False] * 10
+
+
+def ean13_check(digits: str) -> str:
+    """digits (12) with their EAN-13 check digit."""
+    total = sum(int(d) * (3 if n % 2 else 1) for n, d in enumerate(digits))
+    return digits + str((10 - total % 10) % 10)
+
+
+# qr_version1_m is written after the Python version of Project Nayuki's QR Code generator
+# library (python/qrcodegen.py of https://github.com/nayuki/QR-Code-generator at commit
+# 777682a64202fdb837b50e351b25b7ddb27852c4): the terminator and the padding to whole bytes,
+# the Reed-Solomon remainder, the finder patterns with their separators, the setting of
+# function modules (put), the computation of the format bits and their placement, and the
+# zigzag placement of the codewords follow that library's. THIRD-PARTY-NOTICES.md lists it.
+# The library's notice:
+#
+# Copyright (c) Project Nayuki. (MIT License)
+# https://www.nayuki.io/page/qr-code-generator-library
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy of
+# this software and associated documentation files (the "Software"), to deal in
+# the Software without restriction, including without limitation the rights to
+# use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+# the Software, and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+# - The above copyright notice and this permission notice shall be included in
+#   all copies or substantial portions of the Software.
+# - The Software is provided "as is", without warranty of any kind, express or
+#   implied, including but not limited to the warranties of merchantability,
+#   fitness for a particular purpose and noninfringement. In no event shall the
+#   authors or copyright holders be liable for any claim, damages or other
+#   liability, whether in an action of contract, tort or otherwise, arising from,
+#   out of or in connection with the Software or the use or other dealings in the
+#   Software.
+def qr_version1_m(value: str) -> list[list[bool]]:
+    """The 21 x 21 modules of a QR code of version 1, level M, mask 0, holding value in byte
+    mode, without its quiet zone."""
+    data = value.encode("latin-1")
+    if len(data) > 14:
+        raise ValueError(f"{value!r} does not fit a QR code of version 1, level M")
+    bits = "0100" + f"{len(data):08b}" + "".join(f"{b:08b}" for b in data)
+    bits += "0" * min(4, 128 - len(bits))
+    bits += "0" * (-len(bits) % 8)
+    codewords = [int(bits[i:i + 8], 2) for i in range(0, len(bits), 8)]
+    codewords += [0xEC, 0x11] * ((16 - len(codewords)) // 2 + 1)
+    codewords = codewords[:16]
+    # Reed-Solomon over GF(256), polynomial 0x11D: the 10 error correction codewords.
+    exp, log = [0] * 512, [0] * 256
+    x = 1
+    for i in range(255):
+        exp[i], log[x] = x, i
+        x <<= 1
+        if x & 0x100:
+            x ^= 0x11D
+    for i in range(255, 512):
+        exp[i] = exp[i - 255]
+
+    def mul(a: int, b: int) -> int:
+        return 0 if a == 0 or b == 0 else exp[log[a] + log[b]]
+
+    generator = [1]
+    for i in range(10):
+        generator = [a ^ mul(b, exp[i]) for a, b in zip(generator + [0], [0] + generator)]
+    remainder = [0] * 10
+    for c in codewords:
+        factor = c ^ remainder[0]
+        remainder = remainder[1:] + [0]
+        remainder = [r ^ mul(g, factor) for r, g in zip(remainder, generator[1:])]
+    stream = codewords + remainder
+    size = 21
+    dark = [[False] * size for _ in range(size)]
+    function = [[False] * size for _ in range(size)]
+
+    def put(x: int, y: int, value: bool) -> None:
+        dark[y][x], function[y][x] = value, True
+
+    for cx, cy in ((3, 3), (size - 4, 3), (3, size - 4)):
+        for dy in range(-4, 5):
+            for dx in range(-4, 5):
+                x, y = cx + dx, cy + dy
+                if 0 <= x < size and 0 <= y < size:
+                    ring = max(abs(dx), abs(dy))
+                    put(x, y, ring not in (2, 4))
+    for i in range(8, size - 8):
+        put(6, i, i % 2 == 0)
+        put(i, 6, i % 2 == 0)
+    # Format information: level M (00), mask 0, BCH(15, 5) and the mask 0x5412.
+    format_data = 0b00000
+    rem = format_data
+    for _ in range(10):
+        rem = (rem << 1) ^ ((rem >> 9) * 0x537)
+    fmt = ((format_data << 10) | rem) ^ 0x5412
+
+    def bit(i: int) -> bool:
+        return (fmt >> i) & 1 == 1
+
+    for i in range(6):
+        put(8, i, bit(i))
+    put(8, 7, bit(6))
+    put(8, 8, bit(7))
+    put(7, 8, bit(8))
+    for i in range(9, 15):
+        put(14 - i, 8, bit(i))
+    for i in range(8):
+        put(size - 1 - i, 8, bit(i))
+    for i in range(8, 15):
+        put(8, size - 15 + i, bit(i))
+    put(8, size - 8, True)
+    n = 0
+    total = len(stream) * 8
+    right = size - 1
+    while right >= 1:
+        if right == 6:
+            right = 5
+        for vert in range(size):
+            for j in range(2):
+                x = right - j
+                y = size - 1 - vert if ((right + 1) & 2) == 0 else vert
+                if not function[y][x] and n < total:
+                    dark[y][x] = (stream[n >> 3] >> (7 - (n & 7))) & 1 == 1
+                    n += 1
+        right -= 2
+    for y in range(size):
+        for x in range(size):
+            if not function[y][x] and (x + y) % 2 == 0:
+                dark[y][x] = not dark[y][x]
+    return dark
+
+
+def with_quiet_zone(rows: list[list[bool]], width: int) -> list[list[bool]]:
+    blank = [False] * (len(rows[0]) + 2 * width)
+    return ([blank] * width + [[False] * width + r + [False] * width for r in rows]
+            + [blank] * width)
+
+
+def bitmap_png(rows: list[list[bool]], scale: int) -> bytes:
+    """An 8-bit greyscale PNG of rows (dark modules True, black on white), each module
+    scale pixels square, in stored deflate blocks as grey_png's."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+
+    lines = b""
+    for row in rows:
+        line = b"\x00" + b"".join(bytes([0 if d else 255]) * scale for d in row)
+        lines += line * scale
+    header = struct.pack(">IIBBBBB", len(rows[0]) * scale, len(rows) * scale, 8, 0, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+            + chunk(b"IDAT", stored_zlib(lines)) + chunk(b"IEND", b""))
+
+
+def dark_rectangles(rows: list[list[bool]]) -> list[tuple[int, int, int, int]]:
+    """The dark modules of rows as rectangles (left, top, right, bottom) in modules, each
+    run of dark modules of a row one rectangle."""
+    rects = []
+    for y, row in enumerate(rows):
+        x = 0
+        while x < len(row):
+            if row[x]:
+                end = x
+                while end < len(row) and row[end]:
+                    end += 1
+                rects.append((x, y, end, y + 1))
+                x = end
+            else:
+                x += 1
+    return rects
+
+
+def emf_picture(rows: list[list[bool]], module_px: int) -> bytes:
+    """An EMF picture ([MS-EMF]) of rows, black rectangles on no background, each module
+    module_px device pixels square, the device 1200 pixels an inch."""
+    width, height = len(rows[0]) * module_px, len(rows) * module_px
+    records = []
+
+    def record(kind: int, payload: bytes) -> None:
+        records.append(struct.pack("<II", kind, 8 + len(payload)) + payload)
+
+    # EMR_CREATEBRUSHINDIRECT (39) of index 1, solid black; select it and the null pen
+    # (stock object 8 | 0x80000000), so that a rectangle fills its box alone.
+    record(39, struct.pack("<IIII", 1, 0, 0x000000, 0))
+    record(37, struct.pack("<I", 1))
+    record(37, struct.pack("<I", 0x80000008))
+    for left, top, right, bottom in dark_rectangles(rows):
+        # EMR_RECTANGLE (43): without a pen it fills up to, not including, right and
+        # bottom, so they are one past the last pixel.
+        record(43, struct.pack("<iiii", left * module_px, top * module_px,
+                               right * module_px + 1, bottom * module_px + 1))
+    record(14, struct.pack("<III", 0, 16, 20))  # EMR_EOF
+    body = b"".join(records)
+    # 9600 x 7200 pixels on 203 x 152 mm: about 1200 pixels an inch.
+    frame = (0, 0, round(width * 2540 / 1200), round(height * 2540 / 1200))
+    header_size = 88
+    total = header_size + len(body)
+    header = struct.pack(
+        "<II4i4iIIIIHHIII2i2i", 1, header_size, 0, 0, width - 1, height - 1, *frame,
+        0x464D4520, 0x10000, total, len(records) + 1, 2, 0, 0, 0, 0, 9600, 7200, 203, 152,
+    )
+    return header + body
+
+
+def wmf_picture(rows: list[list[bool]], module_twips: int) -> bytes:
+    """A placeable WMF picture ([MS-WMF]) of rows, black rectangles, each module
+    module_twips twips square (1440 to the inch)."""
+    width, height = len(rows[0]) * module_twips, len(rows) * module_twips
+    records = []
+
+    def record(function: int, *words: int) -> None:
+        records.append(struct.pack(f"<IH{len(words)}h", 3 + len(words), function, *words))
+
+    record(0x020B, 0, 0)  # META_SETWINDOWORG y, x
+    record(0x020C, height, width)  # META_SETWINDOWEXT y, x
+    record(0x02FC, 0, 0, 0, 0)  # META_CREATEBRUSHINDIRECT solid, black (two words), hatch
+    record(0x012D, 0)  # META_SELECTOBJECT the brush
+    record(0x02FA, 5, 0, 0, 0, 0)  # META_CREATEPENINDIRECT PS_NULL, width (x, y), black
+    record(0x012D, 1)  # META_SELECTOBJECT the pen
+    for left, top, right, bottom in dark_rectangles(rows):
+        # META_RECTANGLE bottom, right, top, left; one past, as a null pen leaves out.
+        record(0x041B, bottom * module_twips + 1, right * module_twips + 1,
+               top * module_twips, left * module_twips)
+    record(0x0000)  # META_EOF
+    body = b"".join(records)
+    words = (18 + len(body)) // 2
+    largest = max(len(r) for r in records) // 2
+    header = struct.pack("<HHHIHIH", 1, 9, 0x0300, words, 2, largest, 0)
+    placeable = struct.pack("<IHhhhhHI", 0x9AC6CDD7, 0, 0, 0, width, height, 1440, 0)
+    checksum = 0
+    for (word,) in struct.iter_unpack("<H", placeable[:20]):
+        checksum ^= word
+    return placeable + struct.pack("<H", checksum) + header + body
+
+
+BARCODE_TEXT = "OW-2026-0001"
+QR_TEXT = "INV-2026-0001"
+EAN_DIGITS = ean13_check("590123412345")
+
+
+def barcode_rows() -> list[list[bool]]:
+    """The Code 128 barcode of BARCODE_TEXT, 40 modules tall."""
+    return [code128_modules(BARCODE_TEXT)] * 40
+
+
+def qr_rows() -> list[list[bool]]:
+    """The QR code of QR_TEXT with its quiet zone of 4 modules."""
+    return with_quiet_zone(qr_version1_m(QR_TEXT), 4)
+
+
+def barcode_pictures() -> Doc:
+    bars, qr = barcode_rows(), qr_rows()
+    bar_w, bar_h = len(bars[0]) * 1.5, len(bars) * 1.5  # 1.5 pt a module
+    qr_side = len(qr) * 3.0  # 3 pt a module
+    media = (
+        ("image1.png", bitmap_png(bars, 2)),
+        ("image2.png", bitmap_png(qr, 4)),
+        ("image3.emf", emf_picture(bars, 20)),
+        ("image4.emf", emf_picture(qr, 20)),
+        ("image5.wmf", wmf_picture(bars, 30)),
+        ("image6.wmf", wmf_picture(qr, 60)),
+    )
+
+    def picture(n: int, name: str, width: float, height: float) -> str:
+        return picture_run(inline_drawing(n, width, height, drawing_picture(name, width, height)))
+
+    cases = [
+        (f"a Code 128 barcode of {BARCODE_TEXT}, a PNG picture, inline",
+         picture(1, "image1.png", bar_w, bar_h)),
+        (f"a QR code of {QR_TEXT}, a PNG picture, inline", picture(2, "image2.png", qr_side,
+                                                                   qr_side)),
+        ("the same Code 128 barcode, an EMF picture of black rectangles, inline",
+         picture(3, "image3.emf", bar_w, bar_h)),
+        ("the same QR code, an EMF picture of black rectangles, inline",
+         picture(4, "image4.emf", qr_side, qr_side)),
+        ("the same Code 128 barcode, a WMF picture of black rectangles, inline",
+         picture(5, "image5.wmf", bar_w, bar_h)),
+        ("the same QR code, a WMF picture of black rectangles, inline",
+         picture(6, "image6.wmf", qr_side, qr_side)),
+        ("the Code 128 barcode as a PNG picture in a VML w:pict, inline",
+         vml_picture("image1.png", "b1", f"width:{bar_w:g}pt;height:{bar_h:g}pt",
+                     first=True)),
+    ]
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), keep_next=True, space=spacing(before=12))
+        + para(run("Total due: 125.00 ") + obj + run(" Thank you."))
+        for n, (label, obj) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-barcode-pictures",
+        f"Where and how Word draws a Code 128 barcode ({BARCODE_TEXT}) and a QR code "
+        f"({QR_TEXT}) inline in a line of text, as PNG, EMF and WMF pictures (DrawingML) and "
+        "as a PNG in VML, as receipts and invoices hold them",
+        body + para(run("End of the document.")),
+        media=media,
+    )
+
+
+def barcode_fields() -> Doc:
+    def field(code: str) -> str:
+        # The field's code and an empty result, as a document written by another
+        # application holds it: whether Word draws the code from it.
+        return ('<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+                f"<w:r><w:instrText xml:space=\"preserve\"> {escape(code)} </w:instrText></w:r>"
+                '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+                '<w:r><w:fldChar w:fldCharType="end"/></w:r>')
+
+    cases = [
+        (f'DISPLAYBARCODE "{QR_TEXT}" QR \\q 1 (error correction level M)',
+         f'DISPLAYBARCODE "{QR_TEXT}" QR \\q 1'),
+        (f'DISPLAYBARCODE "{BARCODE_TEXT}" CODE128 \\t (with its text)',
+         f'DISPLAYBARCODE "{BARCODE_TEXT}" CODE128 \\t'),
+        (f'DISPLAYBARCODE "{EAN_DIGITS}" EAN13 \\t (with its text)',
+         f'DISPLAYBARCODE "{EAN_DIGITS}" EAN13 \\t'),
+        (f'DISPLAYBARCODE "{BARCODE_TEXT}" CODE128 \\h 720 (half an inch tall)',
+         f'DISPLAYBARCODE "{BARCODE_TEXT}" CODE128 \\h 720'),
+    ]
+    body = "".join(
+        para(run(f"Case {n:02d}: the field {label}, its result empty"), keep_next=True,
+             space=spacing(before=12))
+        + para(run("Total due: 125.00 ") + field(code) + run(" Thank you."))
+        for n, (label, code) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-barcode-field",
+        "What Word draws for its DISPLAYBARCODE field with an empty result: a QR code, a Code "
+        "128 barcode and an EAN-13 barcode with their text, and a Code 128 barcode half an "
+        "inch tall, each in a line of text",
+        body + para(run("End of the document.")),
+    )
+
+
+# Cut lines between the parts of a receipt or an invoice (batch 12, the advisor's addition of
+# 2026-11-10 under the maintainer's delegation), in every way Word users draw them. Each
+# case's line lies between a paragraph of the part above and one of the part below.
+def cut_line_case(n: int, label: str, line: str) -> str:
+    return (para(run(f"Case {n:02d}: {label}"), keep_next=True, space=spacing(before=12))
+            + para(run(f"Part A of case {n:02d}, above the line."), keep_next=True)
+            + line + para(run(f"Part B of case {n:02d}, below the line.")))
+
+
+def bottom_border(style: str, size: int, space: int = 1, color: str = "000000",
+                  side: str = "bottom") -> str:
+    return (f'<w:pBdr><w:{side} w:val="{style}" w:sz="{size}" w:space="{space}" '
+            f'w:color="{color}"/></w:pBdr>')
+
+
+def cut_lines_text() -> Doc:
+    width = TEXT_W
+    cases = [
+        (f"a bottom border {style} of {size / 8:g} pt on a paragraph of its own",
+         para(run(f"Cut line {style}"), borders=bottom_border(style, size)))
+        for style, size in (("single", 4), ("thick", 12), ("double", 4), ("dashed", 4),
+                            ("dotted", 4), ("dashSmallGap", 4))
+    ] + [
+        ("a top border single of 0.5 pt on the paragraph below the line",
+         para(run("Cut line on top"), borders=bottom_border("single", 4, side="top"))),
+        ("an empty paragraph with the bottom border Word's AutoFormat gives a line typed as "
+         "--- (single, 0.75 pt, 1 pt from the text, automatic colour)",
+         para(borders=bottom_border("single", 6, color="auto"))),
+        ("an empty paragraph with the bottom border Word's AutoFormat gives a line typed as "
+         "=== (double, 0.75 pt, 1 pt from the text, automatic colour)",
+         para(borders=bottom_border("double", 6, color="auto"))),
+        ("a line of hyphens and spaces typed across the column",
+         para(run("- " * 76))),
+        ("a pair of scissors (U+2702) and a line of hyphens and spaces across the column",
+         para(run("✂ " + "- " * 73))),
+        ("a line of underscores typed across the column", para(run("_" * 80))),
+    ] + [
+        (f"a right tab at the right margin with the leader {leader}, after the words Cut here",
+         para(run("Cut here") + tab(), tabs=[("right", width, leader)]))
+        for leader in ("hyphen", "dot", "underscore")
+    ]
+    return Doc(
+        "E-cut-lines-text",
+        "How Word draws cut lines between the parts of a receipt made of text: bottom borders "
+        "single, thick, double, dashed, dotted and dashSmallGap, a top border, the borders "
+        "AutoFormat gives --- and ===, lines of hyphens, of scissors and hyphens and of "
+        "underscores, and right tabs with hyphen, dot and underscore leaders",
+        "".join(cut_line_case(n, label, line) for n, (label, line) in enumerate(cases, 1))
+        + para(run("End of the document.")),
+    )
+
+
+# The horizontal line Word inserts from Borders, Horizontal Line: a VML rectangle that is a
+# rule (o:hr), as Word writes it.
+def vml_rule(shape_id: str, style: str, extra: str = "") -> str:
+    return (f'<w:r><w:pict><v:rect id="{shape_id}" style="{style}"{extra} o:hralign="center" '
+            'o:hrstd="t" o:hr="t" fillcolor="#a0a0a0" stroked="f"/></w:pict></w:r>')
+
+
+def drawing_line(width: float, dashed: bool) -> str:
+    """The graphic of a straight line (wps:wsp of preset geometry line, a connector as Word
+    writes a drawn line) width pt long, black, 1 pt wide, solid or dashed."""
+    dash = '<a:prstDash val="dash"/>' if dashed else ""
+    return graphic(
+        WPS_NS,
+        "<wps:wsp><wps:cNvCnPr/><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/>"
+        f'<a:ext cx="{emu(width)}" cy="0"/></a:xfrm><a:prstGeom prst="line"><a:avLst/>'
+        f'</a:prstGeom><a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill>'
+        f"{dash}</a:ln></wps:spPr><wps:bodyPr/></wps:wsp>",
+    )
+
+
+def vml_line(shape_id: str, dashed: bool, floating: bool) -> str:
+    style = (' style="position:absolute;z-index:1;mso-position-horizontal-relative:margin;'
+             'mso-position-vertical-relative:paragraph"' if floating else "")
+    dash = '<v:stroke dashstyle="dash"/>' if dashed else ""
+    wrap = '<w10:wrap type="none"/>' if floating else ""
+    return (f'<w:r><w:pict><v:line id="{shape_id}"{style} from="0,6pt" to="432pt,6pt" '
+            f'strokeweight="1pt">{dash}{wrap}</v:line></w:pict></w:r>')
+
+
+def cut_lines_shapes() -> Doc:
+    def inline_line(n: int, dashed: bool) -> str:
+        return shape_run(inline_drawing(n, 432, 0, drawing_line(432, dashed)))
+
+    def floating_line(n: int, dashed: bool) -> str:
+        return shape_run(anchored_drawing(n, 432, 0, drawing_line(432, dashed),
+                                          across=("margin", 0), down=("paragraph", 6)))
+
+    cases = [
+        ("the horizontal line Word inserts from Borders, Horizontal Line: a VML rectangle with "
+         "o:hr, the column's width, 1.5 pt tall, grey",
+         para(vml_rule("_x0000_i1025", "width:0;height:1.5pt"))),
+        ("the same horizontal line at half the column's width (o:hrpct 500), centred",
+         para(vml_rule("_x0000_i1026", "width:225.65pt;height:1.5pt", ' o:hrpct="500"'))),
+        ("an inline DrawingML line of 432 pt, 1 pt, solid", para(inline_line(1, False))),
+        ("an inline DrawingML line of 432 pt, 1 pt, dashed", para(inline_line(2, True))),
+        ("a floating DrawingML line of 432 pt, 1 pt, solid, 6 pt below the paragraph's top, "
+         "not wrapped, in an empty paragraph", para(floating_line(3, False))),
+        ("a floating DrawingML line of 432 pt, 1 pt, dashed, 6 pt below the paragraph's top, "
+         "not wrapped, in an empty paragraph", para(floating_line(4, True))),
+        ("an inline VML line (v:line) of 432 pt, 1 pt, solid",
+         para(vml_line("l1", False, False))),
+        ("an inline VML line of 432 pt, 1 pt, dashed", para(vml_line("l2", True, False))),
+        ("a floating VML line of 432 pt, 1 pt, solid, 6 pt below the paragraph's top, not "
+         "wrapped, in an empty paragraph", para(vml_line("l3", False, True))),
+        ("a floating VML line of 432 pt, 1 pt, dashed, 6 pt below the paragraph's top, not "
+         "wrapped, in an empty paragraph", para(vml_line("l4", True, True))),
+    ]
+    return Doc(
+        "E-cut-lines-shapes",
+        "How Word draws cut lines between the parts of a receipt made of shapes: the "
+        "horizontal line it inserts from Borders (VML o:hr) at full and half width, DrawingML "
+        "lines inline and floating, solid and dashed, and VML lines (v:line) inline and "
+        "floating, solid and dashed",
+        "".join(cut_line_case(n, label, line) for n, (label, line) in enumerate(cases, 1))
+        + para(run("End of the document.")),
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -6338,6 +7034,17 @@ def documents() -> list[Doc]:
         wrap_textbox_doc(),
         wrap_vml_doc(),
         wrap_vml_textbox_doc(),
+        cell_mark_height(15),
+        cell_mark_height(14),
+        textbox_vml_inline(),
+        table_style_override_off(11, 15),
+        table_style_override_off(12, 15),
+        table_style_override_off(11, 14),
+        table_cell_margins_style(),
+        barcode_pictures(),
+        barcode_fields(),
+        cut_lines_text(),
+        cut_lines_shapes(),
     ]
 
 
@@ -6494,13 +7201,14 @@ def settings_xml(doc: Doc) -> str:
         settings = compat_setting("compatibilityMode", doc.mode)
     values = dict(doc.compat_values)
     for name in values:
-        if name not in MODE_15_SETTINGS or doc.mode != 15:
+        if name not in MODE_15_SETTINGS or (doc.mode != 15 and not doc.settings_in_any_mode):
             raise ValueError(f"{doc.name}: {name} is not a setting Word writes in this mode")
-    if doc.mode == 15:
-        for name in MODE_15_SETTINGS:
-            value = values.get(name, 1)
-            if value is not None:
-                settings += compat_setting(name, value)
+    for name in MODE_15_SETTINGS:
+        # Mode 15 writes each setting as Word does unless a value is given; a document that
+        # writes settings in another mode, as another application might, only those given.
+        value = values.get(name, 1) if doc.mode == 15 else values.get(name)
+        if value is not None:
+            settings += compat_setting(name, value)
     return (
         f'<w:settings xmlns:w="{W_NS}">'
         '<w:zoom w:percent="100"/>'
@@ -6615,7 +7323,8 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
         'relationships+xml"/>'
         '<Default Extension="xml" ContentType="application/xml"/>'
-        + ('<Default Extension="png" ContentType="image/png"/>' if doc.media else "")
+        + "".join(f'<Default Extension="{ext}" ContentType="{MEDIA_TYPES[ext]}"/>'
+                  for ext in dict.fromkeys(name.rsplit(".", 1)[1] for name, _ in doc.media))
         + "".join(f'<Override PartName="{p}" ContentType="{t}"/>' for p, t in overrides)
         + "</Types>"
     )

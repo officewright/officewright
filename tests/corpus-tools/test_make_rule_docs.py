@@ -46,10 +46,11 @@ def note_parts(parts):
     return [name for name, _ in parts if name in ("word/footnotes.xml", "word/endnotes.xml")]
 
 
-def carlito_width(text, size=11):
-    """The width in points of text in Carlito, Calibri's metric twin, at size points: the
-    advances of hmtx for the glyphs that its (3, 1) cmap, of format 4, maps the text to."""
-    data = CARLITO.read_bytes()
+def carlito_width(text, size=11, font=CARLITO):
+    """The width in points of text in Carlito, Calibri's metric twin, or in the TrueType
+    font, at size points: the advances of hmtx for the glyphs that its (3, 1) cmap, of
+    format 4, maps the text to."""
+    data = font.read_bytes()
     (count,) = struct.unpack(">H", data[4:6])
     tables = {}
     for i in range(count):
@@ -386,7 +387,11 @@ class Packages(unittest.TestCase):
                 for s in compat.iter(f"{W}compatSetting")
                 if s.get(f"{W}name") != "compatibilityMode"
             }
-            self.assertEqual(bool(others), modes == [15], doc.name)
+            # E-table-style-override-off-11pt-14 writes one in mode 14, as another application
+            # might (#532).
+            self.assertEqual(bool(others),
+                             modes == [15] or doc.name == "E-table-style-override-off-11pt-14",
+                             doc.name)
             flags = {
                 child.tag.replace(W, "") for child in compat if child.tag != f"{W}compatSetting"
             }
@@ -415,6 +420,9 @@ class Packages(unittest.TestCase):
                 "E-table-style-header-rows-3-on": ("differentiateMultirowTableHeaders", ["1"]),
                 "E-table-style-header-rows-3-off": ("differentiateMultirowTableHeaders", ["0"]),
             }
+            for name in ("E-table-style-override-off-11pt", "E-table-style-override-off-12pt",
+                         "E-table-style-override-off-11pt-14"):
+                named[name] = ("overrideTableStyleFontSizeAndJustification", ["0"])
             for size in (11, 12, 13):
                 named[f"E-table-style-size-{size}pt"] = (
                     "overrideTableStyleFontSizeAndJustification", ["1"])
@@ -3352,6 +3360,371 @@ class Packages(unittest.TestCase):
         shape = self.wrap_cases("E-wrap-vml-textbox")[1][1].find(f".//{v}shape")
         self.assertEqual([child.tag for child in shape], [f"{v}textbox", f"{w10}wrap"])
 
+    def doc_parts(self, name: str) -> dict[str, bytes]:
+        return dict(rules.parts(next(doc for doc in self.docs if doc.name == name)))
+
+    def test_cell_mark_height_sizes_are_the_ones_its_labels_name(self):
+        for name, mode in (("E-cell-mark-height", "15"), ("E-cell-mark-height-14", "14")):
+            with self.subTest(name=name):
+                parts = self.doc_parts(name)
+                settings = ElementTree.fromstring(parts["word/settings.xml"])
+                self.assertEqual([s.get(f"{W}val") for s in settings.iter(f"{W}compatSetting")
+                                  if s.get(f"{W}name") == "compatibilityMode"], [mode])
+                # Every font the document names is Liberation Sans, the defaults' too.
+                fonts = {v for part in parts.values() if part.startswith(b"<")
+                         for element in re.findall(rb"<w:rFonts [^>]*>", part)
+                         for v in re.findall(rb'w:(?:ascii|hAnsi|eastAsia|cs)="([^"]*)"',
+                                             element)}
+                self.assertEqual(fonts, {b"Liberation Sans"})
+                body = ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+                tables = body.findall(f"{W}tbl")
+                self.assertEqual(len(tables), 3)
+
+                def marks(tbl):
+                    found = []
+                    for p in tbl.iter(f"{W}p"):
+                        size = p.find(f"{W}pPr/{W}rPr/{W}sz")
+                        found.append(None if size is None else size.get(f"{W}val"))
+                    return found
+
+                def breaks(tbl):
+                    return [r.find(f"{W}rPr/{W}sz").get(f"{W}val") for r in tbl.iter(f"{W}r")
+                            if r.find(f"{W}br") is not None]
+
+                self.assertEqual(marks(tables[0]), [None, "40"])
+                self.assertEqual(breaks(tables[1]), ["18", "18", "22", "22", "40", "40"])
+                self.assertEqual(marks(tables[1]), ["18"] * 3)
+                self.assertEqual(marks(tables[2]), ["18", "40", "18", "18"])
+                text_sizes = {r.find(f"{W}rPr/{W}sz").get(f"{W}val")
+                              for r in body.iter(f"{W}r") if re.match(
+                                  r"Case \d\d cell", "".join(t.text or "" for t in r.iter(
+                                      f"{W}t")))}
+                self.assertEqual(text_sizes, {"18"})
+                header = ElementTree.fromstring(parts["word/header1.xml"])
+                self.assertEqual(len(header.findall(f"{W}tbl")), 2)
+                # Each line between the breaks fits its cell (a third of the column, less
+                # the cell margins of 5.4 pt), so a cell has the three lines its label says.
+                liberation = CARLITO.parents[1] / "liberation" / "LiberationSans-Regular.ttf"
+                room = (rules.TEXT_W // 3 - 2 * 108) / 20
+                for cell in tables[1].iter(f"{W}tc"):
+                    lines, line = [], ""
+                    for r in cell.iter(f"{W}r"):
+                        if r.find(f"{W}br") is not None:
+                            lines.append(line)
+                            line = ""
+                        line += "".join(t.text or "" for t in r.iter(f"{W}t"))
+                    lines.append(line)
+                    self.assertEqual(len(lines), 3)
+                    for text in lines:
+                        self.assertLess(carlito_width(text, 9, liberation), room, text)
+
+    def test_inline_vml_text_box_cases_have_their_space_before(self):
+        v = "{urn:schemas-microsoft-com:vml}"
+        wp = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+        body = ElementTree.fromstring(self.doc_parts("E-textbox-vml-inline")[
+            "word/document.xml"]).find(f"{W}body")
+        holders = [p for p in body.findall(f"{W}p")
+                   if "".join(t.text or "" for t in p.iter(f"{W}t")).startswith("Before the")]
+        before = [p.find(f"{W}pPr/{W}spacing").get(f"{W}before") for p in holders]
+        self.assertEqual(before, ["0", "240", "240", "240"])
+        kinds = []
+        for p in holders:
+            shape = p.find(f".//{v}shape")
+            if shape is not None:
+                self.assertNotIn("position", shape.get("style"))
+                kinds.append("box" if shape.find(f"{v}textbox") is not None else "picture")
+            else:
+                self.assertIsNotNone(p.find(f".//{wp}inline"))
+                kinds.append("drawingml box")
+        self.assertEqual(kinds, ["box", "box", "picture", "drawingml box"])
+
+    def test_override_off_documents_write_the_setting_0(self):
+        cases = {"E-table-style-override-off-11pt": ("15", "22", "24"),
+                 "E-table-style-override-off-12pt": ("15", "24", "26"),
+                 "E-table-style-override-off-11pt-14": ("14", "22", "24")}
+        for name, (mode, normal, defaults) in cases.items():
+            with self.subTest(name=name):
+                parts = self.doc_parts(name)
+                settings = {s.get(f"{W}name"): s.get(f"{W}val") for s in ElementTree.fromstring(
+                    parts["word/settings.xml"]).iter(f"{W}compatSetting")}
+                self.assertEqual(settings["compatibilityMode"], mode)
+                self.assertEqual(settings["overrideTableStyleFontSizeAndJustification"], "0")
+                if mode == "14":
+                    self.assertEqual(set(settings), {"compatibilityMode",
+                                                     "overrideTableStyleFontSizeAndJustification"})
+                styles = ElementTree.fromstring(parts["word/styles.xml"])
+                normal_style = next(s for s in styles.iter(f"{W}style")
+                                    if s.get(f"{W}styleId") == "Normal")
+                self.assertEqual(normal_style.find(f"{W}rPr/{W}sz").get(f"{W}val"), normal)
+                self.assertEqual(normal_style.find(f"{W}pPr/{W}jc").get(f"{W}val"), "left")
+                doc_defaults = styles.find(f"{W}docDefaults")
+                self.assertEqual(doc_defaults.find(f".//{W}rPrDefault//{W}sz").get(f"{W}val"),
+                                 defaults)
+                self.assertEqual(doc_defaults.find(f".//{W}pPrDefault//{W}jc").get(f"{W}val"),
+                                 "right")
+                big = next(s for s in styles.iter(f"{W}style") if s.get(f"{W}styleId") == "Big")
+                self.assertEqual(big.find(f"{W}rPr/{W}sz").get(f"{W}val"), "28")
+                self.assertEqual(big.find(f"{W}pPr/{W}jc").get(f"{W}val"), "center")
+
+    def test_cell_margins_style_cases_have_the_margins_their_labels_name(self):
+        parts = self.doc_parts("E-table-cell-margins-style")
+        styles = {s.get(f"{W}styleId"): s for s in
+                  ElementTree.fromstring(parts["word/styles.xml"]).iter(f"{W}style")}
+
+        def sides(mar):
+            return [(c.tag[len(W):], c.get(f"{W}w"), c.get(f"{W}type")) for c in mar]
+
+        whole = styles["Margins15"].find(f"{W}tcPr/{W}tcMar")
+        self.assertEqual(sides(whole), [(s, "300", "dxa") for s in rules.SIDES])
+        first = styles["FirstColMargins15"]
+        self.assertIsNone(first.find(f"{W}tcPr"))
+        conditional = first.find(f"{W}tblStylePr")
+        self.assertEqual(conditional.get(f"{W}type"), "firstCol")
+        self.assertEqual(sides(conditional.find(f"{W}tcPr/{W}tcMar")),
+                         [(s, "300", "dxa") for s in rules.SIDES])
+        body = ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+        tables = body.findall(f"{W}tbl")
+        self.assertEqual([t.find(f"{W}tblPr/{W}tblStyle").get(f"{W}val") for t in tables],
+                         ["Margins15", "FirstColMargins15"])
+        for tbl in tables:
+            self.assertEqual(sides(tbl.find(f"{W}tblPr/{W}tblCellMar")),
+                             [(s, "100", "dxa") for s in rules.SIDES])
+        own = [[(c.get(f"{W}w"), c.get(f"{W}type")) for c in mar] if mar is not None else None
+               for mar in (tc.find(f"{W}tcPr/{W}tcMar") for tc in tables[0].iter(f"{W}tc"))]
+        self.assertEqual(own, [[("0", "nil")] * 4, [("500", "pct")] * 4, [("200", "auto")] * 4,
+                               None])
+        look = tables[1].find(f"{W}tblPr/{W}tblLook")
+        self.assertEqual(look.get(f"{W}firstColumn"), "1")
+        self.assertEqual(look.get(f"{W}firstRow"), "0")
+        first_cell = next(tables[1].iter(f"{W}tc"))
+        self.assertEqual([c.get(f"{W}type") for c in first_cell.find(f"{W}tcPr/{W}tcMar")],
+                         ["nil"] * 4)
+
+    def test_code_128_and_ean_13_encode_their_text(self):
+        # Each symbol is 3 bars and 3 spaces over 11 modules (the stop symbol 4 bars over
+        # 13), and no two are alike.
+        self.assertEqual(len(rules.CODE128), 107)
+        self.assertEqual(len(set(rules.CODE128)), 107)
+        self.assertTrue(all(len(w) == 6 and sum(map(int, w)) == 11 for w in rules.CODE128[:106]))
+        self.assertEqual((len(rules.CODE128[106]), sum(map(int, rules.CODE128[106]))), (7, 13))
+        # Reading the modules back gives the start symbol of code set B, the text, and the
+        # check symbol.
+        modules = rules.code128_modules("Ab-12")
+        self.assertEqual(modules[:10] + modules[-10:], [False] * 20)
+        widths = [len(m.group()) for m in re.finditer(r"1+|0+", "".join(
+            "1" if d else "0" for d in modules[10:-10]))]
+        joined = "".join(map(str, widths))
+        symbols = [rules.CODE128.index(joined[i:i + 6]) for i in range(0, len(joined) - 7, 6)]
+        self.assertEqual(joined[-7:], rules.CODE128[106])
+        start, *text, check = symbols
+        self.assertEqual(start, 104)
+        self.assertEqual("".join(chr(v + 32) for v in text), "Ab-12")
+        self.assertEqual(check, (104 + sum(n * v for n, v in enumerate(text, 1))) % 103)
+        # Known values: Code 128's symbol 0 (space), 33 (A) and the stop; an EAN-13 check
+        # digit of the GS1 example.
+        self.assertEqual(rules.CODE128[0], "212222")
+        self.assertEqual(rules.CODE128[33], "111323")
+        # The barcode of the documents, module by module, as zxing-cpp 2.3 decodes the PNG
+        # picture drawn from it back to OW-2026-0001 (checked once, not a dependency).
+        self.assertEqual("".join("1" if d else "0" for d in rules.code128_modules("OW-2026-0001")),
+                         "0000000000110100100001000111011011101000110100110111001100111001010011"
+                         "1011001100111001011001110100100110111001001110110010011101100100111011"
+                         "00100111001101110111101011000111010110000000000")
+        self.assertEqual(rules.ean13_check("590123412345"), "5901234123457")
+        with self.assertRaises(ValueError):
+            rules.code128_modules("é")
+
+    def test_the_qr_code_is_the_one_an_independent_encoder_gives(self):
+        # INV-2026-0001 in byte mode, version 1, level M, mask 0, as the qrcode package of
+        # PyPI (8.x) draws it with those settings.
+        expected = [
+            "#######..##.#.#######",
+            "#.....#.####..#.....#",
+            "#.###.#...#...#.###.#",
+            "#.###.#....##.#.###.#",
+            "#.###.#.#.#.#.#.###.#",
+            "#.....#..##.#.#.....#",
+            "#######.#.#.#.#######",
+            "...........##........",
+            "#.#.#.#..#.#....#..#.",
+            "##.....#..##....#.##.",
+            ".##.#.##....#...#..##",
+            "#.##.........#.##....",
+            "##.#####..#.#...###..",
+            "........#.#.#.#.#..#.",
+            "#######..##.###.#..##",
+            "#.....#..#.#.#.#.#...",
+            "#.###.#.###.##..#..#.",
+            "#.###.#..#..##..#.##.",
+            "#.###.#.##..#.#.###.#",
+            "#.....#..#.#.#.###.#.",
+            "#######.#.#.##..##.##",
+        ]
+        self.assertEqual(["".join("#" if d else "." for d in row)
+                          for row in rules.qr_version1_m("INV-2026-0001")], expected)
+        with self.assertRaises(ValueError):
+            rules.qr_version1_m("fifteen bytes!!")
+
+    def test_barcode_pictures_are_pngs_emfs_and_wmfs_of_the_codes(self):
+        parts = self.doc_parts("E-barcode-pictures")
+        bars, qr = rules.barcode_rows(), rules.qr_rows()
+        # The codes the pictures draw: the barcode of 167 modules and its quiet zones of 10,
+        # 40 modules tall; the QR code of 21 modules and its quiet zone of 4.
+        self.assertEqual((len(bars[0]), len(bars)), (187, 40))
+        self.assertEqual(bars[0], rules.code128_modules("OW-2026-0001"))
+        self.assertEqual(qr[4:-4], [[False] * 4 + row + [False] * 4
+                                    for row in rules.qr_version1_m("INV-2026-0001")])
+        self.assertEqual(qr[:4] + qr[-4:], [[False] * 29] * 8)
+        # Every pixel of the PNG pictures is its module's: black or white.
+        for name, rows, size in (("image1.png", bars, (374, 80)), ("image2.png", qr, (116, 116))):
+            data = parts[f"word/media/{name}"]
+            width, height = struct.unpack(">II", data[16:24])
+            self.assertEqual((width, height), size, name)
+            scale = width // len(rows[0])
+            pixels = zlib.decompress(data[data.index(b"IDAT") + 4:data.index(b"IEND") - 8])
+            grid = [pixels[y * (width + 1) + 1:(y + 1) * (width + 1)] for y in range(height)]
+            self.assertEqual(grid, [bytes(0 if d else 255 for d in row for _ in range(scale))
+                                    for row in rows for _ in range(scale)], name)
+
+        def painted(width: int, height: int, rects, unit: int) -> list[list[bool]]:
+            """The modules a picture covers, from its filled rectangles in its units."""
+            grid = [[False] * width for _ in range(height)]
+            for left, top, right, bottom in rects:
+                for y in range(top // unit, -(-(bottom - 1) // unit)):
+                    for x in range(left // unit, -(-(right - 1) // unit)):
+                        grid[y][x] = True
+            return grid
+
+        for name, rows, unit in (("image3.emf", bars, 20), ("image4.emf", qr, 20)):
+            data = parts[f"word/media/{name}"]
+            self.assertEqual((struct.unpack("<II", data[:8]), data[40:44]), ((1, 88), b" EMF"))
+            self.assertEqual(struct.unpack("<I", data[48:52])[0], len(data))
+            self.assertEqual(struct.unpack("<4i", data[8:24]),
+                             (0, 0, len(rows[0]) * unit - 1, len(rows) * unit - 1))
+            offset, records, brushes, selected, rects = 88, 1, {}, [], []
+            while offset < len(data):
+                kind, size = struct.unpack("<II", data[offset:offset + 8])
+                payload = data[offset + 8:offset + size]
+                if kind == 39:  # EMR_CREATEBRUSHINDIRECT: index, style, colour
+                    index, style, colour, _ = struct.unpack("<IIII", payload)
+                    brushes[index] = (style, colour)
+                elif kind == 37:  # EMR_SELECTOBJECT
+                    selected.append(struct.unpack("<I", payload)[0])
+                elif kind == 43:  # EMR_RECTANGLE, one past its last pixel without a pen
+                    self.assertEqual(selected, [1, 0x80000008], name)
+                    left, top, right, bottom = struct.unpack("<4i", payload)
+                    rects.append((left, top, right - 1, bottom - 1))
+                    self.assertTrue(all(v % unit == 0 for v in rects[-1]), name)
+                offset, records = offset + size, records + 1
+            self.assertEqual(brushes, {1: (0, 0x000000)}, name)  # solid, black
+            self.assertEqual(struct.unpack("<I", data[52:56])[0], records)
+            self.assertEqual(painted(len(rows[0]), len(rows), rects, unit), rows, name)
+        for name, rows, unit in (("image5.wmf", bars, 30), ("image6.wmf", qr, 60)):
+            data = parts[f"word/media/{name}"]
+            self.assertEqual(struct.unpack("<I", data[:4])[0], 0x9AC6CDD7)
+            checksum = 0
+            for (word,) in struct.iter_unpack("<H", data[:20]):
+                checksum ^= word
+            self.assertEqual(struct.unpack("<H", data[20:22])[0], checksum)
+            self.assertEqual(struct.unpack("<hhhhH", data[6:16]),
+                             (0, 0, len(rows[0]) * unit, len(rows) * unit, 1440))
+            self.assertEqual(struct.unpack("<I", data[28:32])[0] * 2, len(data) - 22)
+            offset, objects, selected, rects = 40, [], [], []
+            while offset < len(data):
+                size, function = struct.unpack("<IH", data[offset:offset + 6])
+                words = struct.unpack(f"<{size - 3}h", data[offset + 6:offset + size * 2])
+                if function == 0x02FC:  # META_CREATEBRUSHINDIRECT: style, colour, hatch
+                    objects.append(("brush", words[0], words[1] | words[2] << 16))
+                elif function == 0x02FA:  # META_CREATEPENINDIRECT: style ...
+                    objects.append(("pen", words[0]))
+                elif function == 0x012D:  # META_SELECTOBJECT
+                    selected.append(objects[words[0]])
+                elif function == 0x041B:  # META_RECTANGLE: bottom, right, top, left
+                    bottom, right, top, left = words
+                    rects.append((left, top, right - 1, bottom - 1))
+                    self.assertTrue(all(v % unit == 0 for v in rects[-1]), name)
+                elif function == 0x020C:  # META_SETWINDOWEXT: height, width
+                    self.assertEqual(words, (len(rows) * unit, len(rows[0]) * unit))
+                offset += size * 2
+            self.assertEqual(selected, [("brush", 0, 0x000000), ("pen", 5)], name)  # PS_NULL
+            self.assertEqual(painted(len(rows[0]), len(rows), rects, unit), rows, name)
+        content_types = parts["[Content_Types].xml"]
+        for ext, kind in (("png", "image/png"), ("emf", "image/x-emf"), ("wmf", "image/x-wmf")):
+            self.assertIn(f'<Default Extension="{ext}" ContentType="{kind}"/>'.encode(),
+                          content_types)
+
+    def test_barcode_fields_have_the_codes_their_labels_name(self):
+        body = ElementTree.fromstring(self.doc_parts("E-barcode-field")[
+            "word/document.xml"]).find(f"{W}body")
+        codes = [t.text.strip() for t in body.iter(f"{W}instrText")]
+        self.assertEqual(codes, ['DISPLAYBARCODE "INV-2026-0001" QR \\q 1',
+                                 'DISPLAYBARCODE "OW-2026-0001" CODE128 \\t',
+                                 'DISPLAYBARCODE "5901234123457" EAN13 \\t',
+                                 'DISPLAYBARCODE "OW-2026-0001" CODE128 \\h 720'])
+        for p in body.findall(f"{W}p"):
+            kinds = [c.get(f"{W}fldCharType") for c in p.iter(f"{W}fldChar")]
+            if kinds:
+                self.assertEqual(kinds, ["begin", "separate", "end"])
+                runs = p.findall(f"{W}r")
+                between = runs[runs.index(next(r for r in runs if r.find(
+                    f"{W}fldChar[@{W}fldCharType='separate']") is not None)) + 1]
+                self.assertIsNotNone(between.find(f"{W}fldChar"))  # the result is empty
+
+    def test_cut_line_cases_have_the_markup_their_labels_name(self):
+        body = ElementTree.fromstring(self.doc_parts("E-cut-lines-text")[
+            "word/document.xml"]).find(f"{W}body")
+        borders = [(side.tag[len(W):], side.get(f"{W}val"), side.get(f"{W}sz"),
+                    side.get(f"{W}space"), side.get(f"{W}color"))
+                   for p in body.iter(f"{W}pBdr") for side in p]
+        self.assertEqual(borders, [
+            ("bottom", "single", "4", "1", "000000"), ("bottom", "thick", "12", "1", "000000"),
+            ("bottom", "double", "4", "1", "000000"), ("bottom", "dashed", "4", "1", "000000"),
+            ("bottom", "dotted", "4", "1", "000000"),
+            ("bottom", "dashSmallGap", "4", "1", "000000"),
+            ("top", "single", "4", "1", "000000"),
+            ("bottom", "single", "6", "1", "auto"), ("bottom", "double", "6", "1", "auto"),
+        ])
+        texts = ["".join(t.text or "" for t in p.iter(f"{W}t")) for p in body.findall(f"{W}p")]
+        self.assertIn("- " * 76, texts)
+        self.assertIn("✂ " + "- " * 73, texts)
+        self.assertIn("_" * 80, texts)
+        # The document's lines of characters each fit on one line of the column in Carlito,
+        # the scissors given a generous 15 pt, as Carlito has no glyph for them.
+        column = rules.TEXT_W / 20
+        lines = [t for t in texts if t and set(t) <= set("- _\u2702")]
+        self.assertEqual(len(lines), 3)
+        for line in lines:
+            scissors = line.count("\u2702")
+            self.assertLess(15 * scissors + carlito_width(line.replace("\u2702", "")), column,
+                            line)
+        leaders = [(t.get(f"{W}val"), t.get(f"{W}pos"), t.get(f"{W}leader"))
+                   for t in body.iter(f"{W}tab") if t.get(f"{W}val")]
+        self.assertEqual(leaders, [("right", str(rules.TEXT_W), leader)
+                                   for leader in ("hyphen", "dot", "underscore")])
+        v = "{urn:schemas-microsoft-com:vml}"
+        o = "{urn:schemas-microsoft-com:office:office}"
+        a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        wp = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+        body = ElementTree.fromstring(self.doc_parts("E-cut-lines-shapes")[
+            "word/document.xml"]).find(f"{W}body")
+        rules_hr = [(r.get(f"{o}hr"), r.get(f"{o}hrstd"), r.get(f"{o}hrpct"), r.get("style"))
+                    for r in body.iter(f"{v}rect")]
+        self.assertEqual(rules_hr, [("t", "t", None, "width:0;height:1.5pt"),
+                                    ("t", "t", "500", "width:225.65pt;height:1.5pt")])
+        drawings = [(d.tag[len(wp):], ln.find(f"{a}prstDash") is not None,
+                     d.find(f".//{a}prstGeom").get("prst"))
+                    for d in body.iter() if d.tag in (f"{wp}inline", f"{wp}anchor")
+                    for ln in d.iter(f"{a}ln")]
+        self.assertEqual(drawings, [("inline", False, "line"), ("inline", True, "line"),
+                                    ("anchor", False, "line"), ("anchor", True, "line")])
+        lines = [("position:absolute" in (ln.get("style") or ""),
+                  ln.find(f"{v}stroke") is not None, ln.get("from"), ln.get("to"))
+                 for ln in body.iter(f"{v}line")]
+        self.assertEqual(lines, [(False, False, "0,6pt", "432pt,6pt"),
+                                 (False, True, "0,6pt", "432pt,6pt"),
+                                 (True, False, "0,6pt", "432pt,6pt"),
+                                 (True, True, "0,6pt", "432pt,6pt")])
+
     def test_symbol_font_cases_have_the_markup_their_labels_name(self):
         # The font is the family scripts/make-symbol-font.py names, which Word has installed.
         self.assertEqual(rules.SYMBOL_FONT, load("make-symbol-font").FAMILY)
@@ -3808,8 +4181,8 @@ class Packages(unittest.TestCase):
             f"{wp}anchor": ([{f"{wp}simplePos"}, {f"{wp}positionH"}, {f"{wp}positionV"},
                              {f"{wp}extent"}, {f"{wp}effectExtent"}, wrap, {f"{wp}docPr"},
                              {f"{wp}cNvGraphicFramePr"}, {f"{a}graphic"}], [0, 1, 2, 3, 5, 6, 8]),
-            f"{wps}wsp": ([{f"{wps}cNvPr"}, {f"{wps}cNvSpPr"}, {f"{wps}spPr"}, {f"{wps}style"},
-                           {f"{wps}txbx"}, {f"{wps}bodyPr"}], [1, 2, 5]),
+            f"{wps}wsp": ([{f"{wps}cNvPr"}, {f"{wps}cNvSpPr", f"{wps}cNvCnPr"}, {f"{wps}spPr"},
+                           {f"{wps}style"}, {f"{wps}txbx"}, {f"{wps}bodyPr"}], [1, 2, 5]),
             f"{wps}spPr": shape_properties,
             f"{pic}spPr": shape_properties,
             f"{wps}bodyPr": ([{f"{a}prstTxWarp"},
@@ -4961,6 +5334,14 @@ class Packages(unittest.TestCase):
                 rel = rels[picture]
                 self.assertEqual(rel.get("Type"), f"{rules.REL}/image", doc.name)
                 png = parts[f"word/{rel.get('Target')}"]
+                # EMF and WMF pictures (E-barcode-pictures) by their signatures: an EMF header
+                # record ([MS-EMF] 2.3.4.2), a placeable WMF's key ([MS-WMF] 2.3.2.3).
+                if rel.get("Target").endswith(".emf"):
+                    self.assertEqual((png[:4], png[40:44]), (b"\x01\x00\x00\x00", b" EMF"))
+                    continue
+                if rel.get("Target").endswith(".wmf"):
+                    self.assertEqual(png[:4], struct.pack("<I", 0x9AC6CDD7))
+                    continue
                 self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"), doc.name)
                 at, idat, width = 8, b"", None
                 while at < len(png):
@@ -5000,6 +5381,15 @@ class Packages(unittest.TestCase):
 
     def test_refuses_a_setting_word_does_not_write_in_the_mode(self):
         doc = next(doc for doc in self.docs if doc.name == "E-opentype-on")
+        # A document that says it writes settings in any mode writes only the values given.
+        written = rules.settings_xml(dataclasses.replace(
+            doc, mode=14, compat_values=(("enableOpenTypeFeatures", 0),),
+            settings_in_any_mode=True))
+        self.assertEqual(re.findall(r'w:name="(\w+)"[^>]*w:val="(\d+)"', written),
+                         [("compatibilityMode", "14"), ("enableOpenTypeFeatures", "0")])
+        with self.assertRaisesRegex(ValueError, "not a setting Word writes in this mode"):
+            rules.settings_xml(dataclasses.replace(doc, mode=14, compat_values=(
+                ("enableOpenTypeFeature", 0),), settings_in_any_mode=True))
         for mode, values in ((15, (("enableOpenTypeFeature", 0),)),
                              (12, (("enableOpenTypeFeatures", 0),))):
             mistyped = dataclasses.replace(doc, mode=mode, compat_values=values)
