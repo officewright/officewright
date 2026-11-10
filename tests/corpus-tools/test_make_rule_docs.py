@@ -3725,6 +3725,39 @@ class Packages(unittest.TestCase):
                                  (True, False, "0,6pt", "432pt,6pt"),
                                  (True, True, "0,6pt", "432pt,6pt")])
 
+    def test_barcode_font_text_draws_the_code_128_symbols(self):
+        # The characters as Libre Barcode 128 draws them back into the values, checked once
+        # by drawing them with the font (Pillow) and decoding the image (zxing-cpp 2.3):
+        # the check symbol of BB is 0, drawn by U+00C2; that of AA is 100, by U+00C8.
+        self.assertEqual(rules.code128_font_text("OW-2026-0001"),
+                         "\u00ccOW-2026-0001\\\u00ce")
+        self.assertEqual(rules.code128_font_text("BB")[-2:], "\u00c2\u00ce")
+        self.assertEqual(rules.code128_font_text("AA")[-2:], "\u00c8\u00ce")
+        # For any value, the characters stand for the symbols code128_modules draws.
+        for value in ("OW-2026-0001", "BB", "AA", "Ab-12 ~"):
+            with self.subTest(value=value):
+                symbols = [0 if c == "\u00c2" else ord(c) - 32 if ord(c) < 127 else ord(c) - 100
+                           for c in rules.code128_font_text(value)]
+                widths = "".join(rules.CODE128[v] for v in symbols)
+                modules = rules.code128_modules(value)[10:-10]
+                runs = "".join(str(len(m.group())) for m in re.finditer(
+                    r"1+|0+", "".join("1" if d else "0" for d in modules)))
+                self.assertEqual(widths, runs)
+        with self.assertRaises(ValueError):
+            rules.code128_font_text("é")
+        parts = self.doc_parts("E-barcode-font")
+        body = ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+        barcode = [(r.find(f"{W}rPr/{W}sz").get(f"{W}val"),
+                    "".join(t.text for t in r.iter(f"{W}t")))
+                   for r in body.iter(f"{W}r")
+                   if r.find(f"{W}rPr/{W}rFonts") is not None
+                   and r.find(f"{W}rPr/{W}rFonts").get(f"{W}ascii") == "Libre Barcode 128"]
+        text = rules.code128_font_text("OW-2026-0001")
+        self.assertEqual(barcode, [("72", text), ("48", text)])
+        plain = ["".join(t.text or "" for t in p.iter(f"{W}t")) for p in body.findall(f"{W}p")]
+        self.assertIn(text, plain)  # case 03: the same characters in Calibri
+        self.assertIn(b'w:name="Libre Barcode 128"', parts["word/fontTable.xml"])
+
     def test_symbol_font_cases_have_the_markup_their_labels_name(self):
         # The font is the family scripts/make-symbol-font.py names, which Word has installed.
         self.assertEqual(rules.SYMBOL_FONT, load("make-symbol-font").FAMILY)

@@ -353,6 +353,7 @@
     "tests/corpus/word-rules/E-autospacing.docx": "opened",
     "tests/corpus/word-rules/E-bar-tab.docx": "opened",
     "tests/corpus/word-rules/E-barcode-field.docx": "opened",
+    "tests/corpus/word-rules/E-barcode-font.docx": "opened",
     "tests/corpus/word-rules/E-barcode-pictures.docx": "opened",
     "tests/corpus/word-rules/E-bold-italic-missing.docx": "opened",
     "tests/corpus/word-rules/E-bold-missing.docx": "opened",

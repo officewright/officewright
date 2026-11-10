@@ -6856,6 +6856,52 @@ def cut_lines_shapes() -> Doc:
     )
 
 
+# Libre Barcode 128 (tests/fonts-word/libre-barcode-128, installed for Word): a font whose
+# glyphs are the Code 128 symbols. Its character map, read from the font: symbol v below
+# 95 is the character U+0020 + v (symbol 0 also U+00C2, used here since a space may be
+# stretched or dropped), and symbol v of 95 and above the character U+0064 + v, from
+# U+00C3 to the stop symbol's U+00CE; the start symbol of code set B is U+00CC.
+BARCODE_FONT = "Libre Barcode 128"
+
+
+def code128_font_text(value: str) -> str:
+    """The characters that draw value's Code 128 barcode (code set B) in BARCODE_FONT: the
+    start symbol, the value, the check symbol and the stop symbol."""
+    if not all(32 <= ord(c) < 127 for c in value):
+        raise ValueError(f"{value!r} is not in Code 128 code set B")
+    symbols = [CODE128_START_B] + [ord(c) - 32 for c in value]
+    check = (symbols[0] + sum(n * v for n, v in enumerate(symbols[1:], 1))) % 103
+
+    def char(v: int) -> str:
+        return "Â" if v == 0 else chr(32 + v) if v < 95 else chr(100 + v)
+
+    return "".join(char(v) for v in [*symbols, check, 106])
+
+
+def barcode_font() -> Doc:
+    bars = code128_font_text(BARCODE_TEXT)
+    cases = [
+        (f"the Code 128 barcode of {BARCODE_TEXT} in {BARCODE_FONT} at 36 pt, a paragraph of "
+         "its own, its text below it in Calibri",
+         para(run(bars, BARCODE_FONT, 36)) + para(run(BARCODE_TEXT))),
+        (f"the same barcode in {BARCODE_FONT} at 24 pt, inline in a line of text",
+         para(run("Total due: 125.00 ") + run(bars, BARCODE_FONT, 24) + run(" Thank you."))),
+        ("the same characters in Calibri, 11 pt: the text the barcode is made of",
+         para(run(bars))),
+    ]
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), keep_next=True, space=spacing(before=12)) + content
+        for n, (label, content) in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-barcode-font",
+        f"How Word draws a Code 128 barcode ({BARCODE_TEXT}) set in the barcode font "
+        f"{BARCODE_FONT}: at 36 pt in a paragraph of its own and at 24 pt inline in a line of "
+        "text, and the same characters in Calibri",
+        body + para(run("End of the document.")),
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -7045,6 +7091,7 @@ def documents() -> list[Doc]:
         barcode_fields(),
         cut_lines_text(),
         cut_lines_shapes(),
+        barcode_font(),
     ]
 
 
