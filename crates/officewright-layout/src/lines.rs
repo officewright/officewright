@@ -1465,8 +1465,10 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         // text boxes). A line with none of them has the height of its break, and the last
         // line of a paragraph that of the mark too, such as an empty line. In a table cell
         // the break and the last line's mark still count: Word's rows of the letterheads
-        // of generated/invoice-en-standard and letter-uk are taller than their text.
-        // Hypothesis until a rule document settles cells (#537).
+        // of generated/invoice-en-standard and letter-uk are taller than their text, and
+        // a line of a picture alone takes them too, as on main, though Word's pictures in
+        // the cells of form-gsa-reseller-form and form-gsa-pacs-series-form sit 1.3 pt
+        // lower than ours. Hypothesis until a rule document settles cells (#537).
         if !text || self.cell {
             for metrics in breaks {
                 extent.add(metrics, Pt(0.0));

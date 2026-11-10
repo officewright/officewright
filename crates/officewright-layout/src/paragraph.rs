@@ -558,8 +558,8 @@ mod tests {
     fn a_large_mark_makes_the_last_line_taller_only_in_a_table_cell() {
         use crate::fonts::Fonts;
         use crate::ir::{
-            BreakClear, ImageData, ImageFormat, Inline, InlineObject, ObjectContent, Picture,
-            RunFonts, RunStyle, Size,
+            AnchoredObject, BreakClear, HorizontalAnchor, ImageData, ImageFormat, Inline,
+            InlineObject, ObjectContent, Picture, RunFonts, RunStyle, Size, VerticalAnchor,
         };
         use crate::testing::{book, minimal};
         // The test font: a line of 1.15 em. 10 pt text with a 20 pt mark and a 20 pt
@@ -587,6 +587,14 @@ mod tests {
         let picture = Paragraph::new(big).with_inlines([Inline::Object(InlineObject::new(
             ObjectContent::Picture(Picture::new(image)),
             Size::new(Pt(40.0), Pt(30.0)),
+        ))]);
+        // A line holding only the anchor of a floating picture, which takes no room in it,
+        // has the mark's height.
+        let anchored = Paragraph::new(big).with_inlines([Inline::anchored(AnchoredObject::new(
+            ObjectContent::Picture(Picture::new(image)),
+            Size::new(Pt(40.0), Pt(30.0)),
+            HorizontalAnchor::default(),
+            VerticalAnchor::default(),
         ))]);
         let heights = |paragraph: &Paragraph, cell: bool| -> Vec<f64> {
             let mut fonts = Fonts::new(&book);
@@ -633,10 +641,15 @@ mod tests {
             "{:?}",
             heights(&picture, false)
         );
+        let in_cell = heights(&picture, true);
         assert!(
-            heights(&picture, true).iter().all(|height| *height > 30.0),
+            !in_cell.is_empty() && in_cell.iter().all(|height| *height > 30.0),
+            "{in_cell:?}"
+        );
+        assert!(
+            close(&heights(&anchored, false), &[line(20.0)]),
             "{:?}",
-            heights(&picture, true)
+            heights(&anchored, false)
         );
     }
 
