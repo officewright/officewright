@@ -268,7 +268,8 @@ fn read_template(template: &[LevelTextPart]) -> (Vec<Piece>, bool) {
 /// placeholder of a level below the paragraph's makes Word ignore the whole template
 /// (MS-OI29500 2.1.283 c). A legal level writes every number in decimal but that of a
 /// level without numbers (OI 2.1.278 a, b). Words and ordinals are in the language
-/// `language`, the label's. The text ends at [`MAX_LABEL_CHARS`], and `cut` says when it
+/// `language`, the label's: a hypothesis, as fields take theirs, until a Word reference
+/// shows a label in another language (#546). The text ends at [`MAX_LABEL_CHARS`], and `cut` says when it
 /// does; `departures` how a number is written otherwise than its format says.
 fn label_text(
     template: &[Piece],

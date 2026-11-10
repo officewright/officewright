@@ -163,7 +163,8 @@ impl Walk<'_, '_> {
     }
 
     /// Numbers `note` at its first reference, whose style `style` gives the language of
-    /// a number in words.
+    /// a number in words: a hypothesis, as fields take theirs, until a Word reference
+    /// shows a note number in another language (#546).
     fn reference(&mut self, note: NoteId, style: RunStyleId) {
         if self.numbers.numbers.contains_key(&note) {
             return;

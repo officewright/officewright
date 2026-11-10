@@ -6579,6 +6579,39 @@ mod tests {
         report_list_formats(&Counters::default(), &mut fonts);
         report_note_numbers(&NoteNumbers::default(), &mut fonts);
         assert!(messages(&fonts.into_report()).is_empty());
+        // Each way a note's number departs gives its own message, and only that.
+        let none = Departures::default();
+        let each = [
+            (
+                Departures {
+                    unsupported: true,
+                    ..none
+                },
+                "numbers in a format the layout does not write are written as decimal",
+            ),
+            (
+                Departures {
+                    unrepresentable: true,
+                    ..none
+                },
+                "note numbers that their format cannot represent are written as decimal",
+            ),
+            (
+                Departures {
+                    language: true,
+                    ..none
+                },
+                "note numbers in words and ordinals in languages other than English and German \
+                 are written in English",
+            ),
+        ];
+        for (departures, message) in each {
+            let mut fonts = Fonts::new(&book);
+            let mut notes = NoteNumbers::default();
+            notes.departures = departures;
+            report_note_numbers(&notes, &mut fonts);
+            assert_eq!(messages(&fonts.into_report()), [message]);
+        }
     }
 
     #[test]
@@ -6678,6 +6711,31 @@ mod tests {
                 "numbers in words and ordinals in languages other than English and German are \
               written in English"
             ]
+        );
+        // In a run of complex script, the error text is bold in its complex script slot.
+        let mut document = Document::default();
+        let complex = document.add_run_style(in_language("en-US").with_complex_script(true));
+        document.add_section(
+            Section::new(setup())
+                .with_page_numbering(PageNumbering::default().with_start(Some(781)))
+                .with_blocks(vec![paragraph(
+                    complex,
+                    FieldKind::Page,
+                    NumberFormat::UpperLetter,
+                )]),
+        );
+        let (result, _) = laid(&document, 100);
+        let runs: Vec<bool> = result.expect("pages").pages[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Glyphs(run) => Some(run.synthetic_bold),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !runs.is_empty() && runs.iter().all(|&bold| bold),
+            "{runs:?}"
         );
         // A format without words has no language to report.
         let mut document = Document::default();
