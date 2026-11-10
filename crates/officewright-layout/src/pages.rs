@@ -6663,6 +6663,65 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_frame_keeps_its_first_table_however_tall() {
+        // A header of a table of one cell of 5 lines, from 0 to 100 past 80, then 4
+        // lines leaves the body no room: the table is kept whole, nothing after it.
+        let drawn = runs_drawn(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(vec![
+                        table_with(vec![row_of(style, &[5], false)], 0.0).into(),
+                        lines(style, 4, spacing(0.0, 0.0)),
+                    ]))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        assert_eq!(drawn, 5 + 1);
+    }
+
+    #[test]
+    fn a_cut_frame_keeps_only_the_first_line_of_its_first_paragraph_past_the_limit() {
+        // A first paragraph of two lines of 70 pt, then 4 lines: its first line passes
+        // nothing yet and is kept; its second ends at 140, past 80, and is not.
+        let drawn = runs_drawn(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(vec![
+                        lines(style, 2, exact(70.0)),
+                        lines(style, 4, spacing(0.0, 0.0)),
+                    ]))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        assert_eq!(drawn, 1 + 1);
+    }
+
+    #[test]
+    fn a_cut_footer_ends_at_its_distance_where_it_is_cut_after_a_table() {
+        // A footer of 2 lines, a table of one cell of 2 lines from 40 to 80, and 5 lines:
+        // the cut falls after the table, at 80, so the footer is drawn from 110 to 190.
+        let document = document(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_footers(HeaderFooterSet::default().with_primary(vec![
+                        lines(style, 2, spacing(0.0, 0.0)),
+                        table_with(vec![row_of(style, &[2], false)], 0.0).into(),
+                        lines(style, 5, spacing(0.0, 0.0)),
+                    ]))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let baselines = run_baselines(&laid.expect("pages").pages[0]);
+        // The body's line from 20, then the footer's four.
+        assert_eq!(baselines.len(), 5, "{baselines:?}");
+        assert!(
+            baselines[1..].iter().all(|y| y.0 > 110.0 && y.0 < 190.0),
+            "{baselines:?}"
+        );
+    }
+
+    #[test]
     fn a_frame_is_cut_once_for_all_the_pages_it_is_drawn_on() {
         // A header of 50,000 lines of 0.0001 pt, all within the cut, on each of 2,000
         // pages whose margins leave the body 10 pt: where it is cut is worked out once
