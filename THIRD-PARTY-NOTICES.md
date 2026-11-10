@@ -252,6 +252,20 @@ those two are modified versions of Noto Sans, described in its section.
   `tests/corpus-tools/test_dmap_font.py` checks the committed font against it, and
   `scripts/check-test-fonts.sh` against what it writes from upstream's `NotoSans-Regular.ttf`.
 
+### Libre Barcode 128
+
+- Files: `tests/fonts-word/libre-barcode-128/LibreBarcode128-Regular.ttf`
+  (SHA-256 `bece6b8695cf29f04ce1c706f0f508a65545f3b6240a03cef302b70f846630a7`) and
+  `tests/fonts-word/libre-barcode-128/OFL.txt`
+  (SHA-256 `a4b7ccd1bda3269afba7d6d9293a7161e699d2f4f1f280dd8a8535c569388de9`), the files
+  `ofl/librebarcode128/LibreBarcode128-Regular.ttf` and `ofl/librebarcode128/OFL.txt` of
+  <https://github.com/google/fonts> at commit `8ace0e6bb7f4c2f06b74319c20d2f3fa9d33735b`.
+- License: SIL Open Font License 1.1. Copyright 2017-2019 The Libre Barcode Project
+  Authors (https://github.com/graphicore/librebarcode).
+- Why: receipts and invoices draw Code 128 barcodes with a barcode font. Word renders the
+  reference of `E-barcode-font` with this font installed for the user, and the corpus runner
+  of `scripts/check.sh` lays that document out with this folder.
+
 ## Apache POI test documents
 
 Copyright 2003-2026 The Apache Software Foundation. Licensed under the Apache License,

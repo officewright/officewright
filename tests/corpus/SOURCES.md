@@ -211,6 +211,7 @@ writes.
 | word-rules/E-barcode-field.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | What Word draws for its DISPLAYBARCODE field with an empty result: a QR code, a Code 128 barcode and an EAN-13 barcode with their text, and a Code 128 barcode half an inch tall, each in a line of text |
 | word-rules/E-cut-lines-text.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | How Word draws cut lines between the parts of a receipt made of text: bottom borders single, thick, double, dashed, dotted and dashSmallGap, a top border, the borders AutoFormat gives --- and ===, lines of hyphens, of scissors and hyphens and of underscores, and right tabs with hyphen, dot and underscore leaders |
 | word-rules/E-cut-lines-shapes.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | How Word draws cut lines between the parts of a receipt made of shapes: the horizontal line it inserts from Borders (VML o:hr) at full and half width, DrawingML lines inline and floating, solid and dashed, and VML lines (v:line) inline and floating, solid and dashed |
+| word-rules/E-barcode-font.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | How Word draws a Code 128 barcode (OW-2026-0001) set in the barcode font Libre Barcode 128: at 36 pt in a paragraph of its own and at 24 pt inline in a line of text, and the same characters in Calibri |
 
 ## Apache POI test documents (`poi/`)
 
