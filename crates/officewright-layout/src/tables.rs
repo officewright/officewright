@@ -1821,7 +1821,7 @@ fn stack<'d>(
                     Some(above) => paragraph::space_between(document, above.props(), props).0,
                     None => paragraph::space_before(document, props).0,
                 };
-                let layout = paragraph::lay_out_with(
+                let layout = paragraph::lay_out_in_cell(
                     document,
                     (paragraph, label),
                     width,
@@ -3117,6 +3117,30 @@ mod tests {
         let heights: Vec<f64> = bands.iter().map(|band| band.height.0).collect();
         assert_eq!(heights[0], 0.0);
         assert!(heights[1] > 0.0);
+    }
+
+    #[test]
+    fn a_large_mark_makes_the_last_line_of_a_cell_taller() {
+        // In a cell the paragraph mark still counts in the last line of text, as in the
+        // rows of Word's letterheads (generated/invoice-en-standard): a 20 pt mark under
+        // 10 pt text makes the row taller than a 10 pt mark does (#359).
+        let (mut document, small) = document(CompatMode::Word2013);
+        let big = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(20.0)),
+        );
+        let row_of = |mark: RunStyleId| {
+            let paragraph = Paragraph::new(mark).with_inlines([Inline::text("A", small)]);
+            row(vec![cell(vec![paragraph.into()])])
+        };
+        let table = Table::default()
+            .with_grid([Pt(100.0)])
+            .with_rows(vec![row_of(small), row_of(big)]);
+        let (_, bands) = laid(&document, &table, (400.0, &[]));
+        let heights: Vec<f64> = bands.iter().map(|band| band.height.0).collect();
+        assert_eq!(heights.len(), 2);
+        assert!(heights[1] > heights[0] + 5.0, "{heights:?}");
     }
 
     /// What laying out every band of `table` of `document` in a column `width` wide
