@@ -20,24 +20,34 @@
 //! lines of a paragraph where the paragraph's widow control lets it, which leaves at least
 //! two of its lines on each side (`E-footnote-no-room.docx` cases 01 and 03 cut, 02 does
 //! not); the continuation notice goes under the part cut (`E-footnote-long-notice.docx`).
-//! The page then takes no more text, and the notes the line references after the one cut
-//! go wholly on the next page. Hypotheses until a Word render: keep rules other than widow
-//! control do not hold inside notes, the notice follows the part cut with its own space
-//! before only, the rest of a note on the next page is cut again only where it does not fit
-//! that page's whole body, its text taking what is left, and a blank page that an odd or
-//! even section start puts in takes none of it.
+//! The notes the line references after the one cut go wholly on the next page. The later
+//! lines of the line's paragraph still go on the page, the part cut giving them room as far
+//! as it keeps what widow control asks, and their own notes go wholly on the next page, as
+//! Word 2010 does on page 14 of `business/form-ec-state-aid-notification-el`; the next
+//! paragraph goes to the next page (`E-footnote-long.docx`, mode 15).
+//!
+//! Hypotheses until a Word render: in Word 2013 and later the later lines of the paragraph
+//! go on the page too, but one that references a note moves to the next page, as a line
+//! whose note cannot start; keep rules other than widow control do not hold inside notes;
+//! the notice follows the part cut with its own space before only, and is left out, and
+//! reported, where only the part fits on a page that holds nothing else; the rest of a note
+//! on the next page is cut again only where it does not fit that page's whole body, its
+//! text taking what is left; a blank page that an odd or even section start puts in takes
+//! none of it; and on a page of another width it is laid out again at that width, going on
+//! from the start of the line its cut falls in, which repeats part of that line where it
+//! starts elsewhere there, and is reported.
 //!
 //! A line whose note cannot start on the page, where not even its first part fits, moves
 //! to the next page with its notes in Word 2013 and later (mode 15: `E-footnote-no-room.docx`
 //! cases 02 and 04). Word 2010 (mode 14) keeps the line where it is and puts the whole note
-//! on the next page, under the continuation separator, and the page takes no more text (note
-//! 21 of `business/form-ec-state-aid-notification-de` on its page 15, note 27 of `-el` on its
-//! page 19, whose next line goes to page 20), and so do the older modes here. In those
-//! renders the note that cannot start is the
-//! first on its page in mode 15 and follows others in mode 14, so whether the mode or the
-//! notes before it decide is a hypothesis until a Word render. Where nothing moves the line
-//! further, on a page that holds nothing else, its notes that cannot start there go on the
-//! next page in every mode.
+//! on the next page, under the continuation separator, and the next paragraph follows it
+//! there (note 21 of `business/form-ec-state-aid-notification-de` on its page 15, note 27 of
+//! `-el` on its page 19), and so do the older modes here. In those renders the note that
+//! cannot start is the first on its page in mode 15 and follows others in mode 14, so
+//! whether the mode or the notes before it decide is a hypothesis until a Word render; so is
+//! that the next paragraph follows it, as no reference has room for one there. Where
+//! nothing moves the line further, on a page that holds nothing else, its notes that cannot
+//! start there go on the next page in every mode.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -68,12 +78,13 @@ pub(super) struct At {
     line: usize,
 }
 
-/// A footnote's content laid out, or a separator's or the continuation notice's: its
-/// paragraphs and tables, each with its top from the top of the first, and the height
-/// from the top of the first to the bottom of the last.
+/// A footnote's content laid out, or a separator's or the continuation notice's, at
+/// `width`: its paragraphs and tables, each with its top from the top of the first, and the
+/// height from the top of the first to the bottom of the last.
 pub(super) struct NoteLayout<'d> {
     parts: Vec<(Flowed<'d>, FramePart, f64)>,
     height: f64,
+    width: f64,
 }
 
 impl<'d> NoteLayout<'d> {
@@ -147,6 +158,42 @@ impl<'d> NoteLayout<'d> {
             .filter(|_| to.line == 0)
             .and_then(|before| self.parts.get(before))
             .map(|(part, ..)| part)
+    }
+
+    /// The lines of part `part`, where it is a paragraph.
+    fn lines(&self, part: usize) -> Option<&[crate::lines::Line]> {
+        match self.parts.get(part) {
+            Some((_, FramePart::Paragraph(laid, _), _)) => Some(&laid.lines),
+            _ => None,
+        }
+    }
+
+    /// Where `at`, a place in this layout, is in `other`, the same content laid out at
+    /// another width: in the same part, at the line there that holds the start of its line
+    /// here, and whether that line starts there too.
+    fn place_in(&self, at: At, other: &NoteLayout<'_>) -> (At, bool) {
+        let start = self
+            .lines(at.part)
+            .and_then(|here| here.get(at.line))
+            .map(|line| line.range.start)
+            .filter(|_| at.line > 0);
+        let (Some(start), Some(there)) = (start, other.lines(at.part)) else {
+            return (at, true);
+        };
+        let line = there
+            .iter()
+            .rposition(|line| line.range.start <= start)
+            .unwrap_or(0);
+        let exact = there
+            .get(line)
+            .is_some_and(|line| line.range.start == start);
+        (
+            At {
+                part: at.part,
+                line,
+            },
+            exact,
+        )
     }
 
     /// The place one line of a paragraph past `from`, or past the table it starts.
@@ -283,7 +330,7 @@ impl<'d> PageNotes<'d> {
         }
     }
 
-    /// Whether the page takes no more text: a note on it goes on to the next page.
+    /// Whether the page takes no more paragraphs: a note on it goes on to the next page.
     pub(super) fn closed(&self) -> bool {
         self.notes.iter().any(|note| !note.ends())
     }
@@ -514,9 +561,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
 
     /// How many of the lines of `layout`, the layout of paragraph `paragraph` of section
     /// `section`, from `first` on fit on the current page from `top` with the footnotes
-    /// they reference, and whether the last of those ends in a page or column break. The
-    /// last may be one whose notes are cut, or, before Word 2013, go wholly on the next
-    /// page: the page takes no line after it.
+    /// they reference, and whether the last of those ends in a page or column break. A
+    /// line whose note is cut, or before Word 2013 goes wholly on the next page, is followed
+    /// by those that fit above what the cut keeps; a page where that happened takes no line
+    /// of a later paragraph.
     pub(super) fn fitting_with_notes(
         &mut self,
         (section, paragraph): (usize, &Paragraph),
@@ -532,41 +580,84 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             return Ok((0, false));
         }
         let mut tail = page.tail();
+        let defer = self.document.settings().compat_mode() < CompatMode::Word2013;
         let rules = Rules {
-            defer: self.document.settings().compat_mode() < CompatMode::Word2013,
+            defer,
             force: false,
         };
+        // The note a line cut, with the last note drawn above it, which is cut again under
+        // each later line; and whether a note went on to the next page, after which the
+        // notes of later lines go there too.
+        let mut cut: Option<(Option<Tail<'d>>, Waiting<'d>)> = None;
+        let mut closed = false;
         let mut taken: HashSet<NoteId> = HashSet::new();
         let mut y = top;
         let mut count = 0;
         for (index, line) in layout.lines.iter().enumerate().skip(first) {
-            let end = tail.as_ref().map_or(0.0, |tail| tail.bottom);
-            if y + line.height.0 > bottom - end + EPSILON {
-                break;
-            }
             let notes: Vec<NoteId> = self
                 .line_footnotes(paragraph, layout, index)
                 .into_iter()
                 .filter(|note| taken.insert(*note))
                 .collect();
-            let mut closes = false;
-            if !notes.is_empty() {
-                let waiting = self.waiting(notes, section)?;
-                let room = bottom - y - line.height.0;
-                let Some(plan) = self.plan(tail.clone(), waiting, room, section, rules)? else {
+            // Notes that cannot start here move their line in Word 2013 and later.
+            if closed && !defer && !notes.is_empty() {
+                break;
+            }
+            let room = bottom - y - line.height.0;
+            if let Some((above, waiting)) = &cut {
+                // The note cut gives the line room, as far as its cut keeps a part here.
+                let strict = Rules {
+                    defer: false,
+                    force: false,
+                };
+                let again = vec![waiting.clone()];
+                let Some(plan) = self.plan(above.clone(), again, room, section, strict)? else {
                     break;
                 };
-                closes = plan.notes.iter().any(|note| !note.ends());
                 tail = plan.tail;
+            } else {
+                let end = tail.as_ref().map_or(0.0, |tail| tail.bottom);
+                if y + line.height.0 > bottom - end + EPSILON {
+                    break;
+                }
+                if !closed && !notes.is_empty() {
+                    let waiting = self.waiting(notes, section)?;
+                    let Some(plan) = self.plan(tail.clone(), waiting, room, section, rules)? else {
+                        break;
+                    };
+                    let mut above = tail.clone();
+                    for placed in &plan.notes {
+                        if placed.is_empty() {
+                            closed = true;
+                        } else if !placed.ends() {
+                            closed = true;
+                            cut = Some((
+                                above.clone(),
+                                Waiting {
+                                    note: placed.note,
+                                    layout: Rc::clone(&placed.layout),
+                                    from: placed.from,
+                                    continued: placed.continued,
+                                },
+                            ));
+                        } else {
+                            above = Some(Tail {
+                                layout: Rc::clone(&placed.layout),
+                                to: placed.to,
+                                bottom: placed.bottom,
+                            });
+                        }
+                    }
+                    tail = plan.tail;
+                }
             }
             y += line.height.0;
             count += 1;
-            let breaks = matches!(
+            if matches!(
                 line.end,
                 crate::lines::LineEnd::PageBreak | crate::lines::LineEnd::ColumnBreak
-            );
-            if breaks || closes {
-                return Ok((count, breaks));
+            ) {
+                return Ok((count, true));
             }
         }
         Ok((count, false))
@@ -663,12 +754,16 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 if to == from && !rules.defer {
                     return Ok(None);
                 }
+                let bottom = top + layout.between(from, to);
                 if from < to && to < end && notice.first().is_some() {
-                    let after = notice
-                        .last()
-                        .map_or(0.0, |last| trailing_space(self.document, last));
-                    let bottom = top + layout.between(from, to);
-                    plan.notice = Some((notice, bottom + before, after));
+                    if bottom + notice_room > room + EPSILON {
+                        self.report_notice_left_out(note);
+                    } else {
+                        let after = notice
+                            .last()
+                            .map_or(0.0, |last| trailing_space(self.document, last));
+                        plan.notice = Some((notice, bottom + before, after));
+                    }
                 }
             }
             closed = to < end;
@@ -781,8 +876,20 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         if self.pending.is_empty() {
             return Ok(());
         }
-        let waiting = std::mem::take(&mut self.pending);
+        let mut waiting = std::mem::take(&mut self.pending);
         let body = self.body()?;
+        // What goes on to a page of another width is laid out again at its width.
+        for rest in &mut waiting {
+            if rest.layout.width.to_bits() != body.width.0.to_bits() {
+                let laid = self.note_layout(rest.note, section)?;
+                let (from, exact) = rest.layout.place_in(rest.from, &laid);
+                if !exact {
+                    self.report_note_width(rest.note);
+                }
+                rest.layout = laid;
+                rest.from = from;
+            }
+        }
         let rules = Rules {
             defer: true,
             force: true,
@@ -904,7 +1011,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             height += laid.height();
             parts.push((part, laid, top));
         }
-        Ok(NoteLayout { parts, height })
+        Ok(NoteLayout {
+            parts,
+            height,
+            width: width.0,
+        })
     }
 
     /// Adds to `page` what its footnotes `notes` draw: at the bottom of its body, or
@@ -1013,12 +1124,34 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         }
     }
 
+    /// Reports, once, that the continuation notice under a part of footnote `note` cut on a
+    /// page that holds nothing else is left out, where only the part fits.
+    fn report_notice_left_out(&mut self, note: NoteId) {
+        self.fonts.report_once(
+            ReportKind::Overflow,
+            &note_location(note),
+            "a continuation notice that does not fit under the part of a footnote cut on a \
+             page is left out"
+                .to_owned(),
+        );
+    }
+
+    /// Reports, once, that the rest of footnote `note`, cut on a page of another width than
+    /// the next, goes on there from the start of the line its cut falls in.
+    fn report_note_width(&mut self, note: NoteId) {
+        self.fonts.report_once(
+            ReportKind::FeatureUnsupported,
+            &note_location(note),
+            "the rest of a footnote cut on a page of another width than the next goes on there \
+             from the start of the line its cut falls in, which repeats part of that line"
+                .to_owned(),
+        );
+    }
+
     /// Reports, once, a line or table of footnote `note` too tall for the body of the page
     /// that the rest of the note goes on to, which runs past its bottom.
     fn report_note_past_bottom(&mut self, note: NoteId) {
-        let mut location = Location::default();
-        location.push(Step::Field("notes"));
-        location.push(Step::Index(note.index()));
+        let location = note_location(note);
         self.fonts.report_once(
             ReportKind::Overflow,
             &location,
@@ -1027,4 +1160,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 .to_owned(),
         );
     }
+}
+
+/// Where footnote `note` is in the document.
+fn note_location(note: NoteId) -> Location {
+    let mut location = Location::default();
+    location.push(Step::Field("notes"));
+    location.push(Step::Index(note.index()));
+    location
 }

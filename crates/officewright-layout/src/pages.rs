@@ -775,7 +775,7 @@ struct Checkpoint {
     /// they could still lay out.
     frame_budget: usize,
     frame_laid_budget: usize,
-    /// Whether nothing was on the page yet.
+    /// Whether nothing was on the page yet, not even notes going on from the page before.
     at_top: bool,
 }
 
@@ -2561,7 +2561,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             leaders: self.leaders,
             frame_budget: self.frame_budget,
             frame_laid_budget: self.frame_laid_budget,
-            at_top: self.page_is_empty(),
+            at_top: self.page_is_empty() && !self.holds_continued_notes(),
         }
     }
 
@@ -9166,10 +9166,11 @@ mod tests {
         use crate::ir::NotePosition;
         // A line (20 to 40), then a line (40 to 60) referencing a note of nine lines and one
         // of one line, then another line of its paragraph, without widow control, and a
-        // paragraph of one line. Below the line, the separator (60 to 80) and five lines of
-        // the first note fill the page: the rest of its paragraph goes to the next page,
-        // with the four other lines of the note under the continuation separator, then the
-        // second note.
+        // paragraph of one line. Below the line, five lines of the first note would fit
+        // under the separator; the paragraph's next line (60 to 80) takes the room of one
+        // of them, and four fill the page under it. The next paragraph goes to the next
+        // page, with the five other lines of the note under the continuation separator, then
+        // the second note.
         let document = with_notes(
             setup(),
             NotePosition::PageBottom,
@@ -9190,14 +9191,15 @@ mod tests {
             },
         );
         let (pages, messages) = noted_pages(&document);
-        let note = |from: f64| (0..5).map(move |n| at("N", from + 20.0 * f64::from(n)));
-        let mut first = vec![at("A", 36.0), at("A1", 56.0), at("2", 56.0)];
-        first.push(at("1", raised(96.0)));
-        first.extend(note(96.0));
-        let mut second = vec![at("A", 36.0), at("A", 56.0)];
-        second.extend(note(96.0).take(4));
+        let note =
+            |from: f64, count: u32| (0..count).map(move |n| at("N", from + 20.0 * f64::from(n)));
+        let mut first = vec![at("A", 36.0), at("A1", 56.0), at("2", 56.0), at("A", 76.0)];
+        first.push(at("1", raised(116.0)));
+        first.extend(note(116.0, 4));
+        let mut second = vec![at("A", 36.0)];
+        second.extend(note(76.0, 5));
         second.extend([at("2", raised(176.0)), at("N", 176.0)]);
-        assert_eq!(pages, [(vec![73.75], first), (vec![73.75], second)]);
+        assert_eq!(pages, [(vec![93.75], first), (vec![53.75], second)]);
         assert!(
             !messages.iter().any(|m| m.contains("footnote")),
             "{messages:?}"
@@ -9363,12 +9365,12 @@ mod tests {
     }
 
     #[test]
-    fn the_page_of_a_cut_footnote_takes_no_more_text() {
+    fn the_paragraph_after_a_cut_footnote_goes_to_the_next_page() {
         use crate::ir::NotePosition;
         // Three lines (20 to 80), then a line (80 to 100) referencing a note of four lines
         // with widow control: of the three that fit below the line, two stay, leaving 20 pt
-        // above the notes (100 to 120) that nothing takes. What follows goes to the next
-        // page: the rest of the line's paragraph, the paragraph after it, or a table.
+        // above the notes (100 to 120). The next line of the paragraph goes there; the
+        // paragraph after it, or a table, goes to the next page.
         let lay = |after: usize, next: fn(RunStyleId) -> Vec<Block>| {
             let document = with_notes(
                 setup(),
@@ -9407,12 +9409,18 @@ mod tests {
                 vec![at("A", 36.0), at("N", 156.0), at("N", 176.0)],
             ),
         ];
-        assert_eq!(lay(1, |_| Vec::new()), expected);
         assert_eq!(
             lay(0, |style| vec![lines(style, 1, spacing(0.0, 0.0))]),
             expected
         );
         assert_eq!(lay(0, |style| vec![table_of(style, 1, false)]), expected);
+        let [(separators, mut first), (_, mut second)] = expected;
+        first.insert(4, at("A", 116.0));
+        second.remove(0);
+        assert_eq!(
+            lay(1, |_| Vec::new()),
+            [(separators.clone(), first), (separators, second)]
+        );
     }
 
     #[test]
@@ -9578,7 +9586,9 @@ mod tests {
             "{messages:?}"
         );
         assert!(
-            !messages.iter().any(|m| m.starts_with("a line is taller")),
+            !messages
+                .iter()
+                .any(|m| m.starts_with("a line is taller") || m.contains("continuation notice")),
             "{messages:?}"
         );
     }
@@ -9895,6 +9905,470 @@ mod tests {
             ),
             (vec![93.75], 4, 0)
         );
+    }
+
+    /// The separators of footnotes, the continuation separator and a continuation notice of
+    /// one line holding `C`, spaced by `props`.
+    fn with_notice(document: &mut Document, style: RunStyleId, props: ParagraphProps) {
+        use crate::ir::{NoteKind, NoteSeparators};
+        let line = |inline: Inline| [holding(style, vec![inline])];
+        let notice = Paragraph::new(style)
+            .with_props(props)
+            .with_inlines([Inline::text("C", style)]);
+        document.set_note_separators(
+            NoteKind::Footnote,
+            NoteSeparators::default()
+                .with_separator(line(Inline::separator(style)))
+                .with_continuation_separator(line(Inline::continuation_separator(style)))
+                .with_continuation_notice([notice.into()]),
+        );
+    }
+
+    #[test]
+    fn the_lines_after_a_cut_in_its_paragraph_stay_as_far_as_the_cut_gives_way() {
+        use crate::ir::NotePosition;
+        // A line (20 to 40), then a paragraph without widow control of three lines: the
+        // second (60 to 80) references a note of nine lines, the third (80 to 100) one of one
+        // line, then a paragraph of one line. Under the second line four lines of the note
+        // would fit; the third line takes the room of one of them, and its own note cannot
+        // start under the three left. Word 2010 keeps the line and puts its note wholly on
+        // the next page, as Word's render of `form-ec-state-aid-notification-el` does on its
+        // page 14; Word 2013 and later move the line, as one whose note cannot start.
+        let lay = |mode: CompatMode| {
+            let document = with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let long = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+                    let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                    let paragraph = Paragraph::new(style)
+                        .with_props(spacing(0.0, 0.0).with_widow_control(false))
+                        .with_inlines([
+                            Inline::text("A", style),
+                            Inline::line_break(BreakClear::None, style),
+                            Inline::text("B", style),
+                            Inline::note_reference(long, false, style),
+                            Inline::line_break(BreakClear::None, style),
+                            Inline::text("C", style),
+                            Inline::note_reference(short, false, style),
+                        ]);
+                    vec![
+                        lines(style, 1, spacing(0.0, 0.0)),
+                        paragraph.into(),
+                        lines(style, 1, spacing(0.0, 0.0)),
+                    ]
+                },
+            );
+            noted_pages(&document).0
+        };
+        let note =
+            |from: f64, count: u32| (0..count).map(move |n| at("N", from + 20.0 * f64::from(n)));
+        let mut first = vec![at("A", 36.0), at("A", 56.0), at("B1", 76.0), at("C2", 96.0)];
+        first.push(at("1", raised(136.0)));
+        first.extend(note(136.0, 3));
+        let mut second: Vec<_> = note(56.0, 6).collect();
+        second.extend([at("2", raised(176.0)), at("N", 176.0)]);
+        let kept = lay(CompatMode::Word2010);
+        assert_eq!(
+            kept,
+            [
+                (vec![113.75], first),
+                (vec![33.75], second),
+                (vec![], vec![at("A", 36.0)])
+            ]
+        );
+        let moved = lay(CompatMode::Word2013);
+        assert_eq!(
+            moved[0]
+                .1
+                .iter()
+                .filter(|(t, _)| t.starts_with('C'))
+                .count(),
+            0
+        );
+        assert_eq!(moved[1].1.first(), Some(&at("C2", 36.0)));
+    }
+
+    #[test]
+    fn the_rest_of_a_footnote_on_a_narrower_page_is_laid_out_at_its_width() {
+        use crate::ir::{Note, NoteKind, NotePosition};
+        // A line referencing a note of one paragraph of sixty words, cut on page 1, whose
+        // body is 260 pt wide; the next section's body is 100 pt wide (100 to 200). The rest
+        // of the note goes on there at that width, within the body, from the start of the
+        // line its cut falls in, which is reported where that line starts elsewhere there.
+        let mut text = None;
+        let mut document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                text = Some(style);
+                let mut inlines = vec![Inline::note_number(mark)];
+                inlines.extend((0..60).map(|n| Inline::text(format!(" W{n:02}"), style)));
+                let paragraph = Paragraph::new(style)
+                    .with_props(spacing(0.0, 0.0))
+                    .with_inlines(inlines);
+                let note = document.add_note(Note::new(NoteKind::Footnote, [paragraph.into()]));
+                vec![
+                    lines(style, 4, spacing(0.0, 0.0)),
+                    referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                ]
+            },
+        );
+        let style = text.expect("the text's style");
+        let narrow = setup().with_margins(
+            Margins::default()
+                .with_top(Pt(20.0))
+                .with_bottom(Pt(20.0))
+                .with_left(Pt(100.0))
+                .with_right(Pt(100.0)),
+        );
+        document.add_section(Section::new(narrow).with_blocks([lines(
+            style,
+            1,
+            spacing(0.0, 0.0),
+        )]));
+        let (laid, report) = laid(&document, 10);
+        let pages = laid.expect("pages").pages;
+        let words = |page: &Page| -> Vec<String> {
+            separators_and_texts(page)
+                .1
+                .iter()
+                .flat_map(|(text, _)| {
+                    text.split_whitespace()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|word| word.starts_with('W'))
+                .collect()
+        };
+        let reach = |page: &Page| {
+            page.items
+                .iter()
+                .filter_map(|item| match item {
+                    DisplayItem::Glyphs(run) => run
+                        .clusters
+                        .iter()
+                        .flat_map(|cluster| &cluster.glyphs)
+                        .map(|glyph| run.origin.x.0 + glyph.x.0)
+                        .reduce(f64::max),
+                    _ => None,
+                })
+                .fold(0.0, f64::max)
+        };
+        let first = words(&pages[0]);
+        let rest: Vec<String> = pages[1..].iter().flat_map(words).collect();
+        assert!(!first.is_empty() && !rest.is_empty(), "{first:?} {rest:?}");
+        assert!(pages[1..].iter().all(|page| reach(page) < 200.0));
+        // Every word is there, in order, at most a line's start drawn again.
+        let last = first.last().cloned().unwrap_or_default();
+        let again = rest
+            .iter()
+            .position(|word| *word == last)
+            .map_or(0, |i| i + 1);
+        let mut all = first.clone();
+        all.extend(rest.iter().skip(again).cloned());
+        let expected: Vec<String> = (0..60).map(|n| format!("W{n:02}")).collect();
+        assert_eq!(all, expected);
+        let reported = messages(&report)
+            .iter()
+            .any(|m| m.starts_with("the rest of a footnote cut on a page of another width"));
+        assert_eq!(reported, rest.first() != expected.get(first.len()));
+    }
+
+    #[test]
+    fn a_keep_chain_beside_the_rest_of_a_footnote_moves_to_a_page_where_it_fits() {
+        use crate::ir::NotePosition;
+        // A line (20 to 40) referencing a note of nine lines, six of which fit below it; then,
+        // after a page break, a line kept with a paragraph of four lines kept together. On
+        // page 2 the rest of the note leaves 80 pt (20 to 100), where the line goes but not
+        // the four lines: the two move to page 3 together, as from a page with text, though
+        // the line started page 2's text.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+                let kept = spacing(0.0, 0.0)
+                    .with_keep_next(true)
+                    .with_page_break_before(true);
+                vec![
+                    referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                    lines(style, 1, kept),
+                    lines(style, 4, spacing(0.0, 0.0).with_keep_lines(true)),
+                ]
+            },
+        );
+        let (pages, messages) = noted_pages(&document);
+        let count = |page: &Separated| page.1.iter().filter(|(t, _)| t == "A").count();
+        assert_eq!(pages.iter().map(count).collect::<Vec<_>>(), [0, 0, 5]);
+        assert!(
+            !messages.iter().any(|m| m.contains("split")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn going_back_to_after_a_cut_keeps_its_notice() {
+        use crate::ir::NotePosition;
+        // A line (20 to 40) referencing a note of nine lines, cut after five with the notice
+        // under them; then a line kept with a paragraph of three lines kept together, which
+        // do not fit beside it under the rest of the note on page 2. Going back to before the
+        // line leaves page 1 as it was, its notice included.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                with_notice(document, style, spacing(0.0, 0.0));
+                let note = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+                vec![
+                    referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                    lines(style, 1, spacing(0.0, 0.0).with_keep_next(true)),
+                    lines(style, 3, spacing(0.0, 0.0).with_keep_lines(true)),
+                ]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(pages[0].1.last(), Some(&at("C", 176.0)));
+        assert_eq!(pages[0].1.iter().filter(|(t, _)| t == "N").count(), 5);
+    }
+
+    #[test]
+    fn a_note_that_goes_on_wholly_brings_no_notice() {
+        use crate::ir::NotePosition;
+        // Word 2010: a line (20 to 40) referencing a note of one line, three more lines,
+        // and a line (100 to 120) referencing a note of three lines with widow control,
+        // which cannot start below it and goes wholly to page 2. Nothing is cut on page 1,
+        // so its notes have no notice.
+        let document = with_notes_in(
+            CompatMode::Word2010,
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                with_notice(document, style, spacing(0.0, 0.0));
+                let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                let long = footnote(document, (style, mark), 3, spacing(0.0, 0.0));
+                vec![
+                    referencing(style, (0, 0), &[short], spacing(0.0, 0.0)),
+                    lines(style, 3, spacing(0.0, 0.0)),
+                    referencing(style, (0, 0), &[long], spacing(0.0, 0.0)),
+                ]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].0, [153.75]);
+        assert!(
+            !pages
+                .iter()
+                .any(|page| page.1.iter().any(|(t, _)| t == "C"))
+        );
+        assert_eq!(pages[1].0, [113.75]);
+    }
+
+    #[test]
+    fn the_part_of_a_footnote_cut_ends_at_the_bottom_whatever_its_space_after() {
+        use crate::ir::NotePosition;
+        // A line alone (20 to 40) referencing a note of seven lines with 10 pt after it and
+        // widow control: of the six that fit below the line, five stay. The part cut keeps
+        // no space after: it ends at the bottom of the body.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 7, spacing(0.0, 10.0));
+                vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let mut first = vec![at("A1", 36.0), at("1", raised(96.0))];
+        first.extend((0..5).map(|n| at("N", 96.0 + 20.0 * f64::from(n))));
+        assert_eq!(pages[0], (vec![73.75], first));
+    }
+
+    #[test]
+    fn a_footnote_of_lines_taller_than_the_page_goes_on_a_line_a_page() {
+        use crate::ir::NotePosition;
+        // A line alone referencing a note of two exact 200 pt lines, each taller than the
+        // body: the note goes on the next page, then one line a page.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let tall = ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(200.0))))
+                    .with_widow_control(false);
+                let note = footnote(document, (style, mark), 2, tall);
+                vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let notes = |page: &Separated| page.1.iter().filter(|(t, _)| t == "N").count();
+        assert_eq!(pages.iter().map(notes).collect::<Vec<_>>(), [0, 1, 1]);
+    }
+
+    #[test]
+    fn the_space_after_the_notice_ends_the_notes() {
+        use crate::ir::NotePosition;
+        // A line alone (20 to 40) referencing a note of five exact 30 pt lines, under a notice
+        // of one line with 10 pt after it: three lines fit with the notice, which ends 10 pt
+        // above the bottom of the body (150 to 170).
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                with_notice(document, style, spacing(0.0, 10.0));
+                let lines = ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(30.0))));
+                let note = footnote(document, (style, mark), 5, lines);
+                vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(pages[0].0, [53.75]);
+        assert_eq!(pages[0].1.last(), Some(&at("C", 166.0)));
+        assert_eq!(pages[0].1.iter().filter(|(t, _)| t == "N").count(), 3);
+    }
+
+    #[test]
+    fn a_notice_that_does_not_fit_under_a_forced_part_is_left_out_and_reported() {
+        use crate::ir::NotePosition;
+        const LEFT_OUT: &str = "a continuation notice that does not fit under the part of a \
+                                footnote cut on a page is left out";
+        // A line alone referencing a note of two exact 130 pt lines without widow control:
+        // the note goes on page 2, where its first line fits under the continuation
+        // separator (40 to 170) but not with the notice: the notice is left out, and
+        // reported.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                with_notice(document, style, spacing(0.0, 0.0));
+                let tall = ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(130.0))))
+                    .with_widow_control(false);
+                let note = footnote(document, (style, mark), 2, tall);
+                vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+            },
+        );
+        let (pages, messages) = noted_pages(&document);
+        let notes = |page: &Separated| page.1.iter().filter(|(t, _)| t == "N").count();
+        assert_eq!(pages.iter().map(notes).collect::<Vec<_>>(), [0, 1, 1]);
+        assert!(
+            !pages
+                .iter()
+                .any(|page| page.1.iter().any(|(t, _)| t == "C"))
+        );
+        assert_eq!(messages.iter().filter(|m| *m == LEFT_OUT).count(), 1);
+    }
+
+    #[test]
+    fn a_later_line_of_the_paragraph_does_not_cut_a_footnote_below_what_widow_control_keeps() {
+        use crate::ir::NotePosition;
+        // Two lines (20 to 60), then a paragraph without widow control of four lines, the
+        // second (80 to 100) referencing a note of four lines with widow control: two lines
+        // of the note stay below it, and still below the third line (100 to 120); under the
+        // fourth only one would, which widow control does not allow, so the fourth goes to
+        // the next page.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 4, spacing(0.0, 0.0));
+                vec![
+                    lines(style, 2, spacing(0.0, 0.0)),
+                    referencing(
+                        style,
+                        (1, 2),
+                        &[note],
+                        spacing(0.0, 0.0).with_widow_control(false),
+                    ),
+                ]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let mut first: Vec<_> = (0..3)
+            .map(|n| at("A", 36.0 + 20.0 * f64::from(n)))
+            .collect();
+        first.extend([
+            at("A1", 96.0),
+            at("A", 116.0),
+            at("1", raised(156.0)),
+            at("N", 156.0),
+            at("N", 176.0),
+        ]);
+        assert_eq!(
+            pages,
+            [
+                (vec![133.75], first),
+                (
+                    vec![133.75],
+                    vec![at("A", 36.0), at("N", 156.0), at("N", 176.0)]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_lines_after_a_note_that_goes_on_wholly_fill_the_page_in_word_2010() {
+        use crate::ir::NotePosition;
+        // Word 2010: four lines (20 to 100), then a paragraph without widow control of four
+        // lines (100 to 180), the first referencing a note of three lines with widow
+        // control, which cannot start below it, the second a note of one line. Both notes go
+        // wholly to page 2, and the paragraph's lines fill page 1.
+        let document = with_notes_in(
+            CompatMode::Word2010,
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let long = footnote(document, (style, mark), 3, spacing(0.0, 0.0));
+                let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                let paragraph = Paragraph::new(style)
+                    .with_props(spacing(0.0, 0.0).with_widow_control(false))
+                    .with_inlines([
+                        Inline::text("B", style),
+                        Inline::note_reference(long, false, style),
+                        Inline::line_break(BreakClear::None, style),
+                        Inline::text("C", style),
+                        Inline::note_reference(short, false, style),
+                        Inline::line_break(BreakClear::None, style),
+                        Inline::text("D", style),
+                        Inline::line_break(BreakClear::None, style),
+                        Inline::text("E", style),
+                    ]);
+                vec![lines(style, 4, spacing(0.0, 0.0)), paragraph.into()]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let mut first: Vec<_> = (0..4)
+            .map(|n| at("A", 36.0 + 20.0 * f64::from(n)))
+            .collect();
+        first.extend([
+            at("B1", 116.0),
+            at("C2", 136.0),
+            at("D", 156.0),
+            at("E", 176.0),
+        ]);
+        let second = vec![
+            at("1", raised(116.0)),
+            at("N", 116.0),
+            at("N", 136.0),
+            at("N", 156.0),
+            at("2", raised(176.0)),
+            at("N", 176.0),
+        ];
+        assert_eq!(pages, [(vec![], first), (vec![93.75], second)]);
     }
 
     #[test]
