@@ -15,8 +15,8 @@ use crate::breaks::{
 };
 use crate::fonts::Fonts;
 use crate::ir::{
-    Alignment, BreakKind, CompatFlag, Document, Inline, LevelAlignment, LineSpacing, Paragraph,
-    RunStyleId, TabKind, TabLeader,
+    Alignment, BreakKind, CompatFlag, CompatMode, Document, Inline, LevelAlignment, LineSpacing,
+    Paragraph, RunStyleId, TabKind, TabLeader,
 };
 use crate::itemize::{InlinePath, Item, Itemized, TextRun, report_shaped, request};
 use crate::metrics::{LineMetrics, TypoRule, line_metrics};
@@ -490,13 +490,19 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     width: Pt(0.0),
                 }),
                 // The separator is [`SEPARATOR_LENGTH`] long, or as wide as a narrower
-                // column, the continuation separator as wide as the column. Hypothesis
-                // until a Word render (`E-footnote-long.docx`) for the latter, and for a
-                // column narrower than the separator.
+                // column (a hypothesis until a Word render), and so is the continuation
+                // separator in Word 2013 and later (mode 15: Word's renders of
+                // `E-footnote-long.docx`, `E-footnote-long-notice.docx` and
+                // `E-footnote-no-room.docx`). Word 2010 (mode 14) draws the continuation
+                // separator as wide as the column (`business/form-ec-state-aid-notification-de`
+                // on its page 16, `-el` on its pages 15, 16 and 20), and so do the older
+                // modes here.
                 Item::Separator(continuation, _) => units.push(Unit {
                     range: start..start + PLACEHOLDER_MARK.len_utf8(),
                     kind: UnitKind::Zero { item: index },
-                    width: if *continuation {
+                    width: if *continuation
+                        && self.document.settings().compat_mode() < CompatMode::Word2013
+                    {
                         self.width
                     } else {
                         Pt(SEPARATOR_LENGTH.min(self.width.0))

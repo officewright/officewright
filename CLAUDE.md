@@ -68,10 +68,14 @@ crates/
                         fill and outline), the numbers of the references of footnotes and
                         endnotes (references in headers and footers show no number), and
                         footnotes under their separator at the bottom of the page of their
-                        reference or beneath its text, a line moving to the next page with
-                        notes that do not fit below it (not yet: a note is not cut across
-                        pages, and the notes of references in table cells and endnotes are not
-                        laid out), behind private modules;
+                        reference or beneath its text, a note that does not fit below its line
+                        cut where its widow control lets it, with the continuation notice, and
+                        going on at the top of the next page's notes under the continuation
+                        separator, and a line whose note cannot start on its page moving to the
+                        next page with it (Word 2013 and later) or staying there while the note
+                        goes wholly to the next page (older modes) (not yet: the notes of
+                        references in table cells and endnotes are not laid out), behind
+                        private modules;
                         feature `pdf` renders a document into PDF with officewright-pdf (`render_pdf`,
                         hidden in the docs like the IR it takes, and `RenderOptions`);
                         feature `fuzzing` opens entry points for the fuzz targets, examples and the tests
