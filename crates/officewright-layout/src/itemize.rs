@@ -462,11 +462,21 @@ impl Builder<'_, '_, '_> {
             .language()
             .latin()
             .is_some_and(|tag| crate::slot::language_is(tag, &["tr", "az"]));
-        // Whether the character before was a Greek letter drawn as a capital: a combining
-        // tonos after it is left out, as with one composed with it.
+        // Whether the letter before, past its other combining marks, was a small Greek
+        // letter drawn as a capital: a combining tonos after it is left out, as one
+        // composed with it is, and a combining dialytika with a tonos keeps the dialytika.
         let mut raised_greek = false;
+        let small_caps_only = style.small_caps() && !style.caps();
         for ch in text.chars() {
-            let small_caps_only = style.small_caps() && !style.caps();
+            if raised_greek && ch == '\u{344}' {
+                let source_start = self.out.source.len();
+                self.out
+                    .source
+                    .push(if small_caps_only { '\u{308}' } else { ch });
+                let source = source_start..self.out.source.len();
+                self.character('\u{308}', source, id, style, false);
+                continue;
+            }
             if raised_greek && ch == '\u{301}' {
                 // In small capitals the source is what is drawn; in capitals it keeps the
                 // tonos, with the letter before.
@@ -480,7 +490,9 @@ impl Builder<'_, '_, '_> {
             }
             let lowercase = ch.is_lowercase();
             let upper = style.caps() || (style.small_caps() && lowercase);
-            raised_greek = upper && is_greek(ch);
+            if !('\u{300}'..='\u{36F}').contains(&ch) {
+                raised_greek = upper && lowercase && is_greek(ch);
+            }
             let drawn: Vec<char> = if upper {
                 uppercase(ch, turkic)
             } else {
@@ -849,11 +861,17 @@ impl Builder<'_, '_, '_> {
             let script = scripts.get(start).copied().unwrap_or(Script::Common);
             let placed = pending.get(start..end).unwrap_or(&[]);
             // Drawn characters that share a source character, or have none (a symbol
-            // whose code is no character).
-            let expanded = placed.iter().any(|placed| placed.source.is_empty())
-                || placed
-                    .windows(2)
-                    .any(|pair| matches!(pair, [a, b] if a.source == b.source));
+            // whose code is no character), or stand for several (a Greek capital and the
+            // tonos it leaves out).
+            let source = &self.out.source;
+            let expanded = placed.iter().any(|placed| {
+                placed.source.is_empty()
+                    || source
+                        .get(placed.source.clone())
+                        .is_some_and(|text| text.chars().nth(1).is_some())
+            }) || placed
+                .windows(2)
+                .any(|pair| matches!(pair, [a, b] if a.source == b.source));
             let sources = if expanded {
                 placed
                     .iter()
@@ -981,13 +999,24 @@ fn greek_capital_without_tonos(ch: char) -> Option<char> {
         '\u{3CE}' => '\u{3A9}',
         '\u{390}' => '\u{3AA}',
         '\u{3B0}' => '\u{3AB}',
+        // The same letters with an oxia, which Unicode takes for the tonos.
+        '\u{1F71}' => '\u{391}',
+        '\u{1F73}' => '\u{395}',
+        '\u{1F75}' => '\u{397}',
+        '\u{1F77}' => '\u{399}',
+        '\u{1F79}' => '\u{39F}',
+        '\u{1F7B}' => '\u{3A5}',
+        '\u{1F7D}' => '\u{3A9}',
+        '\u{1FD3}' => '\u{3AA}',
+        '\u{1FE3}' => '\u{3AB}',
         _ => return None,
     })
 }
 
-/// Whether `ch` is a Greek letter (Greek and Coptic, and Greek Extended).
+/// Whether `ch` is in Unicode's Greek and Coptic block (monotonic Greek; polytonic
+/// letters keep their accents).
 fn is_greek(ch: char) -> bool {
-    matches!(ch, '\u{370}'..='\u{3FF}' | '\u{1F00}'..='\u{1FFF}')
+    matches!(ch, '\u{370}'..='\u{3FF}')
 }
 
 /// The script of each character, with characters common to scripts and inherited ones
@@ -1334,6 +1363,30 @@ mod tests {
         assert_eq!(
             drawn(&mut setup, "e\u{301}", caps),
             ("E\u{301}".to_owned(), "e\u{301}".to_owned())
+        );
+        // The same letters written otherwise are drawn the same: ΐ fully decomposed, and
+        // with a combining dialytika and tonos, and ό with an oxia.
+        assert_eq!(
+            drawn(
+                &mut setup,
+                "\u{3B9}\u{308}\u{301}\u{3B9}\u{344}\u{1F79}",
+                small
+            ),
+            both("\u{399}\u{308}\u{399}\u{308}\u{39F}")
+        );
+        // In capitals, a capital typed with its tonos keeps it, composed or not, as small
+        // capitals keep it; capitals with small capitals are capitals.
+        assert_eq!(
+            drawn(&mut setup, "\u{386}\u{391}\u{301}", caps),
+            both("\u{386}\u{391}\u{301}")
+        );
+        let caps_and_small = setup.style(plain(TEST).with_caps(true).with_small_caps(true));
+        assert_eq!(
+            drawn(&mut setup, "\u{3CC}\u{3BF}\u{301}", caps_and_small),
+            (
+                "\u{39F}\u{39F}".to_owned(),
+                "\u{3CC}\u{3BF}\u{301}".to_owned()
+            )
         );
     }
 
