@@ -462,9 +462,37 @@ impl Builder<'_, '_, '_> {
             .language()
             .latin()
             .is_some_and(|tag| crate::slot::language_is(tag, &["tr", "az"]));
+        // Whether the letter before, past its other combining marks, was a small Greek
+        // letter drawn as a capital: a combining tonos after it is left out, as one
+        // composed with it is, and a combining dialytika with a tonos keeps the dialytika.
+        let mut raised_greek = false;
+        let small_caps_only = style.small_caps() && !style.caps();
         for ch in text.chars() {
+            if raised_greek && ch == '\u{344}' {
+                let source_start = self.out.source.len();
+                self.out
+                    .source
+                    .push(if small_caps_only { '\u{308}' } else { ch });
+                let source = source_start..self.out.source.len();
+                self.character('\u{308}', source, id, style, false);
+                continue;
+            }
+            if raised_greek && ch == '\u{301}' {
+                // In small capitals the source is what is drawn; in capitals it keeps the
+                // tonos, with the letter before.
+                if !small_caps_only {
+                    self.out.source.push(ch);
+                    if let Some(previous) = self.pending.last_mut() {
+                        previous.source.end = self.out.source.len();
+                    }
+                }
+                continue;
+            }
             let lowercase = ch.is_lowercase();
             let upper = style.caps() || (style.small_caps() && lowercase);
+            if !('\u{300}'..='\u{36F}').contains(&ch) {
+                raised_greek = upper && lowercase && is_greek(ch);
+            }
             let drawn: Vec<char> = if upper {
                 uppercase(ch, turkic)
             } else {
@@ -846,11 +874,17 @@ impl Builder<'_, '_, '_> {
             let script = scripts.get(start).copied().unwrap_or(Script::Common);
             let placed = pending.get(start..end).unwrap_or(&[]);
             // Drawn characters that share a source character, or have none (a symbol
-            // whose code is no character).
-            let expanded = placed.iter().any(|placed| placed.source.is_empty())
-                || placed
-                    .windows(2)
-                    .any(|pair| matches!(pair, [a, b] if a.source == b.source));
+            // whose code is no character), or stand for several (a Greek capital and the
+            // tonos it leaves out).
+            let source = &self.out.source;
+            let expanded = placed.iter().any(|placed| {
+                placed.source.is_empty()
+                    || source
+                        .get(placed.source.clone())
+                        .is_some_and(|text| text.chars().nth(1).is_some())
+            }) || placed
+                .windows(2)
+                .any(|pair| matches!(pair, [a, b] if a.source == b.source));
             let sources = if expanded {
                 placed
                     .iter()
@@ -951,12 +985,51 @@ fn inline_style(inline: &Inline) -> Option<RunStyleId> {
     }
 }
 
-/// The uppercase of `ch`, the Turkic way for i in Turkish and Azerbaijani.
+/// The uppercase of `ch`, the Turkic way for i in Turkish and Azerbaijani, and Greek
+/// without its tonos ([`greek_capital_without_tonos`]).
 fn uppercase(ch: char, turkic: bool) -> Vec<char> {
     if turkic && ch == 'i' {
         return vec!['\u{0130}'];
     }
+    if let Some(capital) = greek_capital_without_tonos(ch) {
+        return vec![capital];
+    }
     ch.to_uppercase().collect()
+}
+
+/// The capital of a Greek small letter with a tonos, without it, as Word draws Greek in
+/// small capitals (`business/form-ec-state-aid-notification-el`, whose "Νομικό καθεστώς"
+/// Word draws as "ΝΟΜΙΚΟ ΚΑΘΕΣΤΩΣ"), keeping a dialytika; in capitals too, and by the
+/// characters whatever the run's language, hypotheses until a rule document (#555).
+fn greek_capital_without_tonos(ch: char) -> Option<char> {
+    Some(match ch {
+        '\u{3AC}' => '\u{391}',
+        '\u{3AD}' => '\u{395}',
+        '\u{3AE}' => '\u{397}',
+        '\u{3AF}' => '\u{399}',
+        '\u{3CC}' => '\u{39F}',
+        '\u{3CD}' => '\u{3A5}',
+        '\u{3CE}' => '\u{3A9}',
+        '\u{390}' => '\u{3AA}',
+        '\u{3B0}' => '\u{3AB}',
+        // The same letters with an oxia, which Unicode takes for the tonos.
+        '\u{1F71}' => '\u{391}',
+        '\u{1F73}' => '\u{395}',
+        '\u{1F75}' => '\u{397}',
+        '\u{1F77}' => '\u{399}',
+        '\u{1F79}' => '\u{39F}',
+        '\u{1F7B}' => '\u{3A5}',
+        '\u{1F7D}' => '\u{3A9}',
+        '\u{1FD3}' => '\u{3AA}',
+        '\u{1FE3}' => '\u{3AB}',
+        _ => return None,
+    })
+}
+
+/// Whether `ch` is in Unicode's Greek and Coptic block (monotonic Greek; polytonic
+/// letters keep their accents).
+fn is_greek(ch: char) -> bool {
+    matches!(ch, '\u{370}'..='\u{3FF}')
 }
 
 /// The script of each character, with characters common to scripts and inherited ones
@@ -1250,6 +1323,84 @@ mod tests {
         let (itemized, _, _) = setup.run(&[Inline::text("ab", symbol_small)]);
         assert_eq!(itemized.text, "\u{391}\u{392}");
         assert_eq!(itemized.source, "AB");
+    }
+
+    #[test]
+    fn greek_in_capitals_and_small_capitals_drops_its_tonos() {
+        // Issue #517: Word draws "Νομικό καθεστώς" in small capitals as "ΝΟΜΙΚΟ ΚΑΘΕΣΤΩΣ"
+        // (business/form-ec-state-aid-notification-el), its text too.
+        let mut setup = Setup::new(vec![minimal()]);
+        let caps = setup.style(plain(TEST).with_caps(true));
+        let small = setup.style(plain(TEST).with_small_caps(true));
+        let drawn = |setup: &mut Setup, text: &str, style| {
+            let (itemized, _, _) = setup.run(&[Inline::text(text, style)]);
+            (itemized.text, itemized.source)
+        };
+        let both = |text: &str| (text.to_owned(), text.to_owned());
+        assert_eq!(
+            drawn(
+                &mut setup,
+                "\u{39D}\u{3BF}\u{3BC}\u{3B9}\u{3BA}\u{3CC}",
+                small
+            ),
+            both("\u{39D}\u{39F}\u{39C}\u{399}\u{39A}\u{39F}")
+        );
+        // Each letter with a tonos, the dialytika kept, also where it has a tonos too.
+        assert_eq!(
+            drawn(
+                &mut setup,
+                "\u{3AC}\u{3AD}\u{3AE}\u{3AF}\u{3CC}\u{3CD}\u{3CE}\u{390}\u{3B0}\u{3CA}",
+                small
+            ),
+            both("\u{391}\u{395}\u{397}\u{399}\u{39F}\u{3A5}\u{3A9}\u{3AA}\u{3AB}\u{3AA}")
+        );
+        // A combining tonos after the letter is left out as well.
+        assert_eq!(
+            drawn(&mut setup, "\u{3BF}\u{301}a", small),
+            both("\u{39F}A")
+        );
+        // In capitals the source keeps the tonos, composed or not.
+        assert_eq!(
+            drawn(&mut setup, "\u{3CC}\u{3BF}\u{301}", caps),
+            (
+                "\u{39F}\u{39F}".to_owned(),
+                "\u{3CC}\u{3BF}\u{301}".to_owned()
+            )
+        );
+        // Small capitals leave capitals as they are, with their tonos; Latin keeps its
+        // accents.
+        assert_eq!(
+            drawn(&mut setup, "\u{38C}\u{39F}\u{301}", small),
+            both("\u{38C}\u{39F}\u{301}")
+        );
+        assert_eq!(
+            drawn(&mut setup, "e\u{301}", caps),
+            ("E\u{301}".to_owned(), "e\u{301}".to_owned())
+        );
+        // The same letters written otherwise are drawn the same: ΐ fully decomposed, and
+        // with a combining dialytika and tonos, and ό with an oxia.
+        assert_eq!(
+            drawn(
+                &mut setup,
+                "\u{3B9}\u{308}\u{301}\u{3B9}\u{344}\u{1F79}",
+                small
+            ),
+            both("\u{399}\u{308}\u{399}\u{308}\u{39F}")
+        );
+        // In capitals, a capital typed with its tonos keeps it, composed or not, as small
+        // capitals keep it; capitals with small capitals are capitals.
+        assert_eq!(
+            drawn(&mut setup, "\u{386}\u{391}\u{301}", caps),
+            both("\u{386}\u{391}\u{301}")
+        );
+        let caps_and_small = setup.style(plain(TEST).with_caps(true).with_small_caps(true));
+        assert_eq!(
+            drawn(&mut setup, "\u{3CC}\u{3BF}\u{301}", caps_and_small),
+            (
+                "\u{39F}\u{39F}".to_owned(),
+                "\u{3CC}\u{3BF}\u{301}".to_owned()
+            )
+        );
     }
 
     #[test]

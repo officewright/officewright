@@ -2571,7 +2571,23 @@ mod tests {
                 Inline::text("a", id),
             ]
         };
-        assert_eq!(text_of(small, &symbol), "bA");
+        assert_eq!(text_of(small.clone(), &symbol), "bA");
+        // Greek in capitals draws ό and ο with a combining tonos as Ο, and its text keeps
+        // each character, also after the letter that stands for two (#517).
+        let greek = |id| {
+            vec![Inline::text(
+                "\u{3CC}\u{3BF}\u{301}\u{3B1}\u{3B2} \u{3B3}",
+                id,
+            )]
+        };
+        assert_eq!(
+            text_of(RunStyle::default().with_caps(true), &greek),
+            "\u{3CC}\u{3BF}\u{301}\u{3B1}\u{3B2} \u{3B3}"
+        );
+        assert_eq!(
+            text_of(small, &greek),
+            "\u{39F}\u{39F}\u{391}\u{392} \u{393}"
+        );
     }
 
     #[test]
