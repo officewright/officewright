@@ -139,6 +139,24 @@ pub(crate) fn with_soft_hyphen(font: Vec<u8>) -> Vec<u8> {
     remapped(font, 2, 0xB4, 0xAD)
 }
 
+/// `font` (the test font) as a symbol font: both subtables of its `cmap` are Windows
+/// symbol ones (platform 3, encoding 0), and map each of its glyphs from the code U+F000
+/// above its character, as symbol fonts do.
+pub(crate) fn with_symbol_cmap(font: Vec<u8>) -> Vec<u8> {
+    let mut font = [0x20, 0x41, 0xB4, 0xC1]
+        .into_iter()
+        .enumerate()
+        .fold(font, |font, (index, ch)| {
+            remapped(font, index, ch, 0xF000 | ch)
+        });
+    let cmap = table(&font, b"cmap");
+    for record in 0..2 {
+        let at = cmap + 4 + 8 * record;
+        font[at..at + 4].copy_from_slice(&[0, 3, 0, 0]);
+    }
+    font
+}
+
 /// `font` (the test font) with its glyph of `A` mapped from the hyphen-minus instead, as
 /// [`with_period`] does: a font whose hyphen [`with_multiplied_a`] multiplies.
 pub(crate) fn with_hyphen(font: Vec<u8>) -> Vec<u8> {

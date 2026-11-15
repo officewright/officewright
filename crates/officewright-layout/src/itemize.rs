@@ -516,22 +516,28 @@ impl Builder<'_, '_, '_> {
             self.out.source.push(ch);
         }
         let source = source_start..self.out.source.len();
-        // The font itself: a symbol font maps its codes at U+F020 to U+F0FF, another font
-        // has them as characters U+0020 to U+00FF.
+        // The font itself. A symbol font maps its codes at U+F020 to U+F0FF, and a code of
+        // U+0020 to U+00FF stands for the one U+F000 above it. Another font draws the code
+        // as it is written: Word draws symbol F0AD of Noto Sans with its missing-glyph shape,
+        // not as U+00AD, a soft hyphen, and breaks no line at it (`E-soft-hyphen-font`, cases
+        // 03 and 04; #509). That it draws its other codes so too is a hypothesis.
         let low = code & 0xFF;
-        let codes = [0xF000 | low, low].into_iter().filter_map(char::from_u32);
         if let (true, Some(face)) = (choice.installed, choice.face) {
-            for ch in codes {
-                if self.fonts.has_glyph(face, ch) {
-                    // A soft hyphen of a font that is not a symbol font stays with the
-                    // character before it, as in text.
-                    if !self.attach(ch, &source) {
-                        let size = drawn_size(&style, style.size(), false);
-                        let look = self.look(id, &style, choice, size, style.size(), Slot::Ascii);
-                        self.push(ch, source, look);
-                    }
-                    return;
+            let symbol = self
+                .fonts
+                .face(face)
+                .is_some_and(|shaping| shaping.face().is_symbol());
+            let drawn = char::from_u32(if symbol { 0xF000 | low } else { code })
+                .filter(|&ch| self.fonts.has_glyph(face, ch));
+            if let Some(ch) = drawn {
+                // A soft hyphen of a font that is not a symbol font stays with the
+                // character before it, as in text.
+                if !self.attach(ch, &source) {
+                    let size = drawn_size(&style, style.size(), false);
+                    let look = self.look(id, &style, choice, size, style.size(), Slot::Ascii);
+                    self.push(ch, source, look);
                 }
+                return;
             }
         }
         // A symbol font that is not installed: its code as the Unicode character it
@@ -1688,30 +1694,89 @@ mod tests {
 
     #[test]
     fn keeps_a_symbol_that_is_a_soft_hyphen_with_the_character_before_it() {
-        // Hyph is no symbol font and has a soft hyphen: symbol F0AD of it is U+00AD.
+        // Hyph is no symbol font and has a soft hyphen: its symbol 00AD is U+00AD.
         let hyph = renamed(with_soft_hyphen(minimal()), "Officewright Hyph");
         let mut setup = Setup::new(vec![minimal(), hyph]);
         let style = setup.style(plain(TEST));
         let other = setup.style(plain(TEST).with_size(Pt(20.0)));
         let (itemized, report, families) = setup.run(&[
             Inline::text("A", style),
-            Inline::symbol("Officewright Hyph", 0xF0AD, other),
+            Inline::symbol("Officewright Hyph", 0x00AD, other),
             Inline::text("A", style),
         ]);
         // In the run, face and size of the A before it, as a soft hyphen of text is.
-        assert_eq!(runs(&itemized), [("A\u{AD}A", "A\u{F0AD}A", 10.0)]);
+        assert_eq!(runs(&itemized), [("A\u{AD}A", "A\u{AD}A", 10.0)]);
         assert_eq!(families, [TEST]);
         assert!(report.is_empty(), "{report:?}");
         // With no character before it, in its own font.
         let (itemized, _, families) = setup.run(&[
-            Inline::symbol("Officewright Hyph", 0xF0AD, other),
+            Inline::symbol("Officewright Hyph", 0x00AD, other),
             Inline::text("A", style),
         ]);
         assert_eq!(
             runs(&itemized),
-            [("\u{AD}", "\u{F0AD}", 20.0), ("A", "A", 10.0)]
+            [("\u{AD}", "\u{AD}", 20.0), ("A", "A", 10.0)]
         );
         assert_eq!(families, ["Officewright Hyph", TEST]);
+    }
+
+    #[test]
+    fn a_font_that_is_no_symbol_font_draws_a_symbol_s_code_as_it_is_written() {
+        // Word draws symbol F0AD of Noto Sans, which has U+00AD but no U+F0AD, with the
+        // font's missing-glyph shape, and breaks no line at it (`E-soft-hyphen-font`, cases
+        // 03 and 04; #509). Hyph is no symbol font and has U+00AD: symbol F0AD of it is
+        // U+F0AD, in its own run, and no soft hyphen. Its code 0041 is U+0041.
+        let hyph = renamed(with_soft_hyphen(minimal()), "Officewright Hyph");
+        let mut setup = Setup::new(vec![minimal(), hyph]);
+        let style = setup.style(plain(TEST));
+        let (itemized, report, families) = setup.run(&[
+            Inline::text("AA", style),
+            Inline::symbol("Officewright Hyph", 0xF0AD, style),
+            Inline::text("AA", style),
+        ]);
+        assert_eq!(
+            runs(&itemized),
+            [
+                ("AA", "AA", 10.0),
+                ("\u{F0AD}", "\u{F0AD}", 10.0),
+                ("AA", "AA", 10.0)
+            ]
+        );
+        assert_eq!(families, [TEST, "Officewright Hyph", TEST]);
+        assert_eq!(
+            messages(&report),
+            [(
+                ReportKind::GlyphMissing,
+                "symbol F0AD of \"Officewright Hyph\" cannot be drawn: the font has no such \
+                 symbol"
+            )]
+        );
+        // No line may end after it, nor before it.
+        let breaks = crate::breaks::BreakMap::new(&itemized.text, true);
+        assert_eq!(
+            breaks.all(),
+            [(itemized.text.len(), crate::breaks::Opportunity::Mandatory)]
+        );
+        let (itemized, report, _) =
+            setup.run(&[Inline::symbol("Officewright Hyph", 0x0041, style)]);
+        assert_eq!(runs(&itemized), [("A", "A", 10.0)]);
+        assert!(report.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn a_symbol_font_draws_a_symbol_s_code_and_its_low_byte_alike() {
+        use crate::testing::with_symbol_cmap;
+        // Symb is a symbol font: its codes F041 and 0041 are both its glyph at U+F041.
+        let sym = renamed(with_symbol_cmap(minimal()), "Officewright Symb");
+        let mut setup = Setup::new(vec![minimal(), sym]);
+        let style = setup.style(plain(TEST));
+        let (itemized, report, families) = setup.run(&[
+            Inline::symbol("Officewright Symb", 0xF041, style),
+            Inline::symbol("Officewright Symb", 0x0041, style),
+        ]);
+        assert_eq!(runs(&itemized), [("\u{F041}\u{F041}", "\u{F041}A", 10.0)]);
+        assert_eq!(families, ["Officewright Symb"]);
+        assert!(report.is_empty(), "{report:?}");
     }
 
     #[test]
