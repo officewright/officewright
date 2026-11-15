@@ -5092,10 +5092,10 @@ mod tests {
         // before. Each paragraph anchors one picture from itself and one from its line: the
         // first is higher by the space laid out above the paragraph's first line.
         // In the text: 1, 4 pt before at the start of the document, 10 after; 2, 6 pt
-        // before, of which all is laid out within the 10 the paragraph above keeps; 3, 8 pt
-        // before left out by contextual spacing; 8, 6 pt before dropped at the top of the
-        // next page, after a page break. In a note: 4, 4 pt before under the separator; 5,
-        // 6 pt before under the note's first paragraph.
+        // before, of which all is laid out within the 10 the paragraph above keeps, and 10
+        // after; 3, 8 pt before left out by contextual spacing; 8, 6 pt before dropped at the
+        // top of the next page, after a page break. In a note: 4, 4 pt before under the
+        // separator; 5, 6 pt before under the note's first paragraph.
         let document = with_notes(
             setup(),
             NotePosition::PageBottom,
@@ -5122,7 +5122,7 @@ mod tests {
                         .with_inlines([p1, l1, Inline::text("A", style), reference])
                         .into(),
                     Paragraph::new(style)
-                        .with_props(spacing(6.0, 0.0))
+                        .with_props(spacing(6.0, 10.0))
                         .with_inlines([p2, l2, Inline::text("A", style)])
                         .into(),
                     Paragraph::new(style)
