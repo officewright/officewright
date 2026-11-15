@@ -809,6 +809,20 @@ fn stack_space(document: &Document, above: Option<&Flowed<'_>>, below: &Flowed<'
     }
 }
 
+/// How much of the space before a paragraph with `props` is laid out above its first
+/// line, which is `gap` below the paragraph with `above`, or below what is above it where
+/// that is no paragraph or nothing is: its own space before, as far as the gap holds it.
+fn space_laid_above(
+    document: &Document,
+    above: Option<&ParagraphProps>,
+    props: &ParagraphProps,
+    gap: f64,
+) -> f64 {
+    paragraph::own_space_before(document, props, above)
+        .0
+        .min(gap.max(0.0))
+}
+
 /// The space below `last`, the last of a stack.
 fn trailing_space(document: &Document, last: &Flowed<'_>) -> f64 {
     last.paragraph()
@@ -1600,9 +1614,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         // through its own paragraph's space only), a gap larger than the paragraph's own
         // space, the cut at the body's bottom and a paragraph split over pages.
         let props = paragraph.props();
-        let above = paragraph::own_space_before(self.document, props, neighbours.0)
-            .0
-            .min((top - self.cursor).max(0.0));
+        let above = space_laid_above(self.document, neighbours.0, props, top - self.cursor);
         let below = if lines.end >= layout.lines.len() {
             paragraph::own_space_after(self.document, props, neighbours.1)
                 .0
@@ -1623,7 +1635,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             bar_reach: (above, below),
         };
         painting.paint_shading(lines.clone(), origin, &mut items);
-        painting.paint(lines.clone(), origin, &mut items);
+        // Floating objects positioned from the paragraph are measured from above the space
+        // before it that the page lays out (`float_position`).
+        painting.paint_with_space_before(lines.clone(), origin, above, &mut items);
         let floats = painting.floats;
         if let Some(page) = self.pages.last_mut() {
             page.items.extend(items);
@@ -2569,6 +2583,18 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             let Some((part, _)) = frame.candidates.parts.get(*index) else {
                 continue;
             };
+            // The part above it, and where that ends, for the space laid out between them.
+            let (above, bottom) = match at_part.checked_sub(1).and_then(|at| frame.parts.get(at)) {
+                Some((above, laid, top)) => (
+                    frame
+                        .candidates
+                        .parts
+                        .get(*above)
+                        .and_then(|(above, _)| above.paragraph()),
+                    top + laid.height(),
+                ),
+                None => (None, 0.0),
+            };
             let walked = match laid.as_ref() {
                 FramePart::Paragraph(_, walked) => *walked,
                 FramePart::Table(_) => 0,
@@ -2599,8 +2625,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                             bar_reach: (0.0, 0.0),
                         };
                         let lines = 0..drawn_lines.unwrap_or(layout.lines.len());
+                        let above = above.map(Paragraph::props);
+                        let space =
+                            space_laid_above(self.document, above, paragraph.props(), top - bottom);
                         painting.paint_shading(lines.clone(), at, items);
-                        painting.paint(lines, at, items);
+                        painting.paint_with_space_before(lines, at, space, items);
                         anchored = painting.floats;
                     }
                     (FramePart::Table(drawn), _) => {
@@ -5014,6 +5043,134 @@ mod tests {
                 .any(|message| message.contains("does not wrap")),
             "{report:?}"
         );
+    }
+
+    /// Two pictures for case `n`, neither moved down: one from its paragraph, at x
+    /// `100 + 10 n` on the page, and one from its line, at `105 + 10 n`.
+    fn from_paragraph_and_line(document: &mut Document, n: u32) -> [Inline; 2] {
+        use crate::ir::VerticalReference as Y;
+        use crate::ir::{HorizontalPlacement, HorizontalReference, VerticalPlacement};
+        let mut at = |x: f64, down: Y| {
+            anchored_picture(
+                document,
+                (
+                    HorizontalReference::Page,
+                    HorizontalPlacement::Offset(Pt(x)),
+                ),
+                (down, VerticalPlacement::Offset(Pt(0.0))),
+            )
+        };
+        let x = 100.0 + 10.0 * f64::from(n);
+        [at(x, Y::Paragraph), at(x + 5.0, Y::Line)]
+    }
+
+    /// How far above its line's top the picture from its paragraph of each case of
+    /// [`from_paragraph_and_line`] is drawn on `pages`, by case.
+    fn paragraph_tops_above_lines(pages: &[Page]) -> Vec<(u32, f64)> {
+        let places: Vec<(f64, f64)> = pages.iter().flat_map(picture_places).collect();
+        let y = |x: f64| {
+            places
+                .iter()
+                .find(|place| (place.0 - x).abs() < 0.01)
+                .map(|place| place.1)
+        };
+        let mut above: Vec<(u32, f64)> = (1..20)
+            .filter_map(|n| {
+                let x = 100.0 + 10.0 * f64::from(n);
+                Some((n, y(x + 5.0)? - y(x)?))
+            })
+            .collect();
+        above.sort_by_key(|&(n, _)| n);
+        above
+    }
+
+    #[test]
+    fn a_floating_object_from_its_paragraph_is_placed_from_above_its_space_before() {
+        use crate::ir::{Note, NoteKind, NotePosition};
+        // Word's renders of `E-textbox-from-paragraph` and `E-textbox-vml` (#541): an object
+        // placed from its paragraph is measured from the paragraph's top above its space
+        // before. Each paragraph anchors one picture from itself and one from its line: the
+        // first is higher by the space laid out above the paragraph's first line.
+        // In the text: 1, 4 pt before at the start of the document, 10 after; 2, 6 pt
+        // before, of which all is laid out within the 10 the paragraph above keeps; 3, 8 pt
+        // before left out by contextual spacing; 8, 6 pt before dropped at the top of the
+        // next page, after a page break. In a note: 4, 4 pt before under the separator; 5,
+        // 6 pt before under the note's first paragraph.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let [p4, l4] = from_paragraph_and_line(document, 4);
+                let [p5, l5] = from_paragraph_and_line(document, 5);
+                let first = Paragraph::new(style)
+                    .with_props(spacing(4.0, 0.0))
+                    .with_inlines([Inline::note_number(mark), p4, l4, Inline::text("N", style)]);
+                let second = Paragraph::new(style)
+                    .with_props(spacing(6.0, 0.0))
+                    .with_inlines([p5, l5, Inline::text("N", style)]);
+                let note =
+                    document.add_note(Note::new(NoteKind::Footnote, [first.into(), second.into()]));
+                let [p1, l1] = from_paragraph_and_line(document, 1);
+                let [p2, l2] = from_paragraph_and_line(document, 2);
+                let [p3, l3] = from_paragraph_and_line(document, 3);
+                let [p8, l8] = from_paragraph_and_line(document, 8);
+                let reference = Inline::note_reference(note, false, style);
+                vec![
+                    Paragraph::new(style)
+                        .with_props(spacing(4.0, 10.0))
+                        .with_inlines([p1, l1, Inline::text("A", style), reference])
+                        .into(),
+                    Paragraph::new(style)
+                        .with_props(spacing(6.0, 0.0))
+                        .with_inlines([p2, l2, Inline::text("A", style)])
+                        .into(),
+                    Paragraph::new(style)
+                        .with_props(spacing(8.0, 0.0).with_contextual_spacing(true))
+                        .with_inlines([p3, l3, Inline::text("A", style)])
+                        .into(),
+                    Paragraph::new(style)
+                        .with_props(spacing(6.0, 0.0).with_page_break_before(true))
+                        .with_inlines([p8, l8, Inline::text("A", style)])
+                        .into(),
+                ]
+            },
+        );
+        let (result, _) = laid(&document, 10);
+        let pages = result.expect("pages").pages;
+        assert_eq!(pages.len(), 2);
+        assert_eq!(
+            paragraph_tops_above_lines(&pages),
+            [(1, 4.0), (2, 6.0), (3, 0.0), (4, 4.0), (5, 6.0), (8, 0.0)]
+        );
+
+        // In a header: 6, 3 pt before at its top; 7, 5 pt before under its first paragraph.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let [p6, l6] = from_paragraph_and_line(&mut document, 6);
+        let [p7, l7] = from_paragraph_and_line(&mut document, 7);
+        let header = [
+            Paragraph::new(style)
+                .with_props(spacing(3.0, 0.0))
+                .with_inlines([p6, l6, Inline::text("H", style)])
+                .into(),
+            Paragraph::new(style)
+                .with_props(spacing(5.0, 0.0))
+                .with_inlines([p7, l7, Inline::text("H", style)])
+                .into(),
+        ];
+        document.add_section(
+            Section::new(close_frames())
+                .with_headers(HeaderFooterSet::default().with_primary(header))
+                .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+        );
+        let (result, _) = laid(&document, 10);
+        let pages = result.expect("pages").pages;
+        assert_eq!(paragraph_tops_above_lines(&pages), [(6, 3.0), (7, 5.0)]);
     }
 
     #[test]

@@ -224,15 +224,20 @@ pub(crate) fn stack(items: Vec<DisplayItem>, mut floats: Vec<Float>) -> Vec<Disp
 /// area inside the margins, as every section is laid out in one column. Word's renders
 /// confirm the page down and the column across, with a negative offset
 /// (`letter-cfpb-validation-notice`), and that the offset positions the frame, not the box
-/// its effects reach (the header logo of `report-hhs-usability-test-plan`).
+/// its effects reach (the header logo of `report-hhs-usability-test-plan`). A paragraph's
+/// top is above its space before: Word's renders of `E-textbox-from-paragraph` (DrawingML,
+/// 4 pt before) and `E-textbox-vml` (VML, 6 pt before) put the frames that much higher
+/// than the first line's top, and those of paragraphs with no space before at it (#541).
 ///
 /// Hypotheses until Word renders the rule documents of #314: down, the inside margin is
 /// the top one on odd pages and the bottom one on even pages, as across (ST_RelFromV and
 /// ST_AlignV do not say); a line is aligned to from its top to its bottom, a paragraph
-/// and a character are points; a paragraph's top is that of its first line on this page,
-/// below its space before, and in the later part of a paragraph split over pages that
-/// part's top; the gutter counts into the left margin, and mirrored margins
-/// (`w:mirrorMargins`, not laid out yet) do not swap the left and right ones.
+/// and a character are points; a paragraph's top on this page is above as much of its
+/// own space before as is laid out there (none where the top of a page or contextual
+/// spacing leaves it out, only its own where the space after of the paragraph above is
+/// larger), and in the later part of a paragraph split over pages that part's top; the
+/// gutter counts into the left margin, and mirrored margins (`w:mirrorMargins`, not laid
+/// out yet) do not swap the left and right ones.
 pub(crate) fn float_position(
     object: &AnchoredObject,
     page: &PageBox,
@@ -412,8 +417,24 @@ pub(crate) struct Painting<'a, 'f, 'b> {
 impl Painting<'_, '_, '_> {
     /// Adds to `out` what `lines` of the paragraph draw, the first of them with its top
     /// at `origin.y`, in a column whose start edge is at `origin.x`: shading and
-    /// highlighting first, then the glyphs, the lines and the pictures.
+    /// highlighting first, then the glyphs, the lines and the pictures. The paragraph's
+    /// top, which the floating objects it anchors are positioned from, is that of the
+    /// first of `lines`.
     pub(crate) fn paint(&mut self, lines: Range<usize>, origin: Point, out: &mut Vec<DisplayItem>) {
+        self.paint_with_space_before(lines, origin, 0.0, out);
+    }
+
+    /// As [`paint`](Self::paint), where `space_before` of the paragraph's space before is
+    /// laid out above the first of `lines`: the paragraph's top, which the floating
+    /// objects it anchors are positioned from, is that far above `origin.y`.
+    pub(crate) fn paint_with_space_before(
+        &mut self,
+        lines: Range<usize>,
+        origin: Point,
+        space_before: f64,
+        out: &mut Vec<DisplayItem>,
+    ) {
+        let paragraph_top = origin.y.0 - space_before;
         let mut behind = Vec::new();
         let mut front = Vec::new();
         let mut top = origin.y.0;
@@ -484,7 +505,7 @@ impl Painting<'_, '_, '_> {
                         if matches!(itemized.items.get(*item), Some(Item::Separator(..))) {
                             self.separator(*item, (x, piece.width), baseline, &mut front);
                         } else {
-                            self.float(*item, (x, (top, top + line.height.0), origin.y.0));
+                            self.float(*item, (x, (top, top + line.height.0), paragraph_top));
                         }
                     }
                     PieceKind::Break { .. } => {}

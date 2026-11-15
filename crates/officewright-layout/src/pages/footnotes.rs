@@ -59,7 +59,7 @@ use officewright_core::Pt;
 
 use super::{
     Content, EPSILON, Flowed, FramePart, Page, PageSink, Pager, Walk, page_box,
-    report_list_formats, stack_space, trailing_space,
+    report_list_formats, space_laid_above, stack_space, trailing_space,
 };
 use crate::display::{DisplayItem, Float, PageBox, Painting, Point};
 use crate::error::Result;
@@ -1048,39 +1048,84 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let x = page.body.left;
         let mut items = Vec::new();
         let mut floats = Vec::new();
-        let mut paint = |layout: &NoteLayout<'d>, span: (At, At), y: f64| {
+        // What is drawn, in order: each with its part, and its top and bottom from the top
+        // of the notes' room.
+        let separator = notes.separator.iter().map(|separator| {
+            (
+                separator,
+                (At::default(), separator.end()),
+                0.0,
+                separator.height,
+            )
+        });
+        let placed = notes
+            .notes
+            .iter()
+            .filter(|placed| !placed.is_empty())
+            .map(|placed| {
+                (
+                    &placed.layout,
+                    (placed.from, placed.to),
+                    placed.top,
+                    placed.bottom,
+                )
+            });
+        let notice = notes
+            .notice
+            .iter()
+            .map(|(notice, y, _)| (notice, (At::default(), notice.end()), *y, y + notice.height));
+        // What ends above the part painted next and where, for the space laid out above its
+        // first paragraph.
+        let mut above: (Option<&Flowed<'d>>, f64) = (None, 0.0);
+        for (layout, (from, to), y, bottom) in separator.chain(placed).chain(notice) {
+            let space = match layout.starting(from).and_then(Flowed::paragraph) {
+                Some(first) => {
+                    let props = above.0.and_then(Flowed::paragraph).map(Paragraph::props);
+                    space_laid_above(self.document, props, first.props(), y - above.1)
+                }
+                None => 0.0,
+            };
             let origin = Point { x, y: Pt(top + y) };
+            let span = ((from, to), space);
             self.paint_note(layout, span, origin, page_box, (&mut items, &mut floats));
-        };
-        if let Some(separator) = &notes.separator {
-            paint(separator, (At::default(), separator.end()), 0.0);
-        }
-        for placed in notes.notes.iter().filter(|placed| !placed.is_empty()) {
-            paint(&placed.layout, (placed.from, placed.to), placed.top);
-        }
-        if let Some((notice, y, _)) = &notes.notice {
-            paint(notice, (At::default(), notice.end()), *y);
+            above = (layout.ending(to), bottom);
         }
         page.items.extend(items);
         page.floats.extend(floats);
     }
 
     /// Adds to `items` what `note` draws from `from` to `to`, the top left corner of that
-    /// at `origin`, and to `floats` its floating objects.
+    /// at `origin`, and to `floats` its floating objects; `lead` of the space before its
+    /// first paragraph is laid out above it, where it starts one.
     fn paint_note(
         &mut self,
         note: &NoteLayout<'d>,
-        (from, to): (At, At),
+        ((from, to), lead): ((At, At), f64),
         origin: Point,
         page: PageBox,
         (items, floats): (&mut Vec<DisplayItem>, &mut Vec<Float>),
     ) {
         let start = note.top(from);
-        for (index, (part, laid, _)) in note.parts.iter().enumerate().skip(from.part) {
+        for (index, (part, laid, part_top)) in note.parts.iter().enumerate().skip(from.part) {
             if index > to.part || (index == to.part && to.line == 0) {
                 break;
             }
             let first = if index == from.part { from.line } else { 0 };
+            // The space before it laid out above its first line drawn: none within it.
+            let space = match index.checked_sub(1).and_then(|at| note.parts.get(at)) {
+                _ if first > 0 => 0.0,
+                _ if index == from.part => lead,
+                Some((above, laid_above, above_top)) => match &part.content {
+                    Content::Paragraph(paragraph, _) => space_laid_above(
+                        self.document,
+                        above.paragraph().map(Paragraph::props),
+                        paragraph.props(),
+                        part_top - above_top - laid_above.height(),
+                    ),
+                    Content::Table(..) => 0.0,
+                },
+                None => 0.0,
+            };
             let at = Point {
                 x: origin.x,
                 y: Pt(origin.y.0
@@ -1114,7 +1159,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     };
                     let lines = first..last;
                     painting.paint_shading(lines.clone(), at, items);
-                    painting.paint(lines, at, items);
+                    painting.paint_with_space_before(lines, at, space, items);
                     floats.extend(painting.floats);
                 }
                 (FramePart::Table(drawn), _) => {
