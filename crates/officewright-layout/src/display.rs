@@ -1228,8 +1228,9 @@ impl Painting<'_, '_, '_> {
             let insets = text_box.insets();
             // Centred and bottom text, as DrawingML describes them: hypotheses, since in
             // Word's references of `letter-cfpb-validation-notice` and its `-es` twin the
-            // text of a centred box is where the top would put it, if its paragraph's top
-            // is where `float_position` takes it (#465).
+            // text of a centred box is about 2 pt from where centring puts it: where the
+            // bottom would put it, with its paragraph's top above its space before, where
+            // `float_position` takes it, or where the top would, with it below (#465).
             let free = (height - insets.top().0 - insets.bottom().0 - laid.height).max(0.0);
             let start = top
                 + insets.top().0
