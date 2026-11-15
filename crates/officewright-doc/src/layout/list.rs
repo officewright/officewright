@@ -69,7 +69,8 @@ impl Translator<'_> {
     /// ignore the whole text (MS-OI29500 2.1.283 c). Worked out once for each instance
     /// and level, from the IR's levels, so that the cost does not grow with the items or
     /// the length of a text. It looks at the level, not at an item's number: a format that
-    /// writes nothing for some numbers, such as Chicago's past 116, counts as drawing.
+    /// writes nothing for some numbers, such as letters and Roman numerals for 0, counts as
+    /// drawing.
     pub(super) fn label_draws(&mut self, id: i64, level: u8) -> bool {
         if let Some(&draws) = self.lists.draws.get(&(id, level)) {
             return draws;

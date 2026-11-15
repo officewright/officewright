@@ -30,7 +30,7 @@ use crate::tables::{self, Context, Drawn, Prepared};
 
 mod footnotes;
 
-use footnotes::{NoteLayout, NoteLayouts, PageNotes};
+use footnotes::{NoteLayouts, PageNotes, Specials, Waiting};
 
 /// Lengths closer than this are equal, so that lines that reach the bottom of the body
 /// but for rounding still fit.
@@ -156,15 +156,30 @@ struct Walk<'a, 'w> {
     out: &'w mut Vec<Flowed<'a>>,
 }
 
-/// Reports, once, at the first of them, labels with a number written in decimal because
-/// its format is one the layout does not write.
+/// Reports, once each, at the first of them, labels with a number written otherwise than
+/// its format says: in decimal because the layout does not write the format or the format
+/// cannot represent the number, or in English for a language without words, and labels
+/// that are cut.
 pub(crate) fn report_list_formats(counters: &Counters, fonts: &mut Fonts<'_>) {
-    if let Some(location) = &counters.unsupported_format {
-        fonts.report_once(
-            ReportKind::FeatureUnsupported,
-            location,
-            "list numbers in a format the layout does not write are written in decimal".to_owned(),
-        );
+    let departures = [
+        (
+            &counters.unsupported_format,
+            "list numbers in a format the layout does not write are written in decimal",
+        ),
+        (
+            &counters.unrepresentable,
+            "list numbers that their format cannot represent are written in decimal",
+        ),
+        (
+            &counters.other_language,
+            "list numbers in words and ordinals in languages other than English and German \
+             are written in English",
+        ),
+    ];
+    for (first, message) in departures {
+        if let Some(location) = first {
+            fonts.report_once(ReportKind::FeatureUnsupported, location, message.to_owned());
+        }
     }
     if let Some(location) = &counters.long_label {
         fonts.report_once(
@@ -286,6 +301,9 @@ struct Laid<S> {
     /// How many times a header or footer was laid out in the last pass.
     #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
     frames_laid: usize,
+    /// How many times where a header or footer is cut was worked out in the last pass.
+    #[cfg_attr(not(test), allow(dead_code))] // reason: read by the test of the cut's cost only
+    frames_cut: usize,
     /// The pieces of lines painting headers and footers walked in the last pass.
     #[cfg_attr(not(test), allow(dead_code))] // reason: read by the tests of that bound only
     frames_walked: usize,
@@ -344,12 +362,29 @@ pub(crate) fn paginate_into<S: PageSink>(
 /// Reports, once, the numbers of notes that the layout writes otherwise than the document
 /// says.
 fn report_note_numbers(notes: &NoteNumbers, fonts: &mut Fonts<'_>) {
-    if notes.decimal {
-        fonts.report_once(
-            ReportKind::FeatureUnsupported,
-            &Location::default(),
-            "numbers in a format the layout does not write are written as decimal".to_owned(),
-        );
+    let departures = [
+        (
+            notes.departures.unsupported,
+            "numbers in a format the layout does not write are written as decimal",
+        ),
+        (
+            notes.departures.unrepresentable,
+            "note numbers that their format cannot represent are written as decimal",
+        ),
+        (
+            notes.departures.language,
+            "note numbers in words and ordinals in languages other than English and German \
+             are written in English",
+        ),
+    ];
+    for (departs, message) in departures {
+        if departs {
+            fonts.report_once(
+                ReportKind::FeatureUnsupported,
+                &Location::default(),
+                message.to_owned(),
+            );
+        }
     }
     if notes.each_page {
         fonts.report_once(
@@ -398,6 +433,7 @@ fn paginate_with<S: PageSink>(
             layouts_held: 0,
             most_layouts: 0,
             frames_laid: 0,
+            frames_cut: 0,
             frames_walked: 0,
             headers_laid: 0,
             headers_copied: 0,
@@ -414,7 +450,8 @@ fn paginate_with<S: PageSink>(
             footnotes: Vec::new(),
             placed: HashSet::new(),
             note_layouts: HashMap::new(),
-            separators: HashMap::new(),
+            specials: HashMap::new(),
+            pending: Vec::new(),
         };
         let lines = pager.run(&flow)?;
         if pager.page_count() == 0 {
@@ -438,6 +475,7 @@ fn paginate_with<S: PageSink>(
                 lines,
                 most_held: (pager.most_held, pager.most_layouts),
                 frames_laid: pager.frames_laid,
+                frames_cut: pager.frames_cut,
                 frames_walked: pager.frames_walked,
                 headers_laid: pager.headers_laid,
                 headers_copied: pager.headers_copied,
@@ -674,25 +712,38 @@ const MAX_FRAME_DRAWN: usize = 1 << 20;
 /// it on every page (#374).
 const MAX_FRAME_LAID: usize = 1 << 20;
 
+/// The room under which the header and footer of a page leave its body no room, and are
+/// cut to [`FRAME_CUT_SHARE`] of the page's height. Word cut them with 7.9 pt of room left
+/// (`E-header-cut.docx`, A5) and with none (`E-header-no-room.docx`,
+/// `E-header-taller-than-page.docx`), but not with 204 pt or more: a hypothesis of one
+/// line of the 12 pt its body text has there, until the rule documents of #548.
+const LEAST_BODY_ROOM: f64 = 12.0;
+
+/// How much of the page's height a header and a footer that leave the body no room are
+/// each drawn down to, in whole lines: 28 lines of 12 pt on A4 and 19 on A5 in Word's
+/// renders (`E-header-no-room.docx`, `E-header-cut.docx`).
+const FRAME_CUT_SHARE: f64 = 0.4;
+
 /// A header or footer as each pass prepares it once: the paragraphs that may be drawn,
-/// in order (the first [`MAX_FRAME_WORK`] of a header, the last of a footer), each
-/// with whether it has a field the layout computes; whether any of them has a `PAGE`
-/// field; whether it is a header; and where it is, for the report.
+/// in order (the first [`MAX_FRAME_WORK`]), each with whether it has a field the layout
+/// computes; whether any of them has a `PAGE` field; and where it is, for the report.
 struct Candidates<'d> {
     parts: Vec<(Flowed<'d>, bool)>,
     page_field: bool,
-    header: bool,
     location: Location,
 }
 
 /// A header or footer laid out for a page: its candidates; the paragraphs drawn, each by
 /// its place among the candidates, with its layout and its top from the frame's top; its
-/// height; and, when it has a `PAGE` field, the field values it was laid out with.
+/// height; when it has a `PAGE` field, the field values it was laid out with; and where
+/// it is cut on a page whose body it leaves no room, worked out once with the layout, as
+/// the frame is drawn on every page.
 struct Frame<'d> {
     candidates: Rc<Candidates<'d>>,
     parts: Vec<(usize, Rc<FramePart>, f64)>,
     height: f64,
     values: Option<FieldValues>,
+    cut: Option<FrameCut>,
 }
 
 /// A paragraph of a header or footer laid out, with the pieces painting it walks (one for
@@ -700,6 +751,16 @@ struct Frame<'d> {
 enum FramePart {
     Paragraph(ParagraphLayout, usize),
     Table(Drawn),
+}
+
+/// Where a header or footer cut at a height ends: the parts drawn whole, by their place in
+/// the frame's parts, then the first lines of the next part when it is a paragraph that
+/// crosses the height, and the bottom of what is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FrameCut {
+    whole: usize,
+    lines: usize,
+    bottom: f64,
 }
 
 impl FramePart {
@@ -774,7 +835,8 @@ struct Checkpoint {
     /// they could still lay out.
     frame_budget: usize,
     frame_laid_budget: usize,
-    /// Whether nothing was on the page yet.
+    /// Whether nothing was on the page yet, not even notes going on from the page before,
+    /// beside which a chain may move on (a hypothesis, see `footnotes`).
     at_top: bool,
 }
 
@@ -842,9 +904,10 @@ struct Pager<'d, 'f, 'b, S> {
     /// The paragraph layouts held, and the most at once.
     layouts_held: usize,
     most_layouts: usize,
-    /// How many times a header or footer was laid out, and the pieces of lines painting them
-    /// walked.
+    /// How many times a header or footer was laid out, where one is cut was worked out,
+    /// and the pieces of lines painting them walked.
     frames_laid: usize,
+    frames_cut: usize,
     frames_walked: usize,
     /// How many times header rows to repeat were laid out, and copied onto a page.
     headers_laid: usize,
@@ -879,9 +942,11 @@ struct Pager<'d, 'f, 'b, S> {
     footnotes: Vec<PageNotes<'d>>,
     /// The footnotes on a page, held or handed on to the sink.
     placed: HashSet<crate::ir::NoteId>,
-    /// The footnotes laid out, and the separator laid out at each width, by its bits.
+    /// The footnotes laid out, and the special notes laid out at each width, by its bits.
     note_layouts: NoteLayouts<'d>,
-    separators: HashMap<u64, Rc<NoteLayout<'d>>>,
+    specials: Specials<'d>,
+    /// What of the footnotes of the last page that is not blank goes on to the next.
+    pending: Vec<Waiting<'d>>,
 }
 
 /// Which header or footer: its section, whether it is the header, and its kind.
@@ -1188,6 +1253,16 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             }
             next += 1;
         }
+        // Pages for what of the last notes goes on, each taking at least a line of them.
+        while !self.pending.is_empty() {
+            let Some(section) = self.pages.last().map(|page| page.section) else {
+                break;
+            };
+            let setup = sections
+                .get(section)
+                .map_or_else(PageSetup::default, |section| *section.page());
+            self.new_page(section, &setup)?;
+        }
         // The count the bound is measured by is the layouts really held.
         debug_assert_eq!(
             self.layouts_held,
@@ -1333,6 +1408,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let mut first_page = None;
         loop {
             let empty = self.page_is_empty();
+            // Whether nothing moves the paragraph further: the page holds no text, nor
+            // notes going on from the page before, which leave the next page more room (a
+            // hypothesis, see `footnotes`).
+            let bare = empty && !self.holds_continued_notes();
             // Space above: between this paragraph and the one above it on the page, or
             // its own below a table; at the top of a page only at the start of the
             // document or of a section. Word's render of `E-space-before-top.docx`:
@@ -1402,7 +1481,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             // The paragraph does not fit: split it, or move it. One kept on one page that is
             // taller than a page moves to a new page all the same, and is split there.
             // Hypothesis until a Word render (`E-keeplines-long.docx`).
-            if first == 0 && keep_lines && !empty {
+            if first == 0 && keep_lines && !bare {
                 self.new_page(flowed.section, &section)?;
                 continue;
             }
@@ -1418,23 +1497,19 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 }
             }
             if take == 0 {
-                if !empty {
+                if !bare {
                     self.new_page(flowed.section, &section)?;
                     continue;
                 }
-                // Nothing moves it further: the lines that fit, at least one.
+                // Nothing moves it further: the lines that fit, at least one, and of its
+                // footnotes what fits, the rest on the next page.
                 take = fit.max(1);
-                if fit == 0 {
-                    // The line fits without its footnotes, or not even alone.
-                    if fitting(lines, first, top, bottom).0 > 0 {
-                        self.report_notes_past_bottom(&flowed.location);
-                    } else {
-                        self.fonts.report_once(
-                            ReportKind::Overflow,
-                            &flowed.location,
-                            "a line is taller than the body of its page".to_owned(),
-                        );
-                    }
+                if fit == 0 && fitting(lines, first, top, bottom).0 == 0 {
+                    self.fonts.report_once(
+                        ReportKind::Overflow,
+                        &flowed.location,
+                        "a line is taller than the body of its page".to_owned(),
+                    );
                 }
             }
             self.put(
@@ -1485,13 +1560,6 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             return Ok(());
         };
         let left = page.body.left;
-        // The notes of the lines go on the page first, so that what the paragraph draws
-        // below its last line stops above them at the bottom of the page, the space after
-        // the last note included. Notes beneath the text start under its last line, and a
-        // bar tab reaching through the space after it crosses their separator: a
-        // hypothesis until a Word render, as no reference has both.
-        self.add_footnotes((flowed.section, paragraph), layout, lines.clone())?;
-        let bottom = self.notes_top()?;
         let height: f64 = layout
             .lines
             .get(lines.clone())
@@ -1499,6 +1567,18 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             .iter()
             .map(|line| line.height.0)
             .sum();
+        // The notes of the lines go on the page first, so that what the paragraph draws
+        // below its last line stops above them at the bottom of the page, the space after
+        // the last note included. Notes beneath the text start under its last line, and a
+        // bar tab reaching through the space after it crosses their separator: a
+        // hypothesis until a Word render, as no reference has both.
+        self.add_footnotes(
+            (flowed.section, paragraph),
+            layout,
+            lines.clone(),
+            top + height,
+        )?;
+        let bottom = self.notes_top()?;
         let mut items = Vec::new();
         tables::report_borders(paragraph, &flowed.location, self.fonts);
         let origin = Point {
@@ -1617,7 +1697,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         // Whether the page holds nothing but the table's header rows repeated.
         let mut repeated = false;
         while band < count {
-            let empty = repeated || self.page_is_empty();
+            // Whether the page holds nothing else, and no notes going on from the page
+            // before, which leave the next page more room.
+            let empty = (repeated || self.page_is_empty()) && !self.holds_continued_notes();
             // The space below the paragraph above (design 8.6: a table has no
             // spacing of its own).
             let above = self
@@ -2000,6 +2082,29 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         .to_owned(),
                 );
             }
+            // Where they leave the body less room than a line, Word draws each only down to
+            // a share of the page's height, in whole lines, a cut footer ending at its
+            // distance from the bottom; the body stays where the uncut header puts it
+            // (`E-header-no-room.docx`, `E-header-taller-than-page.docx`, case 5 of
+            // `E-header-cut.docx`).
+            let (header_cut, footer_cut) = if body.bottom.0 - body.top.0 < LEAST_BODY_ROOM {
+                (header.cut, footer.cut)
+            } else {
+                (None, None)
+            };
+            for (cut, frame) in [(header_cut, &header), (footer_cut, &footer)] {
+                if cut.is_some() {
+                    self.fonts.report_once(
+                        ReportKind::Overflow,
+                        &frame.candidates.location,
+                        format!(
+                            "a header or footer that leaves the body of its page no room is \
+                             drawn down to {FRAME_CUT_SHARE} of the page's height, as Word \
+                             draws it"
+                        ),
+                    );
+                }
+            }
             let page = page_box(setup, number);
             self.paint_frame(
                 &header,
@@ -2008,9 +2113,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     y: Pt(header_top),
                 },
                 (&mut items, &mut floats),
-                page,
+                (page, header_cut),
             );
-            let footer_top = footer_bottom - footer.height;
+            let footer_top = footer_bottom - footer_cut.map_or(footer.height, |cut| cut.bottom);
             self.paint_frame(
                 &footer,
                 Point {
@@ -2018,7 +2123,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     y: Pt(footer_top),
                 },
                 (&mut items, &mut floats),
-                page,
+                (page, footer_cut),
             );
         }
         // The header's and footer's floating objects are stacked at once with them: nothing
@@ -2037,6 +2142,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             blank,
         });
         self.footnotes.push(PageNotes::default());
+        if !blank {
+            self.continue_footnotes(section)?;
+        }
         self.most_held = self.most_held.max(self.pages.len());
         self.next_number = self.next_number.saturating_add(1);
         self.cursor = body.top.0;
@@ -2186,12 +2294,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             candidates: Rc::new(Candidates {
                 parts: Vec::new(),
                 page_field: false,
-                header,
                 location: Location::default(),
             }),
             parts: Vec::new(),
             height: 0.0,
             values: None,
+            cut: None,
         })
     }
 
@@ -2228,10 +2336,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         };
         walk.blocks(blocks)?;
         report_list_formats(&counters, self.fonts);
-        // A header is laid out from its first paragraph, a footer from its last, which is
-        // nearest its distance. A table counts its paragraphs, rows, cells and grid
-        // columns, nested tables' too, as it is laid out again on every page where a field
-        // in it changes.
+        // A header or footer is laid out from its first paragraph, as Word leaves out the
+        // last lines of a footer it cuts (`E-header-no-room.docx`). A table counts its
+        // paragraphs, rows, cells and grid columns, nested tables' too, as it is laid out
+        // again on every page where a field in it changes.
         let weight = |part: &Flowed<'_>| match &part.content {
             Content::Paragraph(..) => 1,
             Content::Table(table, _) => tables::table_work(table),
@@ -2241,19 +2349,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             taken = taken.saturating_add(weight(part));
             taken <= MAX_FRAME_WORK
         };
-        let kept = if header {
-            flowed.iter().take_while(|part| fits(part)).count()
-        } else {
-            flowed.iter().rev().take_while(|part| fits(part)).count()
-        };
-        let past = flowed.len().saturating_sub(kept);
-        if past > 0 {
+        let kept = flowed.iter().take_while(|part| fits(part)).count();
+        if kept < flowed.len() {
             self.report_cut(&location);
-            if header {
-                flowed.truncate(kept);
-            } else {
-                flowed.drain(..past);
-            }
+            flowed.truncate(kept);
         }
         let kinds = |part: &Flowed<'_>| match &part.content {
             Content::Paragraph(paragraph, _) => paragraph_field_kinds(paragraph),
@@ -2275,7 +2374,6 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         Ok(Candidates {
             parts,
             page_field,
-            header,
             location,
         })
     }
@@ -2297,8 +2395,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// between them, the space before the first and after the last included. The layouts
     /// of its paragraphs without fields are taken from `last` when it has them. Paragraphs
     /// that would start past the page's height `room.1`, spacing included, are left out,
-    /// and reported: the last ones of a header, the first ones of a footer, which grows up
-    /// from its distance.
+    /// and reported: the last ones, of a footer too, as Word leaves out the last lines of
+    /// a footer it cuts (`E-header-no-room.docx`).
     fn frame(
         &mut self,
         candidates: Rc<Candidates<'d>>,
@@ -2318,30 +2416,14 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             })
             .map(|(index, part, _)| (*index, Rc::clone(part)))
             .collect();
-        let count = candidates.parts.len();
-        let order: Vec<usize> = if candidates.header {
-            (0..count).collect()
-        } else {
-            (0..count).rev().collect()
-        };
         let mut kept: Vec<(usize, Rc<FramePart>)> = Vec::new();
         let mut taken = 0.0;
-        // The part laid out before, next to this one: above it in a header, below it in
-        // a footer.
+        // The part laid out before, above this one.
         let mut before: Option<&Flowed<'d>> = None;
-        for index in order {
-            let Some((part, _)) = candidates.parts.get(index) else {
-                continue;
-            };
-            // The space between it and the part before, or before a header's first and
-            // after a footer's last: a part that would start past the page's height is
-            // not laid out, nor any after it.
-            let gap = match (before, candidates.header) {
-                (None, true) => stack_space(document, None, part),
-                (None, false) => trailing_space(document, part),
-                (Some(above), true) => stack_space(document, Some(above), part),
-                (Some(below), false) => stack_space(document, Some(part), below),
-            };
+        for (index, (part, _)) in candidates.parts.iter().enumerate() {
+            // The space between it and the part before, or before the first: a part that
+            // would start past the page's height is not laid out, nor any after it.
+            let gap = stack_space(document, before, part);
             if taken + gap >= page_height.0 {
                 self.report_cut(&candidates.location);
                 break;
@@ -2363,7 +2445,6 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             before = Some(part);
             kept.push((index, laid));
         }
-        kept.sort_by_key(|(index, _)| *index);
         let mut parts = Vec::new();
         let mut height = 0.0;
         let mut above: Option<&Flowed<'d>> = None;
@@ -2380,12 +2461,61 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         if let Some(last) = above {
             height += trailing_space(document, last);
         }
+        let cut = self.frame_cut(&parts, FRAME_CUT_SHARE * page_height.0);
         Ok(Frame {
             candidates,
             parts,
             height,
             values: shown,
+            cut,
         })
+    }
+
+    /// Where the frame of `parts` ends cut at `limit` below its top, in whole lines, or
+    /// `None` when all of it is within it. A table crossing the limit is left out whole. Its
+    /// first line, or its first table, is kept however tall: no reference shows Word cutting
+    /// a frame whose first line alone passes the limit (#548).
+    fn frame_cut(&mut self, parts: &[(usize, Rc<FramePart>, f64)], limit: f64) -> Option<FrameCut> {
+        self.frames_cut += 1;
+        let mut bottom = 0.0;
+        for (whole, (_, laid, top)) in parts.iter().enumerate() {
+            let first = whole == 0;
+            match laid.as_ref() {
+                FramePart::Paragraph(layout, _) => {
+                    let mut end = *top;
+                    let mut lines = 0;
+                    for line in &layout.lines {
+                        if end + line.height.0 > limit + EPSILON && !(first && lines == 0) {
+                            break;
+                        }
+                        end += line.height.0;
+                        lines += 1;
+                    }
+                    if lines < layout.lines.len() {
+                        if lines > 0 {
+                            bottom = end;
+                        }
+                        return Some(FrameCut {
+                            whole,
+                            lines,
+                            bottom,
+                        });
+                    }
+                    bottom = end;
+                }
+                FramePart::Table(drawn) => {
+                    if top + drawn.height.0 > limit + EPSILON && !first {
+                        return Some(FrameCut {
+                            whole,
+                            lines: 0,
+                            bottom,
+                        });
+                    }
+                    bottom = top + drawn.height.0;
+                }
+            }
+        }
+        None
     }
 
     /// A paragraph of a header or footer laid out `width` wide, or a table of it drawn,
@@ -2416,18 +2546,26 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         }
     }
 
-    /// Adds to `items` what `frame` draws, its top left corner at `origin`, as far as the
-    /// budget of what frames draw goes: a part that would take more than is left is not
-    /// drawn, nor is anything of a frame after it. A paragraph costs what it draws, or the
-    /// pieces painting walks where those are more.
+    /// Adds to `items` what `frame` draws, its top left corner at `origin`, down to where
+    /// `cut` ends it, and as far as the budget of what frames draw goes: a part that would
+    /// take more than is left is not drawn, nor is anything of a frame after it. A
+    /// paragraph costs what it draws, or the pieces painting walks where those are more.
     fn paint_frame(
         &mut self,
         frame: &Frame<'d>,
         origin: Point,
         (items, floats): (&mut Vec<DisplayItem>, &mut Vec<Float>),
-        page: PageBox,
+        (page, cut): (PageBox, Option<FrameCut>),
     ) {
-        for (index, laid, top) in &frame.parts {
+        for (at_part, (index, laid, top)) in frame.parts.iter().enumerate() {
+            // The lines of a paragraph drawn: all, or the first of the one the cut crosses.
+            let drawn_lines = match cut {
+                Some(cut) if at_part > cut.whole || (at_part == cut.whole && cut.lines == 0) => {
+                    break;
+                }
+                Some(cut) if at_part == cut.whole => Some(cut.lines),
+                _ => None,
+            };
             let Some((part, _)) = frame.candidates.parts.get(*index) else {
                 continue;
             };
@@ -2460,7 +2598,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                             // bar tabs reach only through the lines.
                             bar_reach: (0.0, 0.0),
                         };
-                        let lines = 0..layout.lines.len();
+                        let lines = 0..drawn_lines.unwrap_or(layout.lines.len());
                         painting.paint_shading(lines.clone(), at, items);
                         painting.paint(lines, at, items);
                         anchored = painting.floats;
@@ -2539,7 +2677,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             leaders: self.leaders,
             frame_budget: self.frame_budget,
             frame_laid_budget: self.frame_laid_budget,
-            at_top: self.page_is_empty(),
+            at_top: self.page_is_empty() && !self.holds_continued_notes(),
         }
     }
 
@@ -2554,8 +2692,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         );
         let held = checkpoint.pages.saturating_sub(self.taken);
         self.pages.truncate(held);
+        // The notes the dropped pages reference; the rest of a note going on there stays
+        // placed on the page of its reference.
         for notes in self.footnotes.drain(held.min(self.footnotes.len())..) {
-            for note in notes.notes() {
+            for note in notes.referenced() {
                 self.placed.remove(&note);
             }
         }
@@ -2569,6 +2709,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 self.placed.remove(&note);
             }
         }
+        self.reset_continued_footnotes();
         self.cursor = checkpoint.cursor;
         self.above = checkpoint.above;
         self.frame_budget = checkpoint.frame_budget;
@@ -6377,6 +6518,308 @@ mod tests {
         assert_eq!(fixed.expect("pages").pages[0].body.top, Pt(20.0));
     }
 
+    /// The baselines of the glyph runs of `page`, top to bottom.
+    fn run_baselines(page: &Page) -> Vec<Pt> {
+        let mut baselines: Vec<Pt> = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Glyphs(run) => Some(run.origin.y),
+                _ => None,
+            })
+            .collect();
+        baselines.sort_by(|a, b| a.0.total_cmp(&b.0));
+        baselines
+    }
+
+    #[test]
+    fn a_header_and_footer_that_leave_the_body_no_room_are_drawn_down_to_a_share_of_the_page() {
+        // Issue #496: 6 lines of 20 pt each from 10 pt of the edges of a page 200 pt high:
+        // the header reaches 130 and the footer starts at 70. Word draws each down to 0.4
+        // of the page's height in whole lines, 4 here, the footer's first 4 ending at its
+        // distance (`E-header-no-room.docx`); the body stays under the whole header.
+        let document = document(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(frame_of(style, 6)))
+                    .with_footers(HeaderFooterSet::default().with_primary(frame_of(style, 6)))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, report) = laid(&document, 100);
+        let page = &laid.expect("pages").pages[0];
+        assert_eq!(page.body.top, Pt(130.0));
+        assert_eq!(page.fragments[0].top, Pt(130.0));
+        // The header's lines from 10 to 90, the footer's from 110 to 190, the body's line
+        // from 130 among them.
+        let baselines = run_baselines(page);
+        let within = |top: f64, bottom: f64| {
+            baselines
+                .iter()
+                .filter(|y| y.0 > top && y.0 < bottom)
+                .count()
+        };
+        assert_eq!(baselines.len(), 9, "{baselines:?}");
+        assert_eq!(within(10.0, 90.0), 4, "{baselines:?}");
+        assert_eq!(within(90.0, 110.0), 0, "{baselines:?}");
+        assert_eq!(within(110.0, 190.0), 5, "{baselines:?}");
+        assert!(
+            report.iter().any(|entry| entry.message()
+                == "a header or footer that leaves the body of its page no room is drawn \
+                    down to 0.4 of the page's height, as Word draws it"),
+            "{:?}",
+            report.entries()
+        );
+    }
+
+    #[test]
+    fn a_header_is_cut_only_where_it_leaves_the_body_less_room_than_a_line() {
+        // From 10 pt, 7 lines of 20 pt end at 150 and leave the body 30 pt down to 180:
+        // drawn whole. 8 end at 170 and leave 10 pt: cut to 4 lines, as Word cut a header
+        // that left 7.9 pt (case 5 of `E-header-cut.docx`) but not one that left 204 pt.
+        // In paragraphs of 3 lines, the cut keeps the first paragraph and a line of the
+        // second; in paragraphs of 2, the first two.
+        let drawn = |count: usize, each: usize| {
+            let document = document(|style| {
+                let header: Vec<Block> = (0..count / each)
+                    .map(|_| lines(style, each, spacing(0.0, 0.0)))
+                    .collect();
+                vec![
+                    Section::new(close_frames())
+                        .with_headers(HeaderFooterSet::default().with_primary(header))
+                        .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+                ]
+            });
+            let (laid, _) = laid(&document, 100);
+            let page = &laid.expect("pages").pages[0];
+            run_baselines(page).len() - 1
+        };
+        assert_eq!(drawn(7, 7), 7);
+        assert_eq!(drawn(8, 8), 4);
+        assert_eq!(drawn(9, 3), 4);
+        assert_eq!(drawn(8, 2), 4);
+    }
+
+    /// Exact lines of `height`.
+    fn exact(height: f64) -> ParagraphProps {
+        ParagraphProps::default()
+            .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(height))))
+    }
+
+    /// The number of glyph runs of the first page of `sections`.
+    fn runs_drawn(sections: impl Fn(RunStyleId) -> Vec<Section>) -> usize {
+        let (laid, _) = laid(&document(sections), 100);
+        run_baselines(&laid.expect("pages").pages[0]).len()
+    }
+
+    #[test]
+    fn a_cut_frame_is_drawn_in_whole_lines_down_to_0_4_of_the_page() {
+        // Six lines of 18 pt in a header and a footer leave no room: 0.4 of the 200 pt
+        // page is 80 pt, four lines of each, where 0.45 would take five.
+        let frame = |style| vec![lines(style, 6, exact(18.0))];
+        let drawn = runs_drawn(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(frame(style)))
+                    .with_footers(HeaderFooterSet::default().with_primary(frame(style)))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        assert_eq!(drawn, 4 + 4 + 1);
+    }
+
+    #[test]
+    fn a_table_of_a_cut_frame_is_drawn_whole_or_left_out() {
+        // Headers of 160 pt from 10 pt leave the body 10 pt: each is drawn down to 80 pt.
+        let header = |style: RunStyleId, blocks: Vec<Block>| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(blocks))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        };
+        let table = |style, cell: usize| -> Block {
+            table_with(vec![row_of(style, &[cell], false)], 0.0).into()
+        };
+        // Two lines, a table of one line from 40 to 60, a line to 80: all drawn; of the
+        // four lines after, none.
+        let within = runs_drawn(|style| {
+            header(
+                style,
+                vec![
+                    lines(style, 2, spacing(0.0, 0.0)),
+                    table(style, 1),
+                    lines(style, 1, spacing(0.0, 0.0)),
+                    lines(style, 4, spacing(0.0, 0.0)),
+                ],
+            )
+        });
+        assert_eq!(within, 2 + 1 + 1 + 1);
+        // Three lines, then a table of two lines from 60 to 100, which crosses 80: left
+        // out, with what follows it.
+        let crossing = runs_drawn(|style| {
+            header(
+                style,
+                vec![
+                    lines(style, 3, spacing(0.0, 0.0)),
+                    table(style, 2),
+                    lines(style, 3, spacing(0.0, 0.0)),
+                ],
+            )
+        });
+        assert_eq!(crossing, 3 + 1);
+    }
+
+    #[test]
+    fn a_cut_footer_ends_at_its_distance_where_it_is_cut_between_paragraphs() {
+        // One-line paragraphs of 20 pt with 30 pt after each: from its top, the footer's
+        // second ends at 70 pt and its third would start at 100, past 80. Its first two
+        // are drawn, the second ending at the footer's distance at 190.
+        let document = document(|style| {
+            let footer: Vec<Block> = (0..4)
+                .map(|_| lines(style, 1, spacing(0.0, 30.0)))
+                .collect();
+            vec![
+                Section::new(close_frames())
+                    .with_footers(HeaderFooterSet::default().with_primary(footer))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let baselines = run_baselines(&laid.expect("pages").pages[0]);
+        // The body's line from 20, the footer's from 120 to 140 and from 170 to 190.
+        assert_eq!(baselines.len(), 3, "{baselines:?}");
+        assert!(
+            baselines[1].0 > 120.0 && baselines[1].0 < 140.0,
+            "{baselines:?}"
+        );
+        assert!(
+            baselines[2].0 > 170.0 && baselines[2].0 < 190.0,
+            "{baselines:?}"
+        );
+    }
+
+    #[test]
+    fn a_cut_frame_keeps_its_first_line_however_tall() {
+        // A header and a footer of a line of 100 pt and a line of 20 pt each leave no
+        // room, and their first lines pass 80 pt alone: those are still drawn, and
+        // nothing after them.
+        let frame = |style| {
+            vec![
+                lines(style, 1, exact(100.0)),
+                lines(style, 1, spacing(0.0, 0.0)),
+            ]
+        };
+        let drawn = runs_drawn(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(frame(style)))
+                    .with_footers(HeaderFooterSet::default().with_primary(frame(style)))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        assert_eq!(drawn, 3);
+    }
+
+    #[test]
+    fn a_cut_frame_keeps_its_first_table_however_tall() {
+        // A header of a table of one cell of 5 lines, from 0 to 100 past 80, then 4
+        // lines leaves the body no room: the table is kept whole, nothing after it.
+        let drawn = runs_drawn(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(vec![
+                        table_with(vec![row_of(style, &[5], false)], 0.0).into(),
+                        lines(style, 4, spacing(0.0, 0.0)),
+                    ]))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        assert_eq!(drawn, 5 + 1);
+    }
+
+    #[test]
+    fn a_cut_frame_keeps_only_the_first_line_of_its_first_paragraph_past_the_limit() {
+        // A first paragraph of two lines of 70 pt, then 4 lines: its first line passes
+        // nothing yet and is kept; its second ends at 140, past 80, and is not.
+        let drawn = runs_drawn(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(vec![
+                        lines(style, 2, exact(70.0)),
+                        lines(style, 4, spacing(0.0, 0.0)),
+                    ]))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        assert_eq!(drawn, 1 + 1);
+    }
+
+    #[test]
+    fn a_cut_footer_ends_at_its_distance_where_it_is_cut_after_a_table() {
+        // A footer of 2 lines, a table of one cell of 2 lines from 40 to 80, and 5 lines:
+        // the cut falls after the table, at 80, so the footer is drawn from 110 to 190.
+        let document = document(|style| {
+            vec![
+                Section::new(close_frames())
+                    .with_footers(HeaderFooterSet::default().with_primary(vec![
+                        lines(style, 2, spacing(0.0, 0.0)),
+                        table_with(vec![row_of(style, &[2], false)], 0.0).into(),
+                        lines(style, 5, spacing(0.0, 0.0)),
+                    ]))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let baselines = run_baselines(&laid.expect("pages").pages[0]);
+        // The body's line from 20, then the footer's four.
+        assert_eq!(baselines.len(), 5, "{baselines:?}");
+        assert!(
+            baselines[1..].iter().all(|y| y.0 > 110.0 && y.0 < 190.0),
+            "{baselines:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_is_cut_once_for_all_the_pages_it_is_drawn_on() {
+        // A header of 50,000 lines of 0.0001 pt, all within the cut, on each of 2,000
+        // pages whose margins leave the body 10 pt: where it is cut is worked out once
+        // with its layout, not on every page, which cost lines times pages.
+        let setup = PageSetup::new(PageSize::new(Pt(300.0), Pt(200.0))).with_margins(
+            Margins::default()
+                .with_top(Pt(95.0))
+                .with_bottom(Pt(95.0))
+                .with_left(Pt(20.0))
+                .with_right(Pt(20.0))
+                .with_header(Pt(10.0)),
+        );
+        let document = document(|style| {
+            vec![
+                Section::new(setup)
+                    .with_headers(HeaderFooterSet::default().with_primary(vec![lines(
+                        style,
+                        50_000,
+                        exact(0.0001),
+                    )]))
+                    .with_blocks(
+                        (0..2_000)
+                            .map(|_| lines(style, 1, spacing(0.0, 0.0)))
+                            .collect::<Vec<Block>>(),
+                    ),
+            ]
+        });
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let bounds = (MAX_FRAME_DRAWN, MAX_FRAME_LAID, tables::MAX_TABLE_REDRAWN);
+        let laid = paginate_with(&document, &mut fonts, &mut shaper, 3_000, bounds, Vec::new)
+            .expect("pages");
+        assert_eq!(laid.sink.len(), 2_000);
+        // The header and the empty footer, laid out once each.
+        assert_eq!(laid.frames_laid, 2);
+        assert_eq!(laid.frames_cut, laid.frames_laid);
+    }
+
     #[test]
     fn a_header_s_height_takes_the_space_around_its_paragraphs() {
         // A header line of 20 pt, 3 pt above it and 5 pt below, from 10 pt: the body
@@ -6510,6 +6953,214 @@ mod tests {
         // Section 1 numbers its pages in capital Roman numerals; section 2 continues the
         // numbers, and its field writes them as letters.
         assert_eq!(footers, ["I 5 2", "II 5 2", "c 5 3", "d 5 3", "e 5 3"]);
+    }
+
+    #[test]
+    fn labels_and_notes_report_each_way_their_numbers_depart_from_the_format() {
+        use crate::numbers::Departures;
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let mut counters = Counters::default();
+        counters.unsupported_format = Some(Location::default());
+        counters.unrepresentable = Some(Location::default());
+        counters.other_language = Some(Location::default());
+        report_list_formats(&counters, &mut fonts);
+        let mut notes = NoteNumbers::default();
+        notes.departures = Departures {
+            unsupported: true,
+            unrepresentable: true,
+            language: true,
+        };
+        report_note_numbers(&notes, &mut fonts);
+        assert_eq!(
+            messages(&fonts.into_report()),
+            [
+                "list numbers in a format the layout does not write are written in decimal",
+                "list numbers that their format cannot represent are written in decimal",
+                "list numbers in words and ordinals in languages other than English and German \
+                 are written in English",
+                "numbers in a format the layout does not write are written as decimal",
+                "note numbers that their format cannot represent are written as decimal",
+                "note numbers in words and ordinals in languages other than English and German \
+                 are written in English",
+            ]
+        );
+        // Nothing departs: nothing is reported.
+        let mut fonts = Fonts::new(&book);
+        report_list_formats(&Counters::default(), &mut fonts);
+        report_note_numbers(&NoteNumbers::default(), &mut fonts);
+        assert!(messages(&fonts.into_report()).is_empty());
+        // Each way a note's number departs gives its own message, and only that.
+        let none = Departures::default();
+        let each = [
+            (
+                Departures {
+                    unsupported: true,
+                    ..none
+                },
+                "numbers in a format the layout does not write are written as decimal",
+            ),
+            (
+                Departures {
+                    unrepresentable: true,
+                    ..none
+                },
+                "note numbers that their format cannot represent are written as decimal",
+            ),
+            (
+                Departures {
+                    language: true,
+                    ..none
+                },
+                "note numbers in words and ordinals in languages other than English and German \
+                 are written in English",
+            ),
+        ];
+        for (departures, message) in each {
+            let mut fonts = Fonts::new(&book);
+            let mut notes = NoteNumbers::default();
+            notes.departures = departures;
+            report_note_numbers(&notes, &mut fonts);
+            assert_eq!(messages(&fonts.into_report()), [message]);
+        }
+    }
+
+    #[test]
+    fn page_fields_write_numbers_in_words_dashes_and_the_language_of_their_style() {
+        use crate::ir::{Field, FieldKind, Language, NumberFormat, PageNumbering};
+        // Each field a paragraph of its own: in English, German and French, and a number
+        // too large for letters, as E-number-formats has them.
+        let in_language = |tag: &str| {
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0))
+                .with_language(Language::default().with_latin(Some(tag.into())))
+        };
+        let mut document = Document::default();
+        let english = document.add_run_style(in_language("en-US"));
+        let german = document.add_run_style(in_language("de-DE"));
+        let french = document.add_run_style(in_language("fr-FR"));
+        let paragraph = |style, kind, format| -> Block {
+            Paragraph::new(style)
+                .with_props(spacing(0.0, 0.0))
+                .with_inlines([Inline::Field(
+                    Field::new(kind, style).with_format(Some(format)),
+                )])
+                .into()
+        };
+        document.add_section(
+            Section::new(setup())
+                .with_page_numbering(PageNumbering::default().with_start(Some(27)))
+                .with_blocks(vec![
+                    paragraph(english, FieldKind::Page, NumberFormat::OrdinalText),
+                    paragraph(german, FieldKind::Page, NumberFormat::CardinalText),
+                    paragraph(german, FieldKind::Page, NumberFormat::Ordinal),
+                    paragraph(english, FieldKind::Page, NumberFormat::NumberInDash),
+                    paragraph(english, FieldKind::NumPages, NumberFormat::Hex),
+                ]),
+        );
+        document.add_section(
+            Section::new(setup())
+                .with_page_numbering(PageNumbering::default().with_start(Some(781)))
+                .with_blocks(vec![
+                    paragraph(english, FieldKind::Page, NumberFormat::UpperLetter),
+                    paragraph(french, FieldKind::Page, NumberFormat::CardinalText),
+                ]),
+        );
+        let (result, report) = laid(&document, 100);
+        let paginated = result.expect("pages");
+        let pages: Vec<String> = paginated
+            .pages
+            .iter()
+            .map(|page| texts(page).concat().replace(' ', ""))
+            .collect();
+        assert_eq!(
+            pages,
+            [
+                "twenty-seventhSiebenundzwanzig27.-27-2",
+                "Error!Numbercannotberepresentedinspecifiedformat.sevenhundredeighty-one",
+            ]
+        );
+        // Word writes its error text in bold, which the test font draws by stroking; the
+        // numbers keep the field's own formatting.
+        let bold: Vec<(String, bool)> = paginated
+            .pages
+            .iter()
+            .flat_map(|page| &page.items)
+            .filter_map(|item| match item {
+                DisplayItem::Glyphs(run) => Some((
+                    run.clusters.iter().map(|c| c.text.as_str()).collect(),
+                    run.synthetic_bold,
+                )),
+                _ => None,
+            })
+            .filter(|(text, _): &(String, bool)| !text.trim().is_empty())
+            .map(|(text, bold)| (text.trim().to_owned(), bold))
+            .collect();
+        let runs: Vec<(&str, bool)> = bold.iter().map(|(t, b)| (t.as_str(), *b)).collect();
+        assert_eq!(
+            runs,
+            [
+                ("twenty-seventh", false),
+                ("Siebenundzwanzig", false),
+                ("27.", false),
+                ("- 27 -", false),
+                ("2", false),
+                ("Error! Number cannot be represented in specified", true),
+                ("format.", true),
+                ("seven hundred eighty-one", false),
+            ]
+        );
+        // The test font has no glyph for most of these characters, which is reported too.
+        let languages: Vec<String> = messages(&report)
+            .into_iter()
+            .filter(|message| message.contains("language"))
+            .collect();
+        assert_eq!(
+            languages,
+            [
+                "numbers in words and ordinals in languages other than English and German are \
+              written in English"
+            ]
+        );
+        // In a run of complex script, the error text is bold in its complex script slot.
+        let mut document = Document::default();
+        let complex = document.add_run_style(in_language("en-US").with_complex_script(true));
+        document.add_section(
+            Section::new(setup())
+                .with_page_numbering(PageNumbering::default().with_start(Some(781)))
+                .with_blocks(vec![paragraph(
+                    complex,
+                    FieldKind::Page,
+                    NumberFormat::UpperLetter,
+                )]),
+        );
+        let (result, _) = laid(&document, 100);
+        let runs: Vec<bool> = result.expect("pages").pages[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Glyphs(run) => Some(run.synthetic_bold),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !runs.is_empty() && runs.iter().all(|&bold| bold),
+            "{runs:?}"
+        );
+        // A format without words has no language to report.
+        let mut document = Document::default();
+        let french = document.add_run_style(in_language("fr-FR"));
+        document.add_section(Section::new(setup()).with_blocks(vec![paragraph(
+            french,
+            FieldKind::Page,
+            NumberFormat::Hex,
+        )]));
+        let (_, report) = laid(&document, 100);
+        assert!(
+            !messages(&report).iter().any(|m| m.contains("language")),
+            "{report:?}"
+        );
     }
 
     /// A paragraph of the fields `kinds`, in the test font.
@@ -6947,8 +7598,10 @@ mod tests {
     }
 
     #[test]
-    fn a_footer_taller_than_its_page_keeps_its_last_paragraphs() {
-        // A footer grows up from its distance: what is cut is its top.
+    fn a_footer_taller_than_its_page_keeps_its_first_lines() {
+        // Thirty paragraphs of 20 pt on a page 200 pt high leave the body no room: the
+        // footer is drawn down to 80 pt, its first four paragraphs, as Word leaves out the
+        // last lines of a footer it cuts (`E-header-no-room.docx`).
         let document = document(|style| {
             let footer = (0..30)
                 .map(|n| text_paragraph(style, &format!("F{n}"), spacing(0.0, 0.0)))
@@ -6961,14 +7614,13 @@ mod tests {
         });
         let (laid, _) = laid(&document, 100);
         let drawn = texts(&laid.expect("pages").pages[0]);
-        assert!(drawn.iter().any(|text| text == "F29"), "{drawn:?}");
-        assert!(!drawn.iter().any(|text| text == "F0"), "{drawn:?}");
+        assert_eq!(drawn, ["F0", "F1", "F2", "F3", "A"]);
     }
 
     #[test]
     fn a_frame_of_too_many_paragraphs_is_cut() {
-        // Exact lines of 0.1 pt: three hundred paragraphs fit the page, 256 are drawn, the
-        // first ones of a header and the last ones of a footer.
+        // Exact lines of 0.1 pt: three hundred paragraphs fit the page, the first 256 are
+        // drawn, of a header and of a footer.
         let frame = |style| {
             let tiny = ParagraphProps::default()
                 .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(0.1))));
@@ -6990,13 +7642,8 @@ mod tests {
             let (laid, report) = laid(&document, 100);
             let drawn = texts(&laid.expect("pages").pages[0]);
             assert_eq!(drawn.len(), MAX_FRAME_WORK + 1);
-            let (kept, left_out) = if header {
-                ("F0", "F299")
-            } else {
-                ("F299", "F0")
-            };
-            assert!(drawn.iter().any(|text| text == kept), "{drawn:?}");
-            assert!(!drawn.iter().any(|text| text == left_out), "{drawn:?}");
+            assert!(drawn.iter().any(|text| text == "F255"), "{drawn:?}");
+            assert!(!drawn.iter().any(|text| text == "F256"), "{drawn:?}");
             assert!(
                 messages(&report).iter().any(|m| m.contains("cut")),
                 "{report:?}"
@@ -7886,26 +8533,24 @@ mod tests {
         assert!(reported(&split(7, &[false, true], decimal.clone())));
         // The field is on the second of the paragraph's two lines on page 1.
         assert!(!reported(&split(6, &[false, true, false, false], decimal)));
-        // On page 2 the field shows nothing: Chicago marks stop at 116.
-        let chicago = PageNumbering::default()
-            .with_format(NumberFormat::Chicago)
-            .with_start(Some(117));
-        assert!(!reported(&split(7, &[false, true], chicago)));
+        // On page 2 the field shows nothing: the format writes no number.
+        let none = PageNumbering::default().with_format(NumberFormat::None);
+        assert!(!reported(&split(7, &[false, true], none)));
     }
 
     #[test]
-    fn a_footer_cut_from_its_top_paints_each_paragraph_with_its_own_properties() {
+    fn a_cut_footer_paints_each_paragraph_with_its_own_properties() {
         use crate::ir::{ColorValue, Shading};
         use officewright_core::Color;
-        // Thirty footer paragraphs of 20 pt on a page 200 pt high, only the last shaded:
-        // the last ten are drawn, and one shading with them.
+        // Thirty footer paragraphs of 20 pt on a page 200 pt high, only the second shaded:
+        // the first four are drawn, and one shading with them.
         let document = document(|style| {
             let shaded = spacing(0.0, 0.0).with_shading(Some(
                 Shading::default().with_fill(ColorValue::Rgb(Color::rgb(0, 0, 255))),
             ));
             let footer = (0..30)
                 .map(|n| {
-                    let props = if n == 29 {
+                    let props = if n == 1 {
                         shaded.clone()
                     } else {
                         spacing(0.0, 0.0)
@@ -7927,13 +8572,22 @@ mod tests {
             .filter(|item| matches!(item, DisplayItem::Rect { color, .. } if *color == Color::rgb(0, 0, 255)))
             .count();
         assert_eq!(shading, 1);
-        assert!(texts(page).iter().any(|text| text == "F29"));
+        assert_eq!(texts(page), ["F0", "F1", "F2", "F3", "A"]);
     }
 
     #[test]
     fn the_cut_counts_the_spacing_on_each_side_of_a_paragraph() {
         // One-line paragraphs of 20 pt on a page 200 pt high, with 80 pt after every
-        // other one; what a frame keeps depends on which space lies between which.
+        // other one; what a frame keeps depends on which space lies between which. The
+        // margins are fixed, so that the frames leave the body its room and are not cut
+        // to a share of the page.
+        let fixed = || {
+            let margins = close_frames()
+                .margins()
+                .with_top(Pt(-20.0))
+                .with_bottom(Pt(-20.0));
+            close_frames().with_margins(margins)
+        };
         let frame = |style, last_after: f64| {
             (0..10)
                 .map(|n| {
@@ -7952,7 +8606,7 @@ mod tests {
         // 220.
         let header = document(|style| {
             vec![
-                Section::new(close_frames())
+                Section::new(fixed())
                     .with_headers(HeaderFooterSet::default().with_primary(frame(style, 0.0)))
                     .with_blocks(vec![text_paragraph(style, "B", spacing(0.0, 0.0))]),
             ]
@@ -7962,20 +8616,20 @@ mod tests {
             texts(&header_laid.expect("pages").pages[0]),
             ["P0", "P1", "P2", "B"]
         );
-        // A footer, from its distance up: P9's 90 after it and P9 to 110, P8's 80 after
-        // it and P8 to 210; P7 would start at 210.
+        // A footer the same, from its first paragraph: P0 to P2, and P2's 80 pt after it,
+        // so that it starts 220 pt above its distance at 190 and P2 ends at 110.
         let footer = document(|style| {
             vec![
-                Section::new(close_frames())
+                Section::new(fixed())
                     .with_footers(HeaderFooterSet::default().with_primary(frame(style, 90.0)))
                     .with_blocks(vec![text_paragraph(style, "B", spacing(0.0, 0.0))]),
             ]
         });
         let (footer_laid, _) = laid(&footer, 100);
-        assert_eq!(
-            texts(&footer_laid.expect("pages").pages[0]),
-            ["P8", "P9", "B"]
-        );
+        let page = &footer_laid.expect("pages").pages[0];
+        assert_eq!(texts(page), ["P0", "P1", "P2", "B"]);
+        let lowest = run_baselines(page).last().copied().unwrap_or(Pt(0.0));
+        assert!(lowest.0 > 90.0 && lowest.0 < 110.0, "{lowest:?}");
     }
 
     #[test]
@@ -8814,18 +9468,31 @@ mod tests {
         assert!(left_out(&messages), "{messages:?}");
     }
 
-    /// A document of the test font at 10 pt with one section of `page` whose footnotes go
-    /// to `position`, under a separator of an exact 20 pt line holding what `separator`
-    /// makes; `make` gives the section's blocks from the document, the text's style and
-    /// the superscript style of the notes' numbers.
+    /// A document of Word 2013 and later, in the test font at 10 pt, with one section of
+    /// `page` whose footnotes go to `position`, under a separator of an exact 20 pt line
+    /// holding what `separator` makes, and notes going on from the page before under one
+    /// holding the continuation separator; `make` gives the section's blocks from the
+    /// document, the text's style and the superscript style of the notes' numbers.
     fn with_notes(
         page: PageSetup,
         position: crate::ir::NotePosition,
         separator: fn(RunStyleId) -> Inline,
         make: impl FnOnce(&mut Document, RunStyleId, RunStyleId) -> Vec<Block>,
     ) -> Document {
+        with_notes_in(CompatMode::Word2013, page, position, separator, make)
+    }
+
+    /// [`with_notes`] in compatibility mode `mode`.
+    fn with_notes_in(
+        mode: CompatMode,
+        page: PageSetup,
+        position: crate::ir::NotePosition,
+        separator: fn(RunStyleId) -> Inline,
+        make: impl FnOnce(&mut Document, RunStyleId, RunStyleId) -> Vec<Block>,
+    ) -> Document {
         use crate::ir::{NoteKind, NoteProps, NoteSeparators, VerticalPosition};
-        let mut document = Document::default();
+        let mut document =
+            Document::new(crate::ir::DocumentSettings::default().with_compat_mode(mode));
         let style = document.add_run_style(
             RunStyle::default()
                 .with_fonts(RunFonts::new("Officewright Test"))
@@ -8839,7 +9506,12 @@ mod tests {
         );
         document.set_note_separators(
             NoteKind::Footnote,
-            NoteSeparators::default().with_separator([holding(style, vec![separator(style)])]),
+            NoteSeparators::default()
+                .with_separator([holding(style, vec![separator(style)])])
+                .with_continuation_separator([holding(
+                    style,
+                    vec![Inline::continuation_separator(style)],
+                )]),
         );
         let blocks = make(&mut document, style, mark);
         document.add_section(
@@ -8907,11 +9579,13 @@ mod tests {
         // A body of eight 20 pt lines from 20 to 180: a line referencing a note of one line
         // leaves the note, under the separator's line, the last 40 pt. The separator is a
         // line 144 pt long where the face strikes text out (2.25 pt above the baseline at
-        // 16), or as long as a narrower column; the continuation separator is as long as
-        // the column. The note's own number is its reference's, in its own style.
-        let drawn = |width: f64, separator: fn(RunStyleId) -> Inline| {
+        // 16), or as long as a narrower column; so is the continuation separator in Word
+        // 2013 and later, which before is as long as the column. The note's own number is
+        // its reference's, in its own style.
+        let drawn = |width: f64, (mode, separator): (CompatMode, fn(RunStyleId) -> Inline)| {
             let page = setup().with_size(PageSize::new(Pt(width), Pt(200.0)));
-            let document = with_notes(
+            let document = with_notes_in(
+                mode,
                 page,
                 NotePosition::PageBottom,
                 separator,
@@ -8933,10 +9607,18 @@ mod tests {
                 "text N 23.25 176".to_owned(),
             ]
         };
-        assert_eq!(drawn(300.0, Inline::separator), expected(164.0));
-        assert_eq!(drawn(140.0, Inline::separator), expected(120.0));
+        let newer = CompatMode::Word2013;
+        let older = CompatMode::Word2010;
+        for mode in [newer, older] {
+            assert_eq!(drawn(300.0, (mode, Inline::separator)), expected(164.0));
+            assert_eq!(drawn(140.0, (mode, Inline::separator)), expected(120.0));
+        }
+        let continuation = Inline::continuation_separator;
+        assert_eq!(drawn(300.0, (newer, continuation)), expected(164.0));
+        assert_eq!(drawn(140.0, (newer, continuation)), expected(120.0));
+        assert_eq!(drawn(300.0, (older, continuation)), expected(280.0));
         assert_eq!(
-            drawn(300.0, Inline::continuation_separator),
+            drawn(300.0, (CompatMode::Word2003, continuation)),
             expected(280.0)
         );
     }
@@ -9085,19 +9767,314 @@ mod tests {
         );
     }
 
+    /// The separators and texts of the pages `document` is laid out on, and the messages of
+    /// its report.
+    fn noted_pages(document: &Document) -> (Vec<Separated>, Vec<String>) {
+        let (result, report) = laid(document, 10);
+        let pages = result
+            .expect("pages")
+            .pages
+            .iter()
+            .map(separators_and_texts)
+            .collect();
+        (pages, messages(&report))
+    }
+
+    /// `text` with its baseline at `y`.
+    fn at(text: &str, y: f64) -> (String, f64) {
+        (text.to_owned(), y)
+    }
+
+    /// The baseline of a note's number in a line whose baseline is at `line`.
+    fn raised(line: f64) -> f64 {
+        line - 3.333_333_333_333_333_5
+    }
+
     #[test]
-    fn footnotes_too_tall_for_the_page_of_their_line_follow_it_there_and_are_reported() {
+    fn a_footnote_that_does_not_fit_below_its_line_is_cut_and_goes_on_on_the_next_page() {
         use crate::ir::NotePosition;
-        const PAST: &str = "footnotes too tall for the page of their reference run past the \
-                            bottom of its body: notes are not cut across pages yet";
-        // A note of nine lines with its separator takes 200 pt, more than the body's 160:
-        // its line moves off a page with text, and on the next, alone, keeps its note,
-        // which starts under the line (40) and runs past the bottom.
+        // A line (20 to 40), then a line (40 to 60) referencing a note of nine lines and one
+        // of one line, then another line of its paragraph, without widow control, and a
+        // paragraph of one line. Below the line, five lines of the first note would fit
+        // under the separator; the paragraph's next line (60 to 80) takes the room of one
+        // of them, and four fill the page under it. The next paragraph goes to the next
+        // page, with the five other lines of the note under the continuation separator, then
+        // the second note.
         let document = with_notes(
             setup(),
             NotePosition::PageBottom,
             Inline::separator,
             |document, style, mark| {
+                let long = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+                let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                vec![
+                    lines(style, 1, spacing(0.0, 0.0)),
+                    referencing(
+                        style,
+                        (0, 1),
+                        &[long, short],
+                        spacing(0.0, 0.0).with_widow_control(false),
+                    ),
+                    lines(style, 1, spacing(0.0, 0.0)),
+                ]
+            },
+        );
+        let (pages, messages) = noted_pages(&document);
+        let note =
+            |from: f64, count: u32| (0..count).map(move |n| at("N", from + 20.0 * f64::from(n)));
+        let mut first = vec![at("A", 36.0), at("A1", 56.0), at("2", 56.0), at("A", 76.0)];
+        first.push(at("1", raised(116.0)));
+        first.extend(note(116.0, 4));
+        let mut second = vec![at("A", 36.0)];
+        second.extend(note(76.0, 5));
+        second.extend([at("2", raised(176.0)), at("N", 176.0)]);
+        assert_eq!(pages, [(vec![93.75], first), (vec![53.75], second)]);
+        assert!(
+            !messages.iter().any(|m| m.contains("footnote")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_footnote_s_widow_control_decides_where_it_is_cut_or_else_its_line_moves() {
+        use crate::ir::NotePosition;
+        // Five lines (20 to 120), then a line (120 to 140) referencing a note of three lines,
+        // which leaves room for the separator and one line of the note: with widow control
+        // the note is not cut there, without it is. Word 2013 and later then move the line
+        // to the next page with the note; Word 2010 keeps the line, and puts the whole note
+        // on the next page under the continuation separator, as long as the column.
+        let document = |mode: CompatMode, widow: bool, filler: usize| {
+            with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let props = spacing(0.0, 0.0).with_widow_control(widow);
+                    let note = footnote(document, (style, mark), 3, props);
+                    vec![
+                        lines(style, filler, spacing(0.0, 0.0)),
+                        referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                    ]
+                },
+            )
+        };
+        let lay = |mode: CompatMode, widow: bool| {
+            let document = with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let props = spacing(0.0, 0.0).with_widow_control(widow);
+                    let note = footnote(document, (style, mark), 3, props);
+                    vec![
+                        lines(style, 5, spacing(0.0, 0.0)),
+                        referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                    ]
+                },
+            );
+            noted_pages(&document).0
+        };
+        let filler = || (0..5).map(|n| at("A", 36.0 + 20.0 * f64::from(n)));
+        let whole = [
+            at("1", raised(136.0)),
+            at("N", 136.0),
+            at("N", 156.0),
+            at("N", 176.0),
+        ];
+        let moved = lay(CompatMode::Word2013, true);
+        let mut second = vec![at("A1", 36.0)];
+        second.extend(whole.clone());
+        assert_eq!(
+            moved,
+            [(vec![], filler().collect()), (vec![113.75], second)]
+        );
+        let cut = lay(CompatMode::Word2013, false);
+        let mut first: Vec<_> = filler().collect();
+        first.extend([at("A1", 136.0), at("1", raised(176.0)), at("N", 176.0)]);
+        assert_eq!(
+            cut,
+            [
+                (vec![153.75], first.clone()),
+                (vec![133.75], vec![at("N", 156.0), at("N", 176.0)])
+            ]
+        );
+        let deferred = lay(CompatMode::Word2010, true);
+        let mut kept: Vec<_> = filler().collect();
+        kept.push(at("A1", 136.0));
+        assert_eq!(deferred, [(vec![], kept), (vec![113.75], whole.to_vec())]);
+        // Without widow control Word 2010 cuts it too.
+        assert_eq!(lay(CompatMode::Word2010, false), cut);
+        // Where each page's separator ends: the continuation separator above the notes
+        // that go on is as long as the column in Word 2010.
+        let ends = |document: &Document| {
+            let (laid, _) = laid(document, 10);
+            laid.expect("pages")
+                .pages
+                .iter()
+                .map(|page| {
+                    page.items
+                        .iter()
+                        .filter_map(|item| match item {
+                            DisplayItem::Line(line) => Some(line.to.x.0),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ends(&document(CompatMode::Word2010, true, 5)),
+            [vec![], vec![280.0]]
+        );
+        assert_eq!(
+            ends(&document(CompatMode::Word2010, false, 5)),
+            [vec![164.0], vec![280.0]]
+        );
+        assert_eq!(
+            ends(&document(CompatMode::Word2013, false, 5)),
+            [vec![164.0], vec![164.0]]
+        );
+        // With room for two lines of the note, widow control would leave one on the next
+        // page: it is not cut there either.
+        let two = noted_pages(&document(CompatMode::Word2013, true, 4)).0;
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[0].0, [0.0; 0]);
+        let two = noted_pages(&document(CompatMode::Word2013, false, 4)).0;
+        assert_eq!(two[0].0, [133.75]);
+        assert_eq!(two[1].1, [at("N", 176.0)]);
+    }
+
+    #[test]
+    fn a_footnote_s_widow_control_holds_on_each_page_it_goes_on_to() {
+        use crate::ir::{NoteKind, NotePosition, NoteSeparators};
+        // A line (20 to 40) referencing a note of five exact 60 pt lines, with widow control,
+        // under a continuation separator with 10 pt after it. Two lines fit below the line
+        // and stay; on the next page, under the continuation separator and its space after,
+        // two of the other three would fit, but widow control leaves two for the page
+        // after, so one goes there.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let continuation = Paragraph::new(style)
+                    .with_props(spacing(0.0, 10.0))
+                    .with_inlines([Inline::continuation_separator(style)]);
+                document.set_note_separators(
+                    NoteKind::Footnote,
+                    NoteSeparators::default()
+                        .with_separator([holding(style, vec![Inline::separator(style)])])
+                        .with_continuation_separator([continuation.into()]),
+                );
+                let tall = ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(60.0))));
+                let note = footnote(document, (style, mark), 5, tall);
+                vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(
+            pages,
+            [
+                (
+                    vec![53.75],
+                    vec![
+                        at("A1", 36.0),
+                        at("1", raised(108.0)),
+                        at("N", 108.0),
+                        at("N", 168.0)
+                    ]
+                ),
+                (vec![103.75], vec![at("N", 168.0)]),
+                (vec![43.75], vec![at("N", 108.0), at("N", 168.0)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_paragraph_after_a_cut_footnote_goes_to_the_next_page() {
+        use crate::ir::NotePosition;
+        // Three lines (20 to 80), then a line (80 to 100) referencing a note of four lines
+        // with widow control: of the three that fit below the line, two stay, leaving 20 pt
+        // above the notes (100 to 120). The next line of the paragraph goes there; the
+        // paragraph after it, or a table, goes to the next page.
+        let lay = |after: usize, next: fn(RunStyleId) -> Vec<Block>| {
+            let document = with_notes(
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let note = footnote(document, (style, mark), 4, spacing(0.0, 0.0));
+                    let mut blocks = vec![
+                        lines(style, 3, spacing(0.0, 0.0)),
+                        referencing(
+                            style,
+                            (0, after),
+                            &[note],
+                            spacing(0.0, 0.0).with_widow_control(false),
+                        ),
+                    ];
+                    blocks.extend(next(style));
+                    blocks
+                },
+            );
+            noted_pages(&document).0
+        };
+        let mut first: Vec<_> = (0..3)
+            .map(|n| at("A", 36.0 + 20.0 * f64::from(n)))
+            .collect();
+        first.extend([
+            at("A1", 96.0),
+            at("1", raised(156.0)),
+            at("N", 156.0),
+            at("N", 176.0),
+        ]);
+        let expected = [
+            (vec![133.75], first),
+            (
+                vec![133.75],
+                vec![at("A", 36.0), at("N", 156.0), at("N", 176.0)],
+            ),
+        ];
+        assert_eq!(
+            lay(0, |style| vec![lines(style, 1, spacing(0.0, 0.0))]),
+            expected
+        );
+        assert_eq!(lay(0, |style| vec![table_of(style, 1, false)]), expected);
+        let [(separators, mut first), (_, mut second)] = expected;
+        first.insert(4, at("A", 116.0));
+        second.remove(0);
+        assert_eq!(
+            lay(1, |_| Vec::new()),
+            [(separators.clone(), first), (separators, second)]
+        );
+    }
+
+    #[test]
+    fn the_continuation_notice_goes_under_the_part_of_a_footnote_cut() {
+        use crate::ir::{NoteKind, NotePosition, NoteSeparators};
+        // As in the first case of the cut above, with a notice of one line with 10 pt
+        // before it: under the separator (70 to 90), three lines of the note, the space and
+        // the notice (160 to 180) fill the page; the next page has the six others, and no
+        // notice.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let line = |inline: Inline| [holding(style, vec![inline])];
+                document.set_note_separators(
+                    NoteKind::Footnote,
+                    NoteSeparators::default()
+                        .with_separator(line(Inline::separator(style)))
+                        .with_continuation_separator(line(Inline::continuation_separator(style)))
+                        .with_continuation_notice([Paragraph::new(style)
+                            .with_props(spacing(10.0, 0.0))
+                            .with_inlines([Inline::text("C", style)])
+                            .into()]),
+                );
                 let note = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
                 vec![
                     lines(style, 1, spacing(0.0, 0.0)),
@@ -9105,29 +10082,993 @@ mod tests {
                 ]
             },
         );
-        let (result, report) = laid(&document, 10);
-        let pages: Vec<_> = result
-            .expect("pages")
-            .pages
-            .iter()
-            .map(separators_and_texts)
-            .collect();
-        assert_eq!(pages.len(), 2);
-        assert_eq!(pages[0], (vec![], vec![("A".to_owned(), 36.0)]));
+        let (pages, _) = noted_pages(&document);
+        let note =
+            |from: f64, count: u32| (0..count).map(move |n| at("N", from + 20.0 * f64::from(n)));
+        let mut first = vec![at("A", 36.0), at("A1", 56.0), at("1", raised(106.0))];
+        first.extend(note(106.0, 3));
+        first.push(at("C", 176.0));
+        assert_eq!(
+            pages,
+            [(vec![83.75], first), (vec![53.75], note(76.0, 6).collect())]
+        );
+    }
+
+    #[test]
+    fn a_footnote_longer_than_a_page_goes_on_over_pages_that_take_no_text() {
+        use crate::ir::NotePosition;
+        // A line (20 to 40) referencing a note of twenty lines, then a line and a table of
+        // two rows, or the table alone: six lines of the note fill the first page, seven the
+        // second, which takes no text, and seven the third, whose body they fill; what
+        // follows waits for the fourth.
+        for line in [true, false] {
+            let document = with_notes(
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let note = footnote(document, (style, mark), 20, spacing(0.0, 0.0));
+                    let mut blocks = vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))];
+                    if line {
+                        blocks.push(lines(style, 1, spacing(0.0, 0.0)));
+                    }
+                    blocks.push(table_of(style, 2, false));
+                    blocks
+                },
+            );
+            let (pages, messages) = noted_pages(&document);
+            let count =
+                |page: &Separated, text: &str| page.1.iter().filter(|(t, _)| t == text).count();
+            assert_eq!(
+                pages.iter().map(|page| page.0.clone()).collect::<Vec<_>>(),
+                [vec![53.75], vec![33.75], vec![33.75], vec![]]
+            );
+            assert_eq!(
+                pages
+                    .iter()
+                    .map(|page| count(page, "N"))
+                    .collect::<Vec<_>>(),
+                [6, 7, 7, 0]
+            );
+            assert_eq!(
+                pages
+                    .iter()
+                    .map(|page| count(page, "A"))
+                    .collect::<Vec<_>>(),
+                [0, 0, 0, if line { 3 } else { 2 }]
+            );
+            assert!(
+                !messages.iter().any(|m| m.contains("footnote")),
+                "{messages:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_that_does_not_fit_beside_the_rest_of_a_footnote_moves_on_whole() {
+        use crate::ir::NotePosition;
+        // A line (20 to 40) referencing a note of twelve lines, six on the first page and
+        // six on the second, which leave it 20 pt (20 to 40): a paragraph of three lines kept
+        // together, without widow control, moves to the third page, as it would from a page
+        // with text.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 12, spacing(0.0, 0.0));
+                let kept = spacing(0.0, 0.0)
+                    .with_keep_lines(true)
+                    .with_widow_control(false);
+                vec![
+                    referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                    lines(style, 3, kept),
+                ]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(pages.len(), 3);
         assert_eq!(pages[1].0, [53.75]);
-        let notes: Vec<f64> = pages[1].1.iter().skip(2).map(|(_, y)| *y).collect();
+        assert!(!pages[1].1.iter().any(|(text, _)| text == "A"));
         assert_eq!(
-            notes,
-            (0..9)
-                .map(|n| 76.0 + 20.0 * f64::from(n))
-                .collect::<Vec<_>>()
+            pages[2],
+            (vec![], vec![at("A", 36.0), at("A", 56.0), at("A", 76.0)])
         );
+    }
+
+    #[test]
+    fn a_line_of_a_footnote_taller_than_a_page_runs_past_its_bottom_and_is_reported() {
+        use crate::ir::NotePosition;
+        const PAST: &str =
+            "a line or table of a footnote taller than the body of its page runs past its bottom";
+        // A line alone on its page referencing a note of one exact 200 pt line, taller than
+        // the body's 160: nothing moves the line, which is not reported, so the note goes
+        // on the next page, where it starts under the continuation separator (20 to 40)
+        // and runs past the bottom; no notice goes under it, since it ends there.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let line = |inline: Inline| [holding(style, vec![inline])];
+                document.set_note_separators(
+                    crate::ir::NoteKind::Footnote,
+                    crate::ir::NoteSeparators::default()
+                        .with_separator(line(Inline::separator(style)))
+                        .with_continuation_separator(line(Inline::continuation_separator(style)))
+                        .with_continuation_notice(line(Inline::text("C", style))),
+                );
+                let tall = ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(200.0))));
+                let note = footnote(document, (style, mark), 1, tall);
+                vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+            },
+        );
+        let (pages, messages) = noted_pages(&document);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0], (vec![], vec![at("A1", 36.0)]));
+        assert_eq!(pages[1].0, [33.75]);
+        assert_eq!(pages[1].1.last(), Some(&at("N", 200.0)));
         assert_eq!(
-            messages(&report).iter().filter(|m| *m == PAST).count(),
+            messages.iter().filter(|m| *m == PAST).count(),
             1,
-            "{report:?}"
+            "{messages:?}"
         );
-        // A note that fits is not reported, nor is one that fits but for its space after
+        assert!(
+            !messages
+                .iter()
+                .any(|m| m.starts_with("a line is taller") || m.contains("continuation notice")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_footnote_is_cut_between_its_parts_and_never_within_a_table() {
+        use crate::ir::{Note, NoteKind, NotePosition};
+        // Two lines (20 to 60), then a line (60 to 80) referencing a note of a paragraph of
+        // three lines and a table of two rows, or of a paragraph of two lines and one of
+        // three with 10 pt before it, with widow control. Below the line, under the
+        // separator, the first paragraph fits, and the table does not, or but one line of
+        // the second paragraph does: the note is cut after its first paragraph, and the rest
+        // goes on under the continuation separator, the second paragraph's space before
+        // with it.
+        let lay = |rest: fn(RunStyleId) -> Block, first: usize| {
+            let document = with_notes(
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let mut inlines = vec![Inline::note_number(mark)];
+                    for line in 0..first {
+                        if line > 0 {
+                            inlines.push(Inline::line_break(BreakClear::None, style));
+                        }
+                        inlines.push(Inline::text("N", style));
+                    }
+                    let paragraph = Paragraph::new(style)
+                        .with_props(spacing(0.0, 0.0))
+                        .with_inlines(inlines);
+                    let note = document.add_note(Note::new(
+                        NoteKind::Footnote,
+                        [paragraph.into(), rest(style)],
+                    ));
+                    vec![
+                        lines(style, 2, spacing(0.0, 0.0)),
+                        referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                    ]
+                },
+            );
+            noted_pages(&document).0
+        };
+        let text: Vec<_> = (0..2)
+            .map(|n| at("A", 36.0 + 20.0 * f64::from(n)))
+            .collect();
+        let mut first = text.clone();
+        first.extend([
+            at("A1", 76.0),
+            at("1", raised(136.0)),
+            at("N", 136.0),
+            at("N", 156.0),
+            at("N", 176.0),
+        ]);
+        assert_eq!(
+            lay(|style| table_of(style, 2, false), 3),
+            [
+                (vec![113.75], first),
+                (vec![133.75], vec![at("A", 156.0), at("A", 176.0)])
+            ]
+        );
+        let mut first = text;
+        first.extend([
+            at("A1", 76.0),
+            at("1", raised(156.0)),
+            at("N", 156.0),
+            at("N", 176.0),
+        ]);
+        let three = |style| {
+            Paragraph::new(style)
+                .with_props(spacing(10.0, 0.0))
+                .with_inlines([
+                    Inline::text("N", style),
+                    Inline::line_break(BreakClear::None, style),
+                    Inline::text("N", style),
+                    Inline::line_break(BreakClear::None, style),
+                    Inline::text("N", style),
+                ])
+                .into()
+        };
+        assert_eq!(
+            lay(three, 2),
+            [
+                (vec![133.75], first),
+                (
+                    vec![103.75],
+                    vec![at("N", 136.0), at("N", 156.0), at("N", 176.0)]
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn a_blank_page_takes_none_of_a_footnote_that_goes_on() {
+        use crate::ir::{NotePosition, SectionStart};
+        // A line (20 to 40), then one (40 to 60) referencing a note of nine lines, five of
+        // which fit below it on page 1; the next section starts on an odd page, so page 2
+        // is blank, and the four other lines go on on page 3.
+        let mut text = None;
+        let mut document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                text = Some(style);
+                let note = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+                vec![
+                    lines(style, 1, spacing(0.0, 0.0)),
+                    referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                ]
+            },
+        );
+        let style = text.expect("the text's style");
+        document.add_section(
+            Section::new(setup())
+                .with_start(SectionStart::OddPage)
+                .with_blocks([lines(style, 1, spacing(0.0, 0.0))]),
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(pages.len(), 3);
+        assert_eq!(pages[0].0, [73.75]);
+        assert_eq!(pages[1], (vec![], vec![]));
+        let mut third = vec![at("A", 36.0)];
+        third.extend((0..4).map(|n| at("N", 116.0 + 20.0 * f64::from(n))));
+        assert_eq!(pages[2], (vec![93.75], third));
+    }
+
+    #[test]
+    fn going_back_to_a_checkpoint_after_a_cut_footnote_takes_its_rest_again() {
+        use crate::ir::NotePosition;
+        // Three lines (20 to 80), then a line (80 to 100) referencing a note of nine lines,
+        // three of which fit below it; then a paragraph kept with the next, which goes to
+        // the next page, under the six other lines, and the next, which does not fit there.
+        // The two move to the next page once, going back to before the first: the rest of
+        // the note goes on that page again.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+                vec![
+                    lines(style, 3, spacing(0.0, 0.0)),
+                    referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                    lines(style, 1, spacing(0.0, 0.0).with_keep_next(true)),
+                    lines(style, 1, spacing(0.0, 0.0)),
+                ]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let notes = |page: &Separated| page.1.iter().filter(|(t, _)| t == "N").count();
+        assert_eq!(pages.len(), 3);
+        assert_eq!((pages[0].0.clone(), notes(&pages[0])), (vec![113.75], 3));
+        assert_eq!((pages[1].0.clone(), notes(&pages[1])), (vec![53.75], 6));
+        assert_eq!(pages[1].1.first(), Some(&at("A", 36.0)));
+        assert_eq!(pages[2], (vec![], vec![at("A", 36.0)]));
+    }
+
+    #[test]
+    fn a_note_that_goes_on_stays_placed_when_the_page_of_its_rest_is_dropped() {
+        use crate::ir::NotePosition;
+        // As above, with the last paragraph referencing the cut note again: when the pages
+        // of the rest of the note are dropped, going back, the note stays on page 1, so
+        // that the second reference brings no note of its own on page 3.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+                vec![
+                    lines(style, 3, spacing(0.0, 0.0)),
+                    referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                    lines(style, 1, spacing(0.0, 0.0).with_keep_next(true)),
+                    referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                ]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let notes = |page: &Separated| page.1.iter().filter(|(t, _)| t == "N").count();
+        assert_eq!(pages.len(), 3);
+        assert_eq!(pages.iter().map(notes).collect::<Vec<_>>(), [3, 6, 0]);
+        assert_eq!(pages[2].0, [0.0; 0]);
+    }
+
+    #[test]
+    fn a_footnote_going_on_takes_what_fits_where_widow_control_allows_no_cut() {
+        use crate::ir::NotePosition;
+        // A line alone on its page (20 to 40) referencing a note of three exact 60 pt lines
+        // with widow control: below the line, widow control allows no cut of the two that
+        // fit, and nothing moves the line, so the note goes on the next page. There two of
+        // its lines fit under the continuation separator and widow control still allows no
+        // cut: as nothing moves them further, both stay, and the third goes on.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let tall = ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(60.0))));
+                let note = footnote(document, (style, mark), 3, tall);
+                vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(
+            pages,
+            [
+                (vec![], vec![at("A1", 36.0)]),
+                (
+                    vec![53.75],
+                    vec![at("1", raised(108.0)), at("N", 108.0), at("N", 168.0)]
+                ),
+                (vec![113.75], vec![at("N", 168.0)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_note_after_one_that_goes_on_goes_on_again_where_it_cannot_start() {
+        use crate::ir::NotePosition;
+        // A line (20 to 40), then one (40 to 60) referencing a note of eleven lines and one
+        // of three with widow control: five lines of the first fit on page 1, the second
+        // goes on wholly. On page 2 the other six lines of the first leave room for one of
+        // the second, which widow control does not cut: it goes on wholly again, to page 3.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let long = footnote(document, (style, mark), 11, spacing(0.0, 0.0));
+                let short = footnote(document, (style, mark), 3, spacing(0.0, 0.0));
+                vec![
+                    lines(style, 1, spacing(0.0, 0.0)),
+                    referencing(style, (0, 0), &[long, short], spacing(0.0, 0.0)),
+                ]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let note =
+            |from: f64, count: u32| (0..count).map(move |n| at("N", from + 20.0 * f64::from(n)));
+        let mut first = vec![at("A", 36.0), at("A1", 56.0), at("2", 56.0)];
+        first.push(at("1", raised(96.0)));
+        first.extend(note(96.0, 5));
+        let mut third = vec![at("2", raised(136.0))];
+        third.extend(note(136.0, 3));
+        assert_eq!(
+            pages,
+            [
+                (vec![73.75], first),
+                (vec![53.75], note(76.0, 6).collect()),
+                (vec![113.75], third),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_keep_rule_moving_a_cut_footnote_s_line_leaves_the_notes_before_it_as_they_were() {
+        use crate::ir::{NoteKind, NotePosition, NoteSeparators};
+        // A line (20 to 40) referencing a note of one line, then one (40 to 60), kept with
+        // the next paragraph, referencing a note of nine lines, which is cut under the first
+        // note with the continuation notice below it. The next paragraph goes to page 2, so
+        // the two move there: page 1 keeps the first note at the bottom of its body (160 to
+        // 180), with no notice, and page 2 has the cut, with the notice.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let line = |inline: Inline| [holding(style, vec![inline])];
+                document.set_note_separators(
+                    NoteKind::Footnote,
+                    NoteSeparators::default()
+                        .with_separator(line(Inline::separator(style)))
+                        .with_continuation_separator(line(Inline::continuation_separator(style)))
+                        .with_continuation_notice(line(Inline::text("C", style))),
+                );
+                let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                let long = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+                vec![
+                    referencing(style, (0, 0), &[short], spacing(0.0, 0.0)),
+                    referencing(
+                        style,
+                        (0, 0),
+                        &[long],
+                        spacing(0.0, 0.0).with_keep_next(true),
+                    ),
+                    lines(style, 1, spacing(0.0, 0.0)),
+                ]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let count = |page: &Separated, text: &str| page.1.iter().filter(|(t, _)| t == text).count();
+        assert_eq!(pages.len(), 3);
+        assert_eq!(
+            pages[0],
+            (
+                vec![153.75],
+                vec![at("A1", 36.0), at("1", raised(176.0)), at("N", 176.0)]
+            )
+        );
+        assert_eq!(
+            (
+                pages[1].0.clone(),
+                count(&pages[1], "N"),
+                count(&pages[1], "C")
+            ),
+            (vec![53.75], 5, 1)
+        );
+        assert_eq!(
+            (
+                pages[2].0.clone(),
+                count(&pages[2], "N"),
+                count(&pages[2], "C")
+            ),
+            (vec![93.75], 4, 0)
+        );
+    }
+
+    /// The separators of footnotes, the continuation separator and a continuation notice of
+    /// one line holding `C`, spaced by `props`.
+    fn with_notice(document: &mut Document, style: RunStyleId, props: ParagraphProps) {
+        use crate::ir::{NoteKind, NoteSeparators};
+        let line = |inline: Inline| [holding(style, vec![inline])];
+        let notice = Paragraph::new(style)
+            .with_props(props)
+            .with_inlines([Inline::text("C", style)]);
+        document.set_note_separators(
+            NoteKind::Footnote,
+            NoteSeparators::default()
+                .with_separator(line(Inline::separator(style)))
+                .with_continuation_separator(line(Inline::continuation_separator(style)))
+                .with_continuation_notice([notice.into()]),
+        );
+    }
+
+    #[test]
+    fn the_lines_after_a_cut_in_its_paragraph_stay_as_far_as_the_cut_gives_way() {
+        use crate::ir::NotePosition;
+        // A line (20 to 40), then a paragraph without widow control of three lines: the
+        // second (60 to 80) references a note of nine lines, the third (80 to 100) one of one
+        // line, then a paragraph of one line. Under the second line four lines of the note
+        // would fit; the third line takes the room of one of them, and its own note cannot
+        // start under the three left. Word 2010 keeps the line and puts its note wholly on
+        // the next page, as Word's render of `form-ec-state-aid-notification-el` does on its
+        // page 14; Word 2013 and later move the line, as one whose note cannot start.
+        let lay = |mode: CompatMode| {
+            let document = with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let long = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+                    let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                    let paragraph = Paragraph::new(style)
+                        .with_props(spacing(0.0, 0.0).with_widow_control(false))
+                        .with_inlines([
+                            Inline::text("A", style),
+                            Inline::line_break(BreakClear::None, style),
+                            Inline::text("B", style),
+                            Inline::note_reference(long, false, style),
+                            Inline::line_break(BreakClear::None, style),
+                            Inline::text("C", style),
+                            Inline::note_reference(short, false, style),
+                        ]);
+                    vec![
+                        lines(style, 1, spacing(0.0, 0.0)),
+                        paragraph.into(),
+                        lines(style, 1, spacing(0.0, 0.0)),
+                    ]
+                },
+            );
+            noted_pages(&document).0
+        };
+        let note =
+            |from: f64, count: u32| (0..count).map(move |n| at("N", from + 20.0 * f64::from(n)));
+        let mut first = vec![at("A", 36.0), at("A", 56.0), at("B1", 76.0), at("C2", 96.0)];
+        first.push(at("1", raised(136.0)));
+        first.extend(note(136.0, 3));
+        let mut second: Vec<_> = note(56.0, 6).collect();
+        second.extend([at("2", raised(176.0)), at("N", 176.0)]);
+        let kept = lay(CompatMode::Word2010);
+        assert_eq!(
+            kept,
+            [
+                (vec![113.75], first),
+                (vec![33.75], second),
+                (vec![], vec![at("A", 36.0)])
+            ]
+        );
+        let moved = lay(CompatMode::Word2013);
+        assert_eq!(
+            moved[0]
+                .1
+                .iter()
+                .filter(|(t, _)| t.starts_with('C'))
+                .count(),
+            0
+        );
+        assert_eq!(moved[1].1.first(), Some(&at("C2", 36.0)));
+    }
+
+    #[test]
+    fn the_rest_of_a_footnote_on_a_narrower_page_is_laid_out_at_its_width() {
+        use crate::ir::{Note, NoteKind, NotePosition};
+        // A line referencing a note of one paragraph of sixty words, cut on page 1, whose
+        // body is 260 pt wide; the next section's body is 100 pt wide (100 to 200). The rest
+        // of the note goes on there at that width, within the body, from the start of the
+        // line its cut falls in, which is reported where that line starts elsewhere there.
+        let mut text = None;
+        let mut document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                text = Some(style);
+                let mut inlines = vec![Inline::note_number(mark)];
+                inlines.extend((0..60).map(|n| Inline::text(format!(" W{n:02}"), style)));
+                let paragraph = Paragraph::new(style)
+                    .with_props(spacing(0.0, 0.0))
+                    .with_inlines(inlines);
+                let note = document.add_note(Note::new(NoteKind::Footnote, [paragraph.into()]));
+                vec![
+                    lines(style, 4, spacing(0.0, 0.0)),
+                    referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                ]
+            },
+        );
+        let style = text.expect("the text's style");
+        let narrow = setup().with_margins(
+            Margins::default()
+                .with_top(Pt(20.0))
+                .with_bottom(Pt(20.0))
+                .with_left(Pt(100.0))
+                .with_right(Pt(100.0)),
+        );
+        document.add_section(Section::new(narrow).with_blocks([lines(
+            style,
+            1,
+            spacing(0.0, 0.0),
+        )]));
+        let (laid, report) = laid(&document, 10);
+        let pages = laid.expect("pages").pages;
+        let words = |page: &Page| -> Vec<String> {
+            separators_and_texts(page)
+                .1
+                .iter()
+                .flat_map(|(text, _)| {
+                    text.split_whitespace()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|word| word.starts_with('W'))
+                .collect()
+        };
+        let reach = |page: &Page| {
+            page.items
+                .iter()
+                .filter_map(|item| match item {
+                    DisplayItem::Glyphs(run) => run
+                        .clusters
+                        .iter()
+                        .flat_map(|cluster| &cluster.glyphs)
+                        .map(|glyph| run.origin.x.0 + glyph.x.0)
+                        .reduce(f64::max),
+                    _ => None,
+                })
+                .fold(0.0, f64::max)
+        };
+        let first = words(&pages[0]);
+        let rest: Vec<String> = pages[1..].iter().flat_map(words).collect();
+        assert!(!first.is_empty() && !rest.is_empty(), "{first:?} {rest:?}");
+        assert!(pages[1..].iter().all(|page| reach(page) < 200.0));
+        // Every word is there, in order, at most a line's start drawn again.
+        let last = first.last().cloned().unwrap_or_default();
+        let again = rest
+            .iter()
+            .position(|word| *word == last)
+            .map_or(0, |i| i + 1);
+        let mut all = first.clone();
+        all.extend(rest.iter().skip(again).cloned());
+        let expected: Vec<String> = (0..60).map(|n| format!("W{n:02}")).collect();
+        assert_eq!(all, expected);
+        let reported = messages(&report)
+            .iter()
+            .any(|m| m.starts_with("the rest of a footnote cut on a page of another width"));
+        assert_eq!(reported, rest.first() != expected.get(first.len()));
+        // Page 1 ends with W28; at 100 pt, W29 is on the line that starts with W25, and
+        // the rest starts there: W25 to W28 are drawn again, within that line.
+        assert_eq!(first.last().map(String::as_str), Some("W28"));
+        assert_eq!(
+            separators_and_texts(&pages[1]).1.first(),
+            Some(&at("W25 W26 W27 W28 W29", 56.0))
+        );
+        assert!(reported);
+    }
+
+    #[test]
+    fn a_keep_chain_beside_the_rest_of_a_footnote_moves_to_a_page_where_it_fits() {
+        use crate::ir::NotePosition;
+        // A line (20 to 40) referencing a note of nine lines, six of which fit below it; then,
+        // after a page break, a line kept with a paragraph of four lines kept together. On
+        // page 2 the rest of the note leaves 80 pt (20 to 100), where the line goes but not
+        // the four lines: the two move to page 3 together, as from a page with text, though
+        // the line started page 2's text.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+                let kept = spacing(0.0, 0.0)
+                    .with_keep_next(true)
+                    .with_page_break_before(true);
+                vec![
+                    referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                    lines(style, 1, kept),
+                    lines(style, 4, spacing(0.0, 0.0).with_keep_lines(true)),
+                ]
+            },
+        );
+        let (pages, messages) = noted_pages(&document);
+        let count = |page: &Separated| page.1.iter().filter(|(t, _)| t == "A").count();
+        assert_eq!(pages.iter().map(count).collect::<Vec<_>>(), [0, 0, 5]);
+        assert!(
+            !messages.iter().any(|m| m.contains("split")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn going_back_to_after_a_cut_keeps_its_notice() {
+        use crate::ir::NotePosition;
+        // A line (20 to 40) referencing a note of nine lines, cut after five with the notice
+        // under them; then a line kept with a paragraph of three lines kept together, which
+        // do not fit beside it under the rest of the note on page 2. Going back to before the
+        // line leaves page 1 as it was, its notice included.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                with_notice(document, style, spacing(0.0, 0.0));
+                let note = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+                vec![
+                    referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                    lines(style, 1, spacing(0.0, 0.0).with_keep_next(true)),
+                    lines(style, 3, spacing(0.0, 0.0).with_keep_lines(true)),
+                ]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(pages[0].1.last(), Some(&at("C", 176.0)));
+        assert_eq!(pages[0].1.iter().filter(|(t, _)| t == "N").count(), 5);
+    }
+
+    #[test]
+    fn a_note_that_goes_on_wholly_brings_no_notice() {
+        use crate::ir::NotePosition;
+        // Word 2010: a line (20 to 40) referencing a note of one line, three more lines,
+        // and a line (100 to 120) referencing a note of three lines with widow control,
+        // which cannot start below it and goes wholly to page 2. Nothing is cut on page 1,
+        // so its notes have no notice.
+        let document = with_notes_in(
+            CompatMode::Word2010,
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                with_notice(document, style, spacing(0.0, 0.0));
+                let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                let long = footnote(document, (style, mark), 3, spacing(0.0, 0.0));
+                vec![
+                    referencing(style, (0, 0), &[short], spacing(0.0, 0.0)),
+                    lines(style, 3, spacing(0.0, 0.0)),
+                    referencing(style, (0, 0), &[long], spacing(0.0, 0.0)),
+                ]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].0, [153.75]);
+        assert!(
+            !pages
+                .iter()
+                .any(|page| page.1.iter().any(|(t, _)| t == "C"))
+        );
+        assert_eq!(pages[1].0, [113.75]);
+    }
+
+    #[test]
+    fn the_part_of_a_footnote_cut_ends_at_the_bottom_whatever_its_space_after() {
+        use crate::ir::NotePosition;
+        // A line alone (20 to 40) referencing a note of seven lines with 10 pt after it and
+        // widow control: of the six that fit below the line, five stay. The part cut keeps
+        // no space after: it ends at the bottom of the body.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 7, spacing(0.0, 10.0));
+                vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let mut first = vec![at("A1", 36.0), at("1", raised(96.0))];
+        first.extend((0..5).map(|n| at("N", 96.0 + 20.0 * f64::from(n))));
+        assert_eq!(pages[0], (vec![73.75], first));
+    }
+
+    #[test]
+    fn a_footnote_of_lines_taller_than_the_page_goes_on_a_line_a_page() {
+        use crate::ir::NotePosition;
+        // A line alone referencing a note of two exact 200 pt lines, each taller than the
+        // body: the note goes on the next page, then one line a page.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let tall = ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(200.0))))
+                    .with_widow_control(false);
+                let note = footnote(document, (style, mark), 2, tall);
+                vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let notes = |page: &Separated| page.1.iter().filter(|(t, _)| t == "N").count();
+        assert_eq!(pages.iter().map(notes).collect::<Vec<_>>(), [0, 1, 1]);
+    }
+
+    #[test]
+    fn the_space_after_the_notice_ends_the_notes() {
+        use crate::ir::NotePosition;
+        // A line alone (20 to 40) referencing a note of five exact 30 pt lines, under a notice
+        // of one line with 10 pt after it: three lines fit with the notice, which ends 10 pt
+        // above the bottom of the body (150 to 170).
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                with_notice(document, style, spacing(0.0, 10.0));
+                let lines = ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(30.0))));
+                let note = footnote(document, (style, mark), 5, lines);
+                vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(pages[0].0, [53.75]);
+        assert_eq!(pages[0].1.last(), Some(&at("C", 166.0)));
+        assert_eq!(pages[0].1.iter().filter(|(t, _)| t == "N").count(), 3);
+    }
+
+    #[test]
+    fn a_notice_that_does_not_fit_under_a_forced_part_is_left_out_and_reported() {
+        use crate::ir::NotePosition;
+        const LEFT_OUT: &str = "a continuation notice that does not fit under the part of a \
+                                footnote cut on a page is left out";
+        // A line alone referencing a note of two exact 130 pt lines without widow control:
+        // the note goes on page 2, where its first line fits under the continuation
+        // separator (40 to 170) but not with the notice: the notice is left out, and
+        // reported.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                with_notice(document, style, spacing(0.0, 0.0));
+                let tall = ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(130.0))))
+                    .with_widow_control(false);
+                let note = footnote(document, (style, mark), 2, tall);
+                vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+            },
+        );
+        let (pages, messages) = noted_pages(&document);
+        let notes = |page: &Separated| page.1.iter().filter(|(t, _)| t == "N").count();
+        assert_eq!(pages.iter().map(notes).collect::<Vec<_>>(), [0, 1, 1]);
+        assert!(
+            !pages
+                .iter()
+                .any(|page| page.1.iter().any(|(t, _)| t == "C"))
+        );
+        assert_eq!(messages.iter().filter(|m| *m == LEFT_OUT).count(), 1);
+    }
+
+    #[test]
+    fn a_later_line_of_the_paragraph_does_not_cut_a_footnote_below_what_widow_control_keeps() {
+        use crate::ir::NotePosition;
+        // Two lines (20 to 60), then a paragraph without widow control of four lines, the
+        // second (80 to 100) referencing a note of four lines with widow control: two lines
+        // of the note stay below it, and still below the third line (100 to 120); under the
+        // fourth only one would, which widow control does not allow, so the fourth goes to
+        // the next page. So in Word 2010 too: the note it cuts does not go wholly to the
+        // next page for a later line.
+        for mode in [CompatMode::Word2013, CompatMode::Word2010] {
+            let document = with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let note = footnote(document, (style, mark), 4, spacing(0.0, 0.0));
+                    vec![
+                        lines(style, 2, spacing(0.0, 0.0)),
+                        referencing(
+                            style,
+                            (1, 2),
+                            &[note],
+                            spacing(0.0, 0.0).with_widow_control(false),
+                        ),
+                    ]
+                },
+            );
+            let (pages, _) = noted_pages(&document);
+            let mut first: Vec<_> = (0..3)
+                .map(|n| at("A", 36.0 + 20.0 * f64::from(n)))
+                .collect();
+            first.extend([
+                at("A1", 96.0),
+                at("A", 116.0),
+                at("1", raised(156.0)),
+                at("N", 156.0),
+                at("N", 176.0),
+            ]);
+            assert_eq!(
+                pages,
+                [
+                    (vec![133.75], first),
+                    (
+                        vec![133.75],
+                        vec![at("A", 36.0), at("N", 156.0), at("N", 176.0)]
+                    ),
+                ],
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_later_line_cuts_again_the_note_it_cut_under_the_notes_before_it_from_its_start() {
+        use crate::ir::NotePosition;
+        // A paragraph of seven lines (20 to 160) without widow control, the first
+        // referencing a note of nine lines, without widow control, after a note of one line,
+        // or, alone, with 10 pt before it. Under each later line the long note is cut again
+        // under the short one, or with its space before: after the fifth line one line of it
+        // is left, and the sixth goes to the next page.
+        let lay = |short: bool| {
+            let document = with_notes(
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let props =
+                        spacing(if short { 0.0 } else { 10.0 }, 0.0).with_widow_control(false);
+                    let mut notes = Vec::new();
+                    if short {
+                        notes.push(footnote(document, (style, mark), 1, spacing(0.0, 0.0)));
+                    }
+                    notes.push(footnote(document, (style, mark), 9, props));
+                    vec![referencing(
+                        style,
+                        (0, 6),
+                        &notes,
+                        spacing(0.0, 0.0).with_widow_control(false),
+                    )]
+                },
+            );
+            noted_pages(&document).0
+        };
+        let text = |first: &str| {
+            let mut texts = vec![at(first, 36.0)];
+            texts.extend((1..5).map(|n| at("A", 36.0 + 20.0 * f64::from(n))));
+            texts
+        };
+        let pages = lay(true);
+        let mut first = text("A1");
+        first.insert(1, at("2", 36.0));
+        first.extend([
+            at("1", raised(156.0)),
+            at("N", 156.0),
+            at("2", raised(176.0)),
+            at("N", 176.0),
+        ]);
+        assert_eq!(pages[0], (vec![133.75], first));
+        let pages = lay(false);
+        let mut first = text("A1");
+        first.extend([at("1", raised(176.0)), at("N", 176.0)]);
+        assert_eq!(pages[0], (vec![143.75], first));
+    }
+
+    #[test]
+    fn the_lines_after_a_note_that_goes_on_wholly_fill_the_page_in_word_2010() {
+        use crate::ir::NotePosition;
+        // Word 2010: four lines (20 to 100), then a paragraph without widow control of four
+        // lines (100 to 180), the first referencing a note of three lines with widow
+        // control, which cannot start below it, the second a note of one line. Both notes go
+        // wholly to page 2, and the paragraph's lines fill page 1.
+        let document = with_notes_in(
+            CompatMode::Word2010,
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let long = footnote(document, (style, mark), 3, spacing(0.0, 0.0));
+                let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                let paragraph = Paragraph::new(style)
+                    .with_props(spacing(0.0, 0.0).with_widow_control(false))
+                    .with_inlines([
+                        Inline::text("B", style),
+                        Inline::note_reference(long, false, style),
+                        Inline::line_break(BreakClear::None, style),
+                        Inline::text("C", style),
+                        Inline::note_reference(short, false, style),
+                        Inline::line_break(BreakClear::None, style),
+                        Inline::text("D", style),
+                        Inline::line_break(BreakClear::None, style),
+                        Inline::text("E", style),
+                    ]);
+                vec![lines(style, 4, spacing(0.0, 0.0)), paragraph.into()]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let mut first: Vec<_> = (0..4)
+            .map(|n| at("A", 36.0 + 20.0 * f64::from(n)))
+            .collect();
+        first.extend([
+            at("B1", 116.0),
+            at("C2", 136.0),
+            at("D", 156.0),
+            at("E", 176.0),
+        ]);
+        let second = vec![
+            at("1", raised(116.0)),
+            at("N", 116.0),
+            at("N", 136.0),
+            at("N", 156.0),
+            at("2", raised(176.0)),
+            at("N", 176.0),
+        ];
+        assert_eq!(pages, [(vec![], first), (vec![93.75], second)]);
+    }
+
+    #[test]
+    fn a_footnote_that_fits_is_not_cut_nor_reported() {
+        use crate::ir::NotePosition;
+        // A note that fits is neither cut nor reported, nor is one that fits but for its space after
         // (six lines with 10 pt after, under its separator 140 pt from the line at 40 to the
         // bottom): it ends at the bottom of the body.
         for after in [0.0, 10.0] {
@@ -9147,7 +11088,10 @@ mod tests {
                 separators_and_texts(&pages[0]).1.last(),
                 Some(&("N".to_owned(), 176.0))
             );
-            assert!(!messages(&report).iter().any(|m| m == PAST), "{report:?}");
+            assert!(
+                !messages(&report).iter().any(|m| m.contains("footnote")),
+                "{report:?}"
+            );
         }
     }
 

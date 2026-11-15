@@ -28,6 +28,7 @@ SECTIONS = {
     "liberation": "### Liberation Sans, Serif and Mono",
     "carlito": "### Carlito",
     "noto": "### Noto Sans",
+    "librebarcode": "### Libre Barcode 128",
 }
 
 EXPECTED = [
@@ -37,6 +38,8 @@ EXPECTED = [
     "carlito_commit",
     "noto_url",
     "noto_commit",
+    "librebarcode_url",
+    "librebarcode_commit",
 ]
 
 # What the notices put around each kind of pin, and the shape of the pin.

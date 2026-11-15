@@ -604,6 +604,11 @@ fn parse(instruction: &str) -> (ir::FieldKind, Option<ir::NumberFormat>) {
             "alphabetic" if upper => ir::NumberFormat::UpperLetter,
             "alphabetic" => ir::NumberFormat::LowerLetter,
             "ordinal" => ir::NumberFormat::Ordinal,
+            "arabicdash" => ir::NumberFormat::NumberInDash,
+            "cardtext" => ir::NumberFormat::CardinalText,
+            "ordtext" => ir::NumberFormat::OrdinalText,
+            "dollartext" => ir::NumberFormat::DollarText,
+            "hex" => ir::NumberFormat::Hex,
             _ => ir::NumberFormat::Other(argument.to_owned()),
         };
         format = Some(found);
@@ -649,7 +654,32 @@ mod tests {
             (
                 "PAGE \\* CardText",
                 ir::FieldKind::Page,
-                Some(ir::NumberFormat::Other("CardText".into())),
+                Some(ir::NumberFormat::CardinalText),
+            ),
+            (
+                "PAGE \\* ordtext",
+                ir::FieldKind::Page,
+                Some(ir::NumberFormat::OrdinalText),
+            ),
+            (
+                "NUMPAGES \\* ArabicDash",
+                ir::FieldKind::NumPages,
+                Some(ir::NumberFormat::NumberInDash),
+            ),
+            (
+                "PAGE \\* DollarText",
+                ir::FieldKind::Page,
+                Some(ir::NumberFormat::DollarText),
+            ),
+            (
+                "PAGE \\* Hex",
+                ir::FieldKind::Page,
+                Some(ir::NumberFormat::Hex),
+            ),
+            (
+                "PAGE \\* GB3",
+                ir::FieldKind::Page,
+                Some(ir::NumberFormat::Other("GB3".into())),
             ),
             (
                 "DATE \\@ \"d MMMM yyyy\"",

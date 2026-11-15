@@ -823,7 +823,7 @@ fn a_tab_after_text_that_ends_at_a_stop_goes_to_the_next_stop() -> TestResult {
 }
 
 #[test]
-fn empty_paragraphs_and_a_final_line_break_have_the_marks_height() -> TestResult {
+fn a_line_of_text_keeps_its_height_and_an_empty_line_has_the_mark_s() -> TestResult {
     use officewright_layout::ir::BreakClear;
 
     let book = book()?;
@@ -844,10 +844,13 @@ fn empty_paragraphs_and_a_final_line_break_have_the_marks_height() -> TestResult
     let laid = fuzzing::lay_out(&book, &document, &Paragraph::new(big), 200.0);
     assert_eq!(laid.lines().len(), 1);
     assert!((laid.height() - line(20.0)).abs() < 1e-9);
-    // The mark's height counts on the paragraph's last line, not on the others.
+    // A line of text is as tall as its text, whatever the size of the paragraph mark
+    // or of the run of the break that ends it, as Word lays it out: a Calibri 11 pt break
+    // and mark next to 9 pt text in E-smallcaps-15's reference, a 20 pt mark under a
+    // 12 pt title in contract-usds-statement-of-objectives' (#359).
     let inlines = vec![
         Inline::text("one", small),
-        Inline::line_break(BreakClear::None, small),
+        Inline::line_break(BreakClear::None, big),
         Inline::text("two", small),
     ];
     let laid = fuzzing::lay_out(
@@ -859,8 +862,9 @@ fn empty_paragraphs_and_a_final_line_break_have_the_marks_height() -> TestResult
     let heights: Vec<f64> = laid.lines().iter().map(|line| line.height()).collect();
     assert_eq!(heights.len(), 2);
     assert!((heights.first().copied().unwrap_or_default() - line(10.0)).abs() < 1e-9);
-    assert!((heights.get(1).copied().unwrap_or_default() - line(20.0)).abs() < 1e-9);
-    // A line break at the end makes an empty line, with the mark.
+    assert!((heights.get(1).copied().unwrap_or_default() - line(10.0)).abs() < 1e-9);
+    // A line break at the end makes an empty line, with the mark's height; a line with
+    // only a break has the break's.
     let inlines = vec![
         Inline::text("one", small),
         Inline::line_break(BreakClear::None, small),
@@ -868,11 +872,29 @@ fn empty_paragraphs_and_a_final_line_break_have_the_marks_height() -> TestResult
     let laid = fuzzing::lay_out(
         &book,
         &document,
-        &paragraph(small, ParagraphProps::default(), inlines),
+        &paragraph(big, ParagraphProps::default(), inlines),
         200.0,
     );
     let ends: Vec<&str> = laid.lines().iter().map(|line| line.end()).collect();
     assert_eq!(ends, ["break", "paragraph"]);
+    let heights: Vec<f64> = laid.lines().iter().map(|line| line.height()).collect();
+    assert_eq!(heights.len(), 2);
+    assert!((heights.first().copied().unwrap_or_default() - line(10.0)).abs() < 1e-9);
+    assert!((heights.get(1).copied().unwrap_or_default() - line(20.0)).abs() < 1e-9);
+    let inlines = vec![
+        Inline::line_break(BreakClear::None, big),
+        Inline::text("two", small),
+    ];
+    let laid = fuzzing::lay_out(
+        &book,
+        &document,
+        &paragraph(small, ParagraphProps::default(), inlines),
+        200.0,
+    );
+    let heights: Vec<f64> = laid.lines().iter().map(|line| line.height()).collect();
+    assert_eq!(heights.len(), 2);
+    assert!((heights.first().copied().unwrap_or_default() - line(20.0)).abs() < 1e-9);
+    assert!((heights.get(1).copied().unwrap_or_default() - line(10.0)).abs() < 1e-9);
     // A page break at the end does not: the mark stays on its line.
     let inlines = vec![Inline::text("one", small), Inline::page_break(small)];
     let laid = fuzzing::lay_out(

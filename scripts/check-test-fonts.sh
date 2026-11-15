@@ -4,7 +4,8 @@
 # compares the files with the SHA-256 the notices list, and that the pins below are the
 # notices'; this compares them with upstream. Liberation comes from its release archive,
 # whose SHA-256 is checked first; Carlito and Noto Sans (its CFF and TrueType builds) from
-# shallow, partial, sparse clones of the pinned commits, which git verifies. The symbol font
+# shallow, partial, sparse clones of the pinned commits, which git verifies, and so does
+# Libre Barcode 128 from Google Fonts' repository. The symbol font
 # of tests/fonts-word/test-symbol and the DMAP font of tests/fonts-word/test-dmap are
 # compared with what scripts/make-symbol-font.py and scripts/make-dmap-font.py write from
 # upstream's TrueType NotoSans-Regular.ttf. Every entry of both folders must be a
@@ -18,6 +19,8 @@ carlito_url=https://github.com/googlefonts/carlito
 carlito_commit=3a810cab78ebd6e2e4eed42af9e8453c4f9b850a
 noto_url=https://github.com/notofonts/notofonts.github.io
 noto_commit=28b15b4b43b7bed62b5cf6e6b0b5ff5846270535
+librebarcode_url=https://github.com/google/fonts
+librebarcode_commit=8ace0e6bb7f4c2f06b74319c20d2f3fa9d33735b
 
 failed=
 fail() {
@@ -32,7 +35,7 @@ cannot() {
 
 # The pins are the ones the notices give.
 for pin in "$liberation_url" "$liberation_sha256" "$carlito_url" "$carlito_commit" \
-	"$noto_url" "$noto_commit"; do
+	"$noto_url" "$noto_commit" "$librebarcode_url" "$librebarcode_commit"; do
 	grep -qF "$pin" THIRD-PARTY-NOTICES.md || fail "$pin is not in THIRD-PARTY-NOTICES.md"
 done
 
@@ -80,6 +83,8 @@ clone "$work/carlito" "$carlito_url" "$carlito_commit" /fonts/ttf/ /OFL.txt
 clone "$work/noto" "$noto_url" "$noto_commit" /fonts/NotoSans/unhinted/otf/NotoSans-Regular.otf \
 	/fonts/NotoSans/unhinted/ttf/NotoSans-Regular.ttf /fonts/NotoSans/unhinted/ttf/NotoSans-Bold.ttf \
 	/fonts/NotoSans/unhinted/ttf/NotoSans-BoldItalic.ttf /fonts/LICENSE
+clone "$work/librebarcode" "$librebarcode_url" "$librebarcode_commit" \
+	/ofl/librebarcode128/LibreBarcode128-Regular.ttf /ofl/librebarcode128/OFL.txt
 python3 -I -B scripts/make-symbol-font.py --from "$work/noto/fonts/NotoSans/unhinted/ttf/NotoSans-Regular.ttf" \
 	--to "$work/derived/OfficewrightTestSymbol-Regular.ttf" ||
 	fail "scripts/make-symbol-font.py cannot write the symbol font from upstream's NotoSans-Regular.ttf"
@@ -106,6 +111,7 @@ while IFS= read -r -d '' file; do
 	tests/fonts/noto/*) upstream=$work/noto/fonts/NotoSans/unhinted/otf/$name ;;
 	tests/fonts-word/noto-truetype/*) upstream=$work/noto/fonts/NotoSans/unhinted/ttf/$name ;;
 	tests/fonts-word/test-symbol/* | tests/fonts-word/test-dmap/*) upstream=$work/derived/$name ;;
+	tests/fonts-word/libre-barcode-128/*) upstream=$work/librebarcode/ofl/librebarcode128/$name ;;
 	*)
 		fail "$file has no upstream source in this script"
 		continue

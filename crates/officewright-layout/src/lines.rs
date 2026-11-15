@@ -15,8 +15,8 @@ use crate::breaks::{
 };
 use crate::fonts::Fonts;
 use crate::ir::{
-    Alignment, BreakKind, CompatFlag, Document, Inline, LevelAlignment, LineSpacing, Paragraph,
-    RunStyleId, TabKind, TabLeader,
+    Alignment, BreakKind, CompatFlag, CompatMode, Document, Inline, LevelAlignment, LineSpacing,
+    Paragraph, RunStyleId, TabKind, TabLeader,
 };
 use crate::itemize::{InlinePath, Item, Itemized, TextRun, report_shaped, request};
 use crate::metrics::{LineMetrics, TypoRule, line_metrics};
@@ -322,6 +322,9 @@ pub(crate) struct Input<'p> {
     pub(crate) width: Pt,
     /// The paragraph's place, for the report.
     pub(crate) location: &'p Location,
+    /// Whether the paragraph is in a table cell, where its paragraph mark and breaks keep
+    /// counting in the height of a line of text (see `set_height`).
+    pub(crate) cell: bool,
 }
 
 /// What the line breaker works with.
@@ -348,6 +351,8 @@ pub(crate) struct Breaker<'p, 'f, 'b> {
     splice: Option<Splice>,
     /// How far the list label moves the first line's start.
     label_shift: Pt,
+    /// Whether the paragraph is in a table cell.
+    cell: bool,
 }
 
 impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
@@ -365,6 +370,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             paragraph,
             width,
             location,
+            cell,
         } = input;
         let (text, starts) = break_text(itemized);
         let props = paragraph.props();
@@ -387,6 +393,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             overflow_reported: false,
             splice: None,
             label_shift: Pt(0.0),
+            cell,
         };
         breaker.scales = breaker.measure_items();
         breaker.units = breaker.make_units(shaped);
@@ -483,13 +490,19 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     width: Pt(0.0),
                 }),
                 // The separator is [`SEPARATOR_LENGTH`] long, or as wide as a narrower
-                // column, the continuation separator as wide as the column. Hypothesis
-                // until a Word render (`E-footnote-long.docx`) for the latter, and for a
-                // column narrower than the separator.
+                // column (a hypothesis until a Word render), and so is the continuation
+                // separator in Word 2013 and later (mode 15: Word's renders of
+                // `E-footnote-long.docx`, `E-footnote-long-notice.docx` and
+                // `E-footnote-no-room.docx`). Word 2010 (mode 14) draws the continuation
+                // separator as wide as the column (`business/form-ec-state-aid-notification-de`
+                // on its page 16, `-el` on its pages 15, 16 and 20), and so do the older
+                // modes here.
                 Item::Separator(continuation, _) => units.push(Unit {
                     range: start..start + PLACEHOLDER_MARK.len_utf8(),
                     kind: UnitKind::Zero { item: index },
-                    width: if *continuation {
+                    width: if *continuation
+                        && self.document.settings().compat_mode() < CompatMode::Word2013
+                    {
                         self.width
                     } else {
                         Pt(SEPARATOR_LENGTH.min(self.width.0))
@@ -1417,20 +1430,30 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             .settings()
             .has_compat_flag(&CompatFlag::NoLeading);
         let mut extent = Extent::default();
+        let mut text = false;
+        let mut breaks = Vec::new();
         for piece in &line.pieces {
             match &piece.kind {
                 PieceKind::Text { item, .. } | PieceKind::Hyphen { item, .. } => {
+                    text = true;
                     let metrics = self.text_metrics(*item);
                     extent.add(metrics, self.position(*item));
                 }
-                PieceKind::Tab { item, .. } | PieceKind::Break { item } => {
+                PieceKind::Tab { item, .. } => {
                     if let Some(style) = item_style(self.itemized, *item) {
                         let metrics = self.style_metrics(style);
                         extent.add(metrics, Pt(0.0));
                     }
                 }
+                // A break counts only on a line without text (below).
+                PieceKind::Break { item } => {
+                    if let Some(style) = item_style(self.itemized, *item) {
+                        breaks.push(self.style_metrics(style));
+                    }
+                }
                 PieceKind::Object { item, height } => {
                     if let Some(height) = height {
+                        text = true;
                         extent.ascent = extent.ascent.max(height.0);
                         extent.empty = false;
                     } else if let Some(style) = item_style(self.itemized, *item) {
@@ -1440,11 +1463,27 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 }
             }
         }
-        // The line with the paragraph mark includes it; an empty line has only the
-        // mark, or the break that ends it.
-        if last || extent.empty {
-            let metrics = self.style_metrics(self.paragraph.mark());
-            extent.add(metrics, Pt(0.0));
+        // A line of text, or of an inline picture or text box, is as tall as what it
+        // holds: Word gives neither the paragraph mark nor the run of a break that ends
+        // the line a height of their own there, however large they are (E-smallcaps-15's
+        // reference: a Calibri 11 pt break and mark next to 9 pt text;
+        // contract-usds-statement-of-objectives: a 12 pt title with a 20 pt mark, under a
+        // picture whose line ends where Word's does; E-textbox-spacing: lines of inline
+        // text boxes). A line with none of them has the height of its break, and the last
+        // line of a paragraph that of the mark too, such as an empty line. In a table cell
+        // the break and the last line's mark still count: Word's rows of the letterheads
+        // of generated/invoice-en-standard and letter-uk are taller than their text, and
+        // a line of a picture alone takes them too, as on main, though Word's pictures in
+        // the cells of form-gsa-reseller-form and form-gsa-pacs-series-form sit 1.3 pt
+        // lower than ours. Hypothesis until a rule document settles cells (#537).
+        if !text || self.cell {
+            for metrics in breaks {
+                extent.add(metrics, Pt(0.0));
+            }
+            if last || extent.empty {
+                let metrics = self.style_metrics(self.paragraph.mark());
+                extent.add(metrics, Pt(0.0));
+            }
         }
         let leading = if no_leading { 0.0 } else { extent.leading };
         let natural = extent.ascent + extent.descent + leading;
@@ -2161,6 +2200,7 @@ mod tests {
             paragraph: &paragraph,
             width: Pt(100.0),
             location: &location,
+            cell: false,
         };
         let starts = |breaker: &Breaker<'_, '_, '_>| -> Vec<usize> {
             breaker.units.iter().map(|unit| unit.range.start).collect()

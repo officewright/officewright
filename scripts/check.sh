@@ -173,8 +173,8 @@ fi
 
 step "corpus runner over tests/corpus (against tests/corpus/baseline.json)"
 # Every committed Word document opens and is rendered into PDF in a child process, with the
-# fonts of tests/fonts-word/noto-truetype, tests/fonts-word/test-symbol, tests/fonts and
-# tests/fonts-word/test-dmap and none of the system's; a panic, hang, memory blow-up, a
+# fonts of tests/fonts-word/noto-truetype, tests/fonts-word/test-symbol, tests/fonts,
+# tests/fonts-word/libre-barcode-128 and tests/fonts-word/test-dmap and none of the system's; a panic, hang, memory blow-up, a
 # document that opens but cannot be rendered, or any change of a file's status from the
 # baseline fails. On Linux each document with a Word reference is also scored, and a score
 # that moves by more than 0.01 fails; macOS and Windows compare the statuses only, since
@@ -184,14 +184,16 @@ step "corpus runner over tests/corpus (against tests/corpus/baseline.json)"
 # The TrueType Noto Sans comes first: of two faces of one family and style, the font book
 # takes the one added first, and the references that use Noto Sans were rendered by Word
 # with that build, but for E-line-fonts (THIRD-PARTY-NOTICES.md). The symbol font of
-# tests/fonts-word/test-symbol is the one installed when Word renders E-symbol-font, and the
-# DMAP font of tests/fonts-word/test-dmap the one installed when it renders E-dmap-font; it
-# comes last, so that the layout falls back to it only where no other face has a character,
-# or for a family that shares its first word (Officewright Test Symbol).
+# tests/fonts-word/test-symbol is the one installed when Word renders E-symbol-font, the
+# barcode font of tests/fonts-word/libre-barcode-128 the one installed when it renders
+# E-barcode-font, and the DMAP font of tests/fonts-word/test-dmap the one installed when it
+# renders E-dmap-font; the DMAP font comes last, so that the layout falls back to it only
+# where no other face has a character, or for a family that shares its first word
+# (Officewright Test Symbol).
 rm -rf target/corpus-pdf
 corpus_options=(--render target/corpus-pdf --font-dir tests/fonts-word/noto-truetype
 	--font-dir tests/fonts-word/test-symbol --font-dir tests/fonts
-	--font-dir tests/fonts-word/test-dmap)
+	--font-dir tests/fonts-word/libre-barcode-128 --font-dir tests/fonts-word/test-dmap)
 if [ "$os" = linux ]; then
 	corpus_options+=(--references tests/corpus/reference)
 else

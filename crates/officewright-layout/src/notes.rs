@@ -3,9 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::{
-    Block, Document, Inline, MAX_TABLE_DEPTH, NoteId, NoteKind, NoteRestart, Paragraph,
+    Block, Document, Inline, MAX_TABLE_DEPTH, NoteId, NoteKind, NoteRestart, Paragraph, RunStyleId,
 };
-use crate::numbers::number_text;
+use crate::numbers::{Departures, number_text};
 
 /// The number each referenced note shows, as text, and the formats and restarts of them
 /// that the layout writes otherwise than the document says.
@@ -15,8 +15,9 @@ pub(crate) struct NoteNumbers {
     /// The notes referenced in headers and footers, where a reference shows no number
     /// unless the body numbers its note.
     framed: HashSet<NoteId>,
-    /// Whether a number's format is one the layout writes as decimal instead.
-    pub(crate) decimal: bool,
+    /// How numbers are written otherwise than their formats say: in decimal, or in
+    /// English for a language without words.
+    pub(crate) departures: Departures,
     /// Whether a note is numbered in a section that starts the numbers of its kind again
     /// on each page, which the layout numbers through the section until it places notes
     /// on their pages.
@@ -143,12 +144,14 @@ impl Walk<'_, '_> {
         for inline in inlines {
             match inline {
                 Inline::NoteReference {
-                    note, custom_mark, ..
+                    note,
+                    custom_mark,
+                    style,
                 } if !custom_mark => {
                     if self.frames {
                         self.numbers.framed.insert(*note);
                     } else {
-                        self.reference(*note);
+                        self.reference(*note, *style);
                     }
                 }
                 Inline::Field(field) if results && !crate::itemize::computed(field.kind()) => {
@@ -159,7 +162,10 @@ impl Walk<'_, '_> {
         }
     }
 
-    fn reference(&mut self, note: NoteId) {
+    /// Numbers `note` at its first reference, whose style `style` gives the language of
+    /// a number in words: a hypothesis, as fields take theirs, until a Word reference
+    /// shows a note number in another language (#546).
+    fn reference(&mut self, note: NoteId, style: RunStyleId) {
         if self.numbers.numbers.contains_key(&note) {
             return;
         }
@@ -175,8 +181,12 @@ impl Walk<'_, '_> {
         }
         let number = self.next.get(kind).unwrap_or(u32::from(props.start()));
         self.next.set(kind, number.saturating_add(1));
-        let (text, decimal) = number_text(number, props.format());
-        self.numbers.decimal |= decimal;
+        let language = self
+            .document
+            .run_style(style)
+            .and_then(|style| style.language().latin());
+        let (text, departures) = number_text(number, props.format(), language);
+        self.numbers.departures.add(departures);
         self.numbers.numbers.insert(note, text);
     }
 }
@@ -297,7 +307,53 @@ mod tests {
             headed_in_box,
         ];
         assert!(!unframed.iter().any(|&id| numbers.framed(id)));
-        assert!(!numbers.decimal && !numbers.each_page);
+        assert!(numbers.departures == Departures::default() && !numbers.each_page);
+    }
+
+    #[test]
+    fn note_numbers_are_in_the_language_of_their_reference_and_say_how_they_depart() {
+        use crate::ir::Language;
+        let numbers = |format: NumberFormat, start: u16, tag: &str| {
+            let mut document = Document::default();
+            let style = document.add_run_style(
+                RunStyle::default().with_language(Language::default().with_latin(Some(tag.into()))),
+            );
+            let note = document.add_note(Note::new(NoteKind::Footnote, []));
+            let section = Section::new(PageSetup::default())
+                .with_footnotes(NoteProps::footnotes().with_start(start).with_format(format))
+                .with_blocks([holding(
+                    style,
+                    vec![Inline::note_reference(note, false, style)],
+                )]);
+            document.add_section(section);
+            let numbers = NoteNumbers::new(&document);
+            (numbers.text(note).map(str::to_owned), numbers.departures)
+        };
+        let none = Departures::default();
+        assert_eq!(
+            numbers(NumberFormat::OrdinalText, 27, "de-DE"),
+            (Some("Siebenundzwanzigste".to_owned()), none)
+        );
+        assert_eq!(
+            numbers(NumberFormat::OrdinalText, 27, "fr-FR"),
+            (
+                Some("twenty-seventh".to_owned()),
+                Departures {
+                    language: true,
+                    ..none
+                }
+            )
+        );
+        assert_eq!(
+            numbers(NumberFormat::UpperLetter, 781, "en-US"),
+            (
+                Some("781".to_owned()),
+                Departures {
+                    unrepresentable: true,
+                    ..none
+                }
+            )
+        );
     }
 
     #[test]
