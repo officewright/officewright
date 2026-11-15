@@ -7,6 +7,7 @@
 #![cfg_attr(not(any(test, feature = "fuzzing")), allow(dead_code))]
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use officewright_core::{Color, Pt};
 use officewright_font::{FaceId, FontFace, GlyphId};
@@ -14,8 +15,8 @@ use officewright_font::{FaceId, FontFace, GlyphId};
 use crate::fonts::{Choice, Fonts};
 use crate::ir::{
     AnchorHorizontalAlign, AnchorVerticalAlign, AnchoredObject, Block, ColorValue, CompatFlag,
-    Crop, Document, HorizontalPlacement, HorizontalReference, Inline, ObjectContent, Paragraph,
-    RunStyle, Shading, ShadingPattern, Size, TabKind, TabLeader, TextBox, TextBoxAnchor,
+    Crop, Document, HorizontalPlacement, HorizontalReference, Inline, LinkTarget, ObjectContent,
+    Paragraph, RunStyle, Shading, ShadingPattern, Size, TabKind, TabLeader, TextBox, TextBoxAnchor,
     UnderlineKind, VerticalPlacement, VerticalPosition, VerticalReference, Wrap,
 };
 use crate::itemize::{Item, Itemized, TextRun, drawn_size};
@@ -99,6 +100,18 @@ pub(crate) enum DisplayItem {
     },
     /// Ends the clip of the last `PushClip` not yet ended.
     PopClip,
+    /// A link: a click on the rectangle, from its top left corner, goes to `target`.
+    Link {
+        at: Point,
+        width: Pt,
+        height: Pt,
+        target: Arc<LinkTarget>,
+    },
+    /// The place a bookmark marks, which links to its name go to.
+    Destination {
+        at: Point,
+        name: Arc<str>,
+    },
 }
 
 /// Glyphs of one face, size and look, on one baseline.
@@ -418,6 +431,13 @@ impl Painting<'_, '_, '_> {
         let mut front = Vec::new();
         let mut top = origin.y.0;
         let itemized = &self.layout.itemized;
+        crate::links::paint(
+            itemized,
+            &self.layout.lines,
+            lines.clone(),
+            origin,
+            &mut front,
+        );
         let lines = self.layout.lines.get(lines).unwrap_or(&[]);
         self.bars(lines, origin, &mut front);
         let mut tables = SourceTables::default();

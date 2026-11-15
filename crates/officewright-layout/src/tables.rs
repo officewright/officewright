@@ -2409,7 +2409,9 @@ pub(crate) fn shift(items: &mut [DisplayItem], dx: f64, dy: f64) {
                 moved(&mut line.to);
             }
             DisplayItem::Image(image) => moved(&mut image.at),
-            DisplayItem::PushClip { at, .. } => moved(at),
+            DisplayItem::PushClip { at, .. }
+            | DisplayItem::Link { at, .. }
+            | DisplayItem::Destination { at, .. } => moved(at),
             DisplayItem::PopClip => {}
         }
     }

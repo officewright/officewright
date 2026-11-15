@@ -77,7 +77,11 @@ crates/
                         references in table cells and endnotes are not laid out), behind
                         private modules;
                         feature `pdf` renders a document into PDF with officewright-pdf (`render_pdf`,
-                        hidden in the docs like the IR it takes, and `RenderOptions`);
+                        hidden in the docs like the IR it takes, and `RenderOptions`), its links
+                        as link annotations, one on each line a link spans, to a URI or to the
+                        first destination of a bookmark's name, its bookmarks as named
+                        destinations at the lines they start, and links to bookmarks no page
+                        shows left out and reported;
                         feature `fuzzing` opens entry points for the fuzz targets, examples and the tests
                         with the test fonts and Word's renders, which are not API; `data/symbol.txt`
                         (Unicode's Adobe Symbol mapping) stays out of the published crate

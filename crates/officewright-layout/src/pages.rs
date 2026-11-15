@@ -5809,6 +5809,82 @@ mod tests {
             .with_rows(rows)
     }
 
+    #[test]
+    fn links_and_bookmarks_in_headers_and_table_cells_are_where_their_text_is() {
+        use crate::ir::LinkTarget;
+
+        let link = |style: RunStyleId, uri: &str| {
+            vec![
+                Inline::link_start(LinkTarget::Uri(uri.to_owned())),
+                Inline::text("A", style),
+                Inline::link_end(),
+            ]
+        };
+        let document = document(|style| {
+            let header = Paragraph::new(style).with_inlines(link(style, "header"));
+            let mut linked = vec![Inline::bookmark("cell")];
+            linked.extend(link(style, "cell"));
+            let row = Row::default().with_cells([
+                Cell::default().with_blocks([lines(style, 1, ParagraphProps::default())]),
+                Cell::default().with_blocks([Paragraph::new(style).with_inlines(linked).into()]),
+            ]);
+            vec![
+                Section::new(setup())
+                    .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                    .with_blocks(vec![
+                        table_with(vec![row], 0.0).into(),
+                        Paragraph::new(style)
+                            .with_inlines([Inline::page_break(style), Inline::text("B", style)])
+                            .into(),
+                    ]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let pages = laid.expect("pages").pages;
+        assert_eq!(pages.len(), 2);
+        // Each link starts where its glyphs do, and its line's box holds their baseline.
+        let marks = |page: &Page| -> Vec<String> {
+            let runs: Vec<(f64, f64)> = page
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    DisplayItem::Glyphs(run) => Some((run.origin.x.0, run.origin.y.0)),
+                    _ => None,
+                })
+                .collect();
+            page.items
+                .iter()
+                .filter_map(|item| match item {
+                    DisplayItem::Link {
+                        at, height, target, ..
+                    } => {
+                        let over = runs.iter().any(|&(x, baseline)| {
+                            x == at.x.0 && (at.y.0..at.y.0 + height.0).contains(&baseline)
+                        });
+                        Some(format!("{target:?} at {} over its text: {over}", at.x.0))
+                    }
+                    DisplayItem::Destination { at, name } => {
+                        let over = runs.iter().any(|&(x, _)| x == at.x.0);
+                        Some(format!("{name} at {} by its text: {over}", at.x.0))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            marks(&pages[0]),
+            [
+                "Uri(\"header\") at 20 over its text: true",
+                "cell at 120 by its text: true",
+                "Uri(\"cell\") at 120 over its text: true",
+            ]
+        );
+        assert_eq!(
+            marks(&pages[1]),
+            ["Uri(\"header\") at 20 over its text: true"]
+        );
+    }
+
     /// The baselines of the glyphs of `page` left of `x`, and of those right of it.
     fn baselines(page: &Page, x: f64) -> (Vec<f64>, Vec<f64>) {
         let mut sides = (Vec::new(), Vec::new());
@@ -8891,6 +8967,12 @@ mod tests {
                     at, width, height, ..
                 } => format!("clip {} {} {} {}", at.x.0, at.y.0, width.0, height.0),
                 DisplayItem::PopClip => "end clip".to_owned(),
+                DisplayItem::Link {
+                    at, width, height, ..
+                } => format!("link {} {} {} {}", at.x.0, at.y.0, width.0, height.0),
+                DisplayItem::Destination { at, name } => {
+                    format!("destination {name} {} {}", at.x.0, at.y.0)
+                }
             })
             .collect()
     }
