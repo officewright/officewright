@@ -2250,6 +2250,33 @@ mod tests {
     }
 
     #[test]
+    fn links_asked_in_turn_share_targets_that_need_encoding() {
+        // Two links over several lines whose boxes come in turn, with a space, "%" and a
+        // character outside ASCII: each target is kept once, whichever was asked last.
+        let site = LinkTarget::Uri("https://example.com/a b%20c/Ж".to_owned());
+        let place = LinkTarget::Destination("Глава 2 (100%)".to_owned());
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        page.add_destination("Глава 2 (100%)", Pt(0.0), Pt(800.0))
+            .unwrap();
+        for line in 0..6 {
+            let target = if line % 2 == 0 { &site } else { &place };
+            let y = 700.0 - 20.0 * f64::from(line);
+            page.add_link(Pt(0.0), Pt(y), Pt(10.0), Pt(10.0), target)
+                .unwrap();
+        }
+        let targets: Vec<*const Target> = doc.pages[0]
+            .links
+            .iter()
+            .map(|link| std::ptr::from_ref(link.target()))
+            .collect();
+        for (i, target) in targets.iter().enumerate() {
+            assert_eq!(*target, targets[i % 2], "link {i}");
+        }
+        assert_ne!(targets[0], targets[1]);
+    }
+
+    #[test]
     fn a_page_put_into_another_document_keeps_the_targets_of_its_links() {
         // The page handed out last keeps the document's checked targets; swapped into
         // another document, each document still writes its own links' targets.

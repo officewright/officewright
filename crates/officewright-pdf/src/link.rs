@@ -663,6 +663,14 @@ mod tests {
             let shorter = &uri_key(text)[..uri_key(text).len() - 1];
             assert!(!encodes_to(text, keeps_uri, shorter), "{text}");
         }
+        // A text whose encoding is shorter than the stored one is not it, and a URI is not
+        // a destination of the same text.
+        assert!(!encodes_to("ab", keeps_uri, b"abc"));
+        let uri = Target::check(&LinkTarget::Uri("top".to_owned())).unwrap();
+        assert!(uri.is(&LinkTarget::Uri("top".to_owned())));
+        assert!(!uri.is(&LinkTarget::Destination("top".to_owned())));
+        let name = Target::check(&LinkTarget::Destination("top".to_owned())).unwrap();
+        assert!(!name.is(&LinkTarget::Uri("top".to_owned())));
         // A key that is not one keeps what it cannot decode.
         assert_eq!(key_name(b"%4"), "%4");
         assert_eq!(key_name(b"%zz%41"), "%zzA");

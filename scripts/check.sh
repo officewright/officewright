@@ -65,6 +65,7 @@ macos)
 	need pdffonts "brew install poppler"
 	need pdftoppm "brew install poppler"
 	need pdfinfo "brew install poppler"
+	need pdftohtml "brew install poppler"
 	need cc "xcode-select --install"
 	need c++ "xcode-select --install"
 	need nm "xcode-select --install"
@@ -222,7 +223,7 @@ scripts/check-capi.sh target/capi
 # The PDF bytes do not depend on the platform (the golden snapshot test checks them on
 # every OS), and Windows has no official poppler build, so this runs on Linux and macOS.
 if [ "$os" != windows ]; then
-	step "PDF output (qpdf, pdftotext, pdffonts, pdfimages, pdftoppm, pdfinfo)"
+	step "PDF output (qpdf, pdftotext, pdffonts, pdfimages, pdftoppm, pdfinfo, pdftohtml)"
 	cargo build -p officewright-cli
 	cargo build -p officewright-pdf --example primitives --example images --example embed_report \
 		--example synthetic --example links
