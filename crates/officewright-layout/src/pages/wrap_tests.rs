@@ -675,3 +675,61 @@ fn text_wraps_around_the_first_objects_of_a_page_only() {
         )]
     );
 }
+
+#[test]
+fn links_and_bookmarks_on_a_line_below_an_object_are_where_its_text_is() {
+    use crate::ir::LinkTarget;
+
+    // The picture of the test above, wrapped top and bottom with its band from 40 to 80:
+    // the first line, 9 words, stays above it; the second, which starts with a bookmark
+    // and two linked words, goes below it, at 80. The link's box is that line's own, from
+    // 80 to 100, around its baseline at 96, and the bookmark marks its start edge and top.
+    let document = document(|style, document| {
+        let wrapping = Wrapping {
+            wrap: Wrap::TopAndBottom,
+            side: WrapSide::BothSides,
+            distances: [9.0, 5.0, 9.0, 5.0],
+        };
+        let object = picture(
+            document,
+            (60.0, 30.0),
+            at(0.0),
+            from_paragraph(25.0),
+            wrapping,
+        );
+        vec![
+            Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines([
+                    object,
+                    Inline::text(["AAAA"; 9].join(" ") + " ", style),
+                    Inline::bookmark("Below"),
+                    Inline::link_start(LinkTarget::Uri("https://example.com/".into())),
+                    words(2, style),
+                    Inline::link_end(),
+                    Inline::text(" AAAA", style),
+                ])
+                .into(),
+        ]
+    });
+    let (laid, _) = lay(&document);
+    let page = &laid.pages[0];
+    assert_eq!(lines(page), [(20.0, 36.0), (20.0, 96.0)]);
+    let marks: Vec<String> = page
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            DisplayItem::Link {
+                at, width, height, ..
+            } => Some(format!(
+                "link {} {} {} {}",
+                at.x.0, at.y.0, width.0, height.0
+            )),
+            DisplayItem::Destination { at, name } => {
+                Some(format!("bookmark {name} {} {}", at.x.0, at.y.0))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(marks, ["bookmark Below 20 80", "link 20 80 50.5 20"]);
+}

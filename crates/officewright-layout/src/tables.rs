@@ -1911,10 +1911,10 @@ fn stack<'d>(
                         part: stacked.parts.len(),
                         index: line,
                         top: height,
-                        height: laid.height.0,
+                        height: laid.advance(),
                         breaks,
                     });
-                    height += laid.height.0;
+                    height += laid.advance();
                 }
                 stacked.parts.push(Part::Paragraph {
                     paragraph,
