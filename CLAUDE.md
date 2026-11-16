@@ -73,9 +73,10 @@ crates/
                         going on at the top of the next page's notes under the continuation
                         separator, and a line whose note cannot start on its page moving to the
                         next page with it (Word 2013 and later) or staying there while the note
-                        goes wholly to the next page (older modes) (not yet: the notes of
-                        references in table cells and endnotes are not laid out), behind
-                        private modules;
+                        goes wholly to the next page (older modes), the lines of table cells
+                        alike, a row cut where its lines' notes leave room (not yet: the notes
+                        of references in tables nested in cells and endnotes are not laid
+                        out), behind private modules;
                         feature `pdf` renders a document into PDF with officewright-pdf (`render_pdf`,
                         hidden in the docs like the IR it takes, and `RenderOptions`);
                         feature `fuzzing` opens entry points for the fuzz targets, examples and the tests

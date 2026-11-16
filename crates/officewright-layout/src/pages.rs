@@ -1014,12 +1014,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             let (paragraph, label) = match &flowed.content {
                 Content::Paragraph(paragraph, label) => (*paragraph, label.as_ref()),
                 Content::Table(table, labels) => {
-                    if footnotes::has_footnote(self.document, table, 0) {
+                    if footnotes::nested_footnote(self.document, table) {
                         self.fonts.report_once(
                             ReportKind::FeatureUnsupported,
                             &flowed.location,
-                            "footnotes referenced in table cells are not laid out yet: their \
-                             texts are left out"
+                            "footnotes referenced in tables nested in table cells are not laid \
+                             out yet: their texts are left out"
                                 .to_owned(),
                         );
                     }
@@ -1684,6 +1684,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             measured: &mut measured,
         };
         let prepared = Prepared::new(table, labels, width, &flowed.location, &mut context);
+        let cell_notes = footnotes::has_footnote(self.document, table, 0);
         let count = prepared.band_count();
         let header = prepared.header_bands();
         let mut repeats = Repeats::new(prepared.header_rows());
@@ -1719,26 +1720,39 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             };
             let values = self.field_values(flowed.section);
             let mut measured = tables::Measured::new();
-            let mut context = Context {
-                document: self.document,
-                fonts: &mut *self.fonts,
-                shaper: &mut *self.shaper,
-                leaders: &mut self.leaders,
-                values: Some(&values),
-                measured: &mut measured,
-            };
             let keep = band < header || prepared.cant_split(band);
+            let flags = (empty, empty || !keep);
+            let mut notes = Vec::new();
             let piece = if block.is_some_and(|block| block > room + EPSILON) {
                 None
             } else {
-                let current = laid.get_or_insert_with(|| prepared.lay_out(band, &mut context));
+                let current = {
+                    let mut context = Context {
+                        document: self.document,
+                        fonts: &mut *self.fonts,
+                        shaper: &mut *self.shaper,
+                        leaders: &mut self.leaders,
+                        values: Some(&values),
+                        measured: &mut measured,
+                    };
+                    laid.get_or_insert_with(|| prepared.lay_out(band, &mut context))
+                };
+                // The footnotes its cells reference take room from the piece.
+                let mut piece_room = room;
+                if cell_notes {
+                    (piece_room, notes) =
+                        self.table_room((&prepared, current), (top, room), flags, flowed.section)?;
+                }
+                let mut context = Context {
+                    document: self.document,
+                    fonts: &mut *self.fonts,
+                    shaper: &mut *self.shaper,
+                    leaders: &mut self.leaders,
+                    values: Some(&values),
+                    measured: &mut measured,
+                };
                 let budget = &mut self.table_budget;
-                prepared.piece(
-                    current,
-                    (Some(room), budget),
-                    (empty, empty || !keep),
-                    &mut context,
-                )
+                prepared.piece(current, (Some(piece_room), budget), flags, &mut context)
             };
             let Some(piece) = piece else {
                 let uncut = if prepared.ties_rows(band) {
@@ -1804,7 +1818,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 self.release()?;
             }
             first_page.get_or_insert(here);
+            let end = top + piece.drawn.height.0;
             self.put_band(index, pieces, piece.drawn, top, false);
+            self.put_footnotes(notes, flowed.section, end)?;
             pieces += 1;
             repeated = false;
             // A header row cut over pages, which happens only on a page of its own, takes
@@ -11195,10 +11211,10 @@ mod tests {
     }
 
     #[test]
-    fn footnotes_in_table_cells_and_endnotes_are_reported_as_left_out() {
+    fn footnotes_in_nested_tables_and_endnotes_are_reported_as_left_out() {
         use crate::ir::{Note, NoteKind, NotePosition};
-        const TABLES: &str =
-            "footnotes referenced in table cells are not laid out yet: their texts are left out";
+        const TABLES: &str = "footnotes referenced in tables nested in table cells are not laid \
+                              out yet: their texts are left out";
         const ENDNOTES: &str = "endnotes are not laid out yet: their texts are left out";
         // A footnote referenced in the body, in a table's cell, there in the stored result of
         // a field the layout does not compute (which it lays out) or of one it computes
@@ -11254,12 +11270,314 @@ mod tests {
             [TABLES, ENDNOTES].map(|m| messages.iter().any(|r| r == m))
         };
         assert_eq!(reported(0), [false, false]);
-        assert_eq!(reported(1), [true, false]);
-        assert_eq!(reported(2), [true, false]);
+        assert_eq!(reported(1), [false, false]);
+        assert_eq!(reported(2), [false, false]);
         assert_eq!(reported(3), [false, false]);
         assert_eq!(reported(4), [false, true]);
-        // In a table nested in a cell too.
+        // In a table nested in a cell.
         assert_eq!(reported(5), [true, false]);
+    }
+
+    /// A table of fixed layout, without borders, of one row whose cells hold `cells`.
+    fn row_holding(cells: Vec<Block>) -> Block {
+        table_with(
+            vec![
+                Row::default().with_cells(
+                    cells
+                        .into_iter()
+                        .map(|block| Cell::default().with_blocks([block]))
+                        .collect::<Vec<_>>(),
+                ),
+            ],
+            0.0,
+        )
+        .into()
+    }
+
+    #[test]
+    fn a_footnote_in_a_cell_goes_on_the_page_of_its_line_and_takes_room_from_the_row() {
+        use crate::ir::NotePosition;
+        // A body of eight 20 pt lines from 20 to 180; a note of one line and its separator
+        // take 40 pt. A row of ten lines whose line `at` references the note, after
+        // `filler` lines of text, as the rows of Word's render of `E-footnote-table.docx`.
+        let lay = |mode: CompatMode, filler: usize, at: usize| {
+            let document = with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let note = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                    let cell = referencing(style, (at - 1, 10 - at), &[note], spacing(0.0, 0.0));
+                    let mut blocks = Vec::new();
+                    if filler > 0 {
+                        blocks.push(lines(style, filler, spacing(0.0, 0.0)));
+                    }
+                    blocks.push(row_holding(vec![cell]));
+                    blocks
+                },
+            );
+            let (laid, report) = laid(&document, 10);
+            let pages: Vec<Separated> = laid
+                .expect("pages")
+                .pages
+                .iter()
+                .map(separators_and_texts)
+                .collect();
+            assert!(messages(&report).iter().all(|m| !m.contains("footnote")));
+            pages
+        };
+        let note = |separator: f64| (separator, [at("1", 172.666_666_666_666_66), at("N", 176.0)]);
+        let texts = |page: &Separated| page.1.len();
+        let notes_of = |page: &Separated| page.1.iter().filter(|(t, _)| t == "N").count();
+        // Line 3 of the row references the note: the first page holds six of its lines and
+        // the note, not the eight it holds without a note; the second the other four.
+        for mode in [CompatMode::Word2013, CompatMode::Word2010] {
+            let pages = lay(mode, 0, 3);
+            assert_eq!(pages.len(), 2);
+            assert_eq!(pages[0].0, [note(153.75).0]);
+            assert_eq!(pages[0].1.get(2), Some(&at("A1", 76.0)));
+            assert_eq!(&pages[0].1[6..], &note(0.0).1);
+            assert_eq!(texts(&pages[0]), 8);
+            assert_eq!(texts(&pages[1]), 4);
+        }
+        // Line 9: on the second page, with its note.
+        let pages = lay(CompatMode::Word2013, 0, 9);
+        assert_eq!(pages.len(), 2);
+        assert_eq!((texts(&pages[0]), notes_of(&pages[0])), (8, 0));
+        assert_eq!(pages[1].1.first(), Some(&at("A1", 36.0)));
+        assert_eq!(notes_of(&pages[1]), 1);
+        // Line 8, the last of the first page, leaves its note no room: in Word 2013 and
+        // later it goes to the next page with its note; in Word 2010 it stays, and the
+        // note goes wholly to the next page, under the continuation separator.
+        let pages = lay(CompatMode::Word2013, 0, 8);
+        assert_eq!((texts(&pages[0]), notes_of(&pages[0])), (7, 0));
+        assert_eq!(pages[1].1.first(), Some(&at("A1", 36.0)));
+        assert_eq!(notes_of(&pages[1]), 1);
+        let pages = lay(CompatMode::Word2010, 0, 8);
+        assert_eq!((texts(&pages[0]), notes_of(&pages[0])), (8, 0));
+        assert_eq!(pages[0].1.last(), Some(&at("A1", 176.0)));
+        assert_eq!(notes_of(&pages[1]), 1);
+        // After four lines of text, the row's first two lines and the note fit; after five,
+        // its first line would, but widow control keeps two together, and the row moves.
+        let pages = lay(CompatMode::Word2013, 4, 1);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].1.get(4), Some(&at("A1", 116.0)));
+        assert_eq!(&pages[0].1[6..8], &note(0.0).1);
+        let pages = lay(CompatMode::Word2013, 5, 1);
+        assert_eq!((texts(&pages[0]), notes_of(&pages[0])), (5, 0));
+        assert_eq!(pages[1].1.first(), Some(&at("A1", 36.0)));
+    }
+
+    #[test]
+    fn footnotes_of_cells_go_in_the_order_of_their_cells_once_each() {
+        use crate::ir::NotePosition;
+        // Two cells of a row reference a note each, the first again in the second cell, and
+        // a header row repeated on the next page references a third: each note is drawn
+        // once, on the first page, in the order of the cells, the header's first.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let first = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                let second = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                let header = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                let row = |cells: Vec<Block>, head: bool| {
+                    Row::default().with_header(head).with_cells(
+                        cells
+                            .into_iter()
+                            .map(|block| Cell::default().with_blocks([block]))
+                            .collect::<Vec<_>>(),
+                    )
+                };
+                let mut rows = vec![row(
+                    vec![referencing(style, (0, 0), &[header], spacing(0.0, 0.0))],
+                    true,
+                )];
+                rows.push(row(
+                    vec![
+                        referencing(style, (0, 0), &[first], spacing(0.0, 0.0)),
+                        referencing(style, (0, 0), &[second, first], spacing(0.0, 0.0)),
+                    ],
+                    false,
+                ));
+                rows.extend((0..8).map(|_| row(vec![lines(style, 1, spacing(0.0, 0.0))], false)));
+                vec![table_with(rows, 0.0).into()]
+            },
+        );
+        let (pages, reported) = noted_pages(&document);
+        assert!(
+            reported.iter().all(|m| !m.contains("footnote")),
+            "{reported:?}"
+        );
+        assert_eq!(pages.len(), 2);
+        // Under the separator, the notes of three lines: from 113.75 to 180.
+        assert_eq!(pages[0].0, [113.75]);
+        let numbers: Vec<&str> = pages[0]
+            .1
+            .iter()
+            .filter(|(_, y)| *y > 113.75)
+            .map(|(text, _)| text.as_str())
+            .collect();
+        assert_eq!(numbers, ["1", "N", "2", "N", "3", "N"]);
+        // The repeated header row draws its reference's number again, not its note.
+        assert_eq!(pages[1].0, [0.0; 0]);
+        assert_eq!(pages[1].1.first(), Some(&at("A1", 36.0)));
+    }
+
+    #[test]
+    fn a_cell_line_alone_on_its_page_sends_the_note_it_leaves_no_room_to_the_next() {
+        use crate::ir::NotePosition;
+        // A row of one line 160 pt high, the whole body, on a page of its own: nothing moves
+        // it further, so it stays, and its note goes wholly to the next page in every mode.
+        for mode in [CompatMode::Word2013, CompatMode::Word2010] {
+            let document = with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let note = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                    let tall = ParagraphProps::default()
+                        .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(160.0))));
+                    vec![row_holding(vec![referencing(style, (0, 0), &[note], tall)])]
+                },
+            );
+            let (pages, _) = noted_pages(&document);
+            assert_eq!(pages.len(), 2, "{mode:?}");
+            assert_eq!(pages[0].1.len(), 1);
+            assert_eq!(pages[1].1.iter().filter(|(t, _)| t == "N").count(), 1);
+        }
+    }
+
+    #[test]
+    fn before_word_2013_a_row_keeps_the_lines_that_fit_above_the_notes_before() {
+        use crate::ir::NotePosition;
+        // A line referencing note A, whose 40 pt with the separator leave the text 120 pt,
+        // then a row of ten lines whose line 1 references B and line 4 C. Line 4 fits above
+        // A and B, but C cannot start under it: Word 2013 and later cut the row above it,
+        // older modes keep it and send C wholly to the next page.
+        let lay = |mode: CompatMode| {
+            let document = with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let notes =
+                        [(); 3].map(|()| footnote(document, (style, mark), 1, spacing(0.0, 0.0)));
+                    let mut inlines = Vec::new();
+                    for line in 1..=10 {
+                        if line > 1 {
+                            inlines.push(Inline::line_break(BreakClear::None, style));
+                        }
+                        inlines.push(Inline::text("A", style));
+                        let note = match line {
+                            1 => Some(notes[1]),
+                            4 => Some(notes[2]),
+                            _ => None,
+                        };
+                        inlines.extend(note.map(|note| Inline::note_reference(note, false, style)));
+                    }
+                    let cell = Paragraph::new(style)
+                        .with_props(spacing(0.0, 0.0).with_widow_control(false))
+                        .with_inlines(inlines);
+                    vec![
+                        referencing(style, (0, 0), &[notes[0]], spacing(0.0, 0.0)),
+                        row_holding(vec![cell.into()]),
+                    ]
+                },
+            );
+            noted_pages(&document).0
+        };
+        let notes = |page: &Separated| -> Vec<String> {
+            page.1
+                .iter()
+                .filter(|(text, _)| text.chars().all(|ch| ch.is_ascii_digit()))
+                .map(|(text, _)| text.clone())
+                .collect()
+        };
+        let newer = lay(CompatMode::Word2013);
+        // The notes of A and B under the separator from 120: one 20 pt line each.
+        assert_eq!(newer[0].0, [133.75]);
+        assert_eq!(newer[0].1.get(3), Some(&at("A", 96.0)));
+        assert_eq!(newer[0].1.get(4), Some(&at("1", 152.666_666_666_666_66)));
+        assert_eq!(notes(&newer[0]), ["1", "2"]);
+        assert_eq!(newer[1].1.first(), Some(&at("A3", 36.0)));
+        assert_eq!(notes(&newer[1]), ["3"]);
+        let older = lay(CompatMode::Word2010);
+        assert_eq!(older[0].1.get(4), Some(&at("A3", 116.0)));
+        assert_eq!(notes(&older[0]), ["1", "2"]);
+        assert_eq!(older[1].1.first(), Some(&at("A", 36.0)));
+        assert_eq!(notes(&older[1]), ["3"]);
+    }
+
+    #[test]
+    fn a_row_alone_on_its_page_whose_notes_cannot_start_puts_its_least_piece() {
+        use crate::ir::NotePosition;
+        // A row of five lines, without widow control, whose first line references a note
+        // of one line as high as the body: on a page that holds nothing else, the row's
+        // first line goes on alone, and the note to the next page.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let tall = ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(160.0))));
+                let note = footnote(document, (style, mark), 1, tall);
+                let cell = referencing(
+                    style,
+                    (0, 4),
+                    &[note],
+                    spacing(0.0, 0.0).with_widow_control(false),
+                );
+                vec![row_holding(vec![cell])]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(pages[0].1, [at("A1", 36.0)]);
+        assert!(pages.len() > 2, "{pages:?}");
+    }
+
+    #[test]
+    fn many_footnotes_in_cells_take_time_in_proportion() {
+        use crate::ir::NotePosition;
+        // A row of 3,000 lines, each referencing a note of its own over a thousand pages:
+        // each page finds the room of its piece in a few dozen trials.
+        const LINES: usize = 3_000;
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let mut inlines = Vec::new();
+                for line in 0..LINES {
+                    if line > 0 {
+                        inlines.push(Inline::line_break(BreakClear::None, style));
+                    }
+                    let note = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                    inlines.push(Inline::text("A", style));
+                    inlines.push(Inline::note_reference(note, false, style));
+                }
+                let cell = Paragraph::new(style)
+                    .with_props(spacing(0.0, 0.0))
+                    .with_inlines(inlines);
+                vec![row_holding(vec![cell.into()])]
+            },
+        );
+        let started = std::time::Instant::now();
+        let (laid, _) = laid(&document, 10_000);
+        let pages = laid.expect("pages").pages;
+        // Three lines and their notes on each page: 60 pt of text, 20 of separator, 60 of
+        // notes.
+        assert_eq!(pages.len(), LINES / 3);
+        assert!(
+            started.elapsed() < LINEAR_NOTES,
+            "{LINES} referencing lines of a cell took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
