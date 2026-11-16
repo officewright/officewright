@@ -62,10 +62,21 @@ assert PDFFONTS_EMBEDDED != PDFFONTS
 
 # qpdf --json=2 output (abridged) for that document: Calibri's descriptor embeds a font file,
 # Garamond's does not; a second Garamond descriptor (another encoding) embeds one already.
+# The page tree of the fake PDFs of qpdf's JSON: three A4 pages, no annotations. Its objects
+# are numbered above the fakes' maxobjectid, as the objects the embedding adds are not.
+PAGE_TREE = {
+    "trailer": {"value": {"/Root": "90 0 R", "/Size": 95}},
+    "obj:90 0 R": {"value": {"/Type": "/Catalog", "/Pages": "91 0 R"}},
+    "obj:91 0 R": {"value": {"/Type": "/Pages", "/Count": 3, "/MediaBox": [0, 0, 595.32, 841.92],
+                             "/Kids": ["92 0 R", "93 0 R", "94 0 R"]}},
+    **{f"obj:{n} 0 R": {"value": {"/Type": "/Page", "/Parent": "91 0 R"}} for n in (92, 93, 94)},
+}
+
 OBJECTS = {
     "qpdf": [
         {"jsonversion": 2, "maxobjectid": 12},
         {
+            **PAGE_TREE,
             "obj:7 0 R": {"value": {"/Type": "/FontDescriptor", "/FontName": "/Garamond",
                                     "/FontFile2": "8 0 R"}},
             "obj:9 0 R": {"value": {"/Type": "/FontDescriptor", "/FontName": "/ABCDEF+Calibri",
@@ -555,6 +566,131 @@ class Import(unittest.TestCase):
         self.assertEqual(geometry["styles_changed"], ["- Normal: default"])
         self.assertEqual(geometry["paragraph_styles_changed"][0][:22], "the re-saved copy has ")
 
+    def with_annotations(self, annotations, catalog=None, extra=None):
+        """The fake PDF with the annotations (object dictionaries) on page 1."""
+        objects = {**PAGE_TREE, **(extra or {})}
+        refs = []
+        for n, annotation in enumerate(annotations, 200):
+            objects[f"obj:{n} 0 R"] = {"value": annotation}
+            refs.append(f"{n} 0 R")
+        objects["obj:92 0 R"] = {"value": {"/Type": "/Page", "/Parent": "91 0 R",
+                                           "/Annots": refs}}
+        if catalog:
+            objects["obj:90 0 R"] = {"value": {"/Type": "/Catalog", "/Pages": "91 0 R",
+                                               **catalog}}
+        data = {"qpdf": [{"jsonversion": 2, "maxobjectid": 12}, objects]}
+        self.tools = dataclasses.replace(self.tools, objects=lambda path: json.dumps(data))
+
+    def geometry_of(self, doc):
+        return json.loads((self.corpus / "reference" / "word-rules" / doc.name /
+                           "geometry.json").read_text(encoding="utf-8"))
+
+    def test_geometry_records_the_links_and_named_destinations_of_the_pdf(self):
+        doc = rules.documents()[0]
+        self.add_result(doc)
+        link = {"/Type": "/Annot", "/Subtype": "/Link"}
+        self.with_annotations(
+            [
+                {**link, "/Rect": [72, 700, 200, 714],
+                 "/A": {"/S": "/URI", "/URI": "u:https://example.org/a"}},
+                {**link, "/Rect": [200, 680, 72, 694],
+                 "/QuadPoints": [72, 694, 200, 694, 72, 680, 200, 680],
+                 "/A": {"/S": "/GoTo", "/D": ["93 0 R", "/XYZ", 72, 770, None]}},
+                {**link, "/Rect": [72, 660, 200, 674], "/Dest": "u:_Toc1"},
+                {**link, "/Rect": [72, 640, 200, 654], "/Dest": ["94 0 R", "/Fit"]},
+                {**link, "/Rect": [72, 620, 200, 634],
+                 "/A": {"/S": "/URI", "/URI": "u:file:///C:/reports/next.docx"}},
+                {**link, "/Rect": [72, 600, 200, 614], "/A": {"/S": "/Launch"}},
+                {"/Type": "/Annot", "/Subtype": "/Widget", "/Rect": [0, 0, 1, 1]},
+            ],
+            catalog={"/Names": {"/Dests": "300 0 R"}, "/Dests": {"/Old": ["92 0 R", "/XYZ", 0, 800, 0]}},
+            extra={
+                "obj:300 0 R": {"value": {"/Kids": ["301 0 R"]}},
+                "obj:301 0 R": {"value": {"/Names": ["u:_Toc1", {"/D": ["93 0 R", "/XYZ", 90, 500, 0]},
+                                                     "b:546f63", ["94 0 R", "/XYZ", None, None, 0]]}},
+            },
+        )
+        self.run_import()
+        geometry = self.geometry_of(doc)
+        self.assertEqual(geometry["links"], [
+            {"page": 1, "box": [72.0, 127.92, 200.0, 141.92], "uri": "https://example.org/a"},
+            {"page": 1, "box": [72.0, 147.92, 200.0, 161.92],
+             "quad_points": [[72.0, 147.92], [200.0, 147.92], [72.0, 161.92], [200.0, 161.92]],
+             "dest": {"page": 2, "fit": "XYZ", "x": 72.0, "y": 71.92}},
+            {"page": 1, "box": [72.0, 167.92, 200.0, 181.92], "dest": {"name": "_Toc1"}},
+            {"page": 1, "box": [72.0, 187.92, 200.0, 201.92], "dest": {"page": 3, "fit": "Fit"}},
+            # A file: URI names a folder of the machine Word ran on: only its scheme is kept.
+            {"page": 1, "box": [72.0, 207.92, 200.0, 221.92], "uri": "file:"},
+            {"page": 1, "box": [72.0, 227.92, 200.0, 241.92], "action": "Launch"},
+        ])
+        self.assertEqual(geometry["destinations"], [
+            {"name": "Old", "page": 1, "fit": "XYZ", "x": 0.0, "y": 41.92},
+            {"name": "Toc", "page": 3, "fit": "XYZ", "x": None, "y": None},
+            {"name": "_Toc1", "page": 2, "fit": "XYZ", "x": 90.0, "y": 341.92},
+        ])
+
+    def test_a_pdf_without_links_records_none(self):
+        doc = rules.documents()[0]
+        self.add_result(doc)
+        self.run_import()
+        geometry = self.geometry_of(doc)
+        self.assertEqual((geometry["links"], geometry["destinations"]), ([], []))
+
+    def test_a_crop_box_inherited_from_the_page_tree_is_the_origin(self):
+        doc = rules.documents()[0]
+        self.add_result(doc)
+        self.with_annotations([{"/Subtype": "/Link", "/Rect": [30, 700, 40, 714],
+                                "/A": {"/S": "/URI", "/URI": "u:https://example.org/"}}])
+        tree = json.loads(self.tools.objects(None))
+        tree["qpdf"][1]["obj:91 0 R"]["value"]["/CropBox"] = [10, 20, 585.32, 821.92]
+        self.tools = dataclasses.replace(self.tools, objects=lambda path: json.dumps(tree))
+        self.run_import()
+        self.assertEqual(self.geometry_of(doc)["links"][0]["box"], [20.0, 107.92, 30.0, 121.92])
+
+    def test_a_page_tree_that_loops_is_read_once(self):
+        doc = rules.documents()[0]
+        self.add_result(doc)
+        self.with_annotations([{"/Subtype": "/Link", "/Rect": [0, 0, 1, 1],
+                                "/A": {"/S": "/URI", "/URI": "u:https://example.org/"}}],
+                              catalog={"/Names": {"/Dests": "300 0 R"}},
+                              extra={"obj:300 0 R": {"value": {"/Kids": ["300 0 R"]}}})
+        tree = json.loads(self.tools.objects(None))
+        tree["qpdf"][1]["obj:91 0 R"]["value"]["/Kids"].append("91 0 R")
+        self.tools = dataclasses.replace(self.tools, objects=lambda path: json.dumps(tree))
+        self.run_import()
+        geometry = self.geometry_of(doc)
+        self.assertEqual([link["page"] for link in geometry["links"]], [1])
+        self.assertEqual(geometry["destinations"], [])
+
+    def test_links_naming_a_user_profile_or_without_a_rectangle_are_refused(self):
+        doc = rules.documents()[0]
+        self.add_result(doc)
+        for annotation, message in (
+            ({"/A": {"/S": "/URI", "/URI": "u:https://example.org/Users/<name>/cv"},
+              "/Rect": [0, 0, 1, 1]}, "a link of the PDF names a user profile path"),
+            ({"/Dest": "b:5c55736572735c6e616d65", "/Rect": [0, 0, 1, 1]},
+             "a link of the PDF names a user profile path"),
+            ({"/A": {"/S": "/URI", "/URI": "u:https://example.org/"}},
+             "cannot read the PDF's links: a link on page 1 has no rectangle"),
+        ):
+            with self.subTest(message=message):
+                self.with_annotations([{"/Subtype": "/Link", **annotation}])
+                with self.assertRaises(importer.Refused) as raised:
+                    self.run_import()
+                self.assertIn(message, str(raised.exception))
+
+    def test_qpdf_output_without_a_page_tree_is_refused(self):
+        doc = rules.documents()[0]
+        self.add_result(doc)
+        for data, message in (({"qpdf": [{"jsonversion": 2}, {}]}, "the PDF has no trailer"),
+                              ("not json", "not qpdf's JSON of a PDF")):
+            with self.subTest(message=message):
+                text = data if isinstance(data, str) else json.dumps(data)
+                self.tools = dataclasses.replace(self.tools, objects=lambda path, t=text: t)
+                with self.assertRaises(importer.Refused) as raised:
+                    self.run_import()
+                self.assertIn(f"cannot read the PDF's links: {message}", str(raised.exception))
+
     def test_records_compat_settings_word_added_or_dropped(self):
         record = self.add_result(rules.documents()[0])
         hyphenation = (
@@ -911,6 +1047,7 @@ class Import(unittest.TestCase):
         objects = {"qpdf": [
             {"jsonversion": 2, "maxobjectid": 14},
             {
+                **PAGE_TREE,
                 "obj:12 0 R": {"value": {"/Type": "/FontDescriptor", "/FontName": "/Helvetica"}},
                 "obj:14 0 R": {"value": {"/Type": "/FontDescriptor",
                                          "/FontName": "/Helvetica,Bold"}},
