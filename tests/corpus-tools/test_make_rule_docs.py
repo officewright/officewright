@@ -3754,46 +3754,52 @@ class Packages(unittest.TestCase):
         def slots(font):
             return {slot: font for slot in ("ascii", "hAnsi", "eastAsia", "cs")}
 
+        def props(rpr):
+            """Each property of the run properties rpr, with its attributes."""
+            return [] if rpr is None else [
+                (e.tag[len(W):], {k[len(W):]: v for k, v in e.attrib.items()}) for e in rpr]
+
         def runs(p):
-            """The text, fonts and size of each run of paragraph p."""
+            """The text and the properties of each run of paragraph p."""
             found = []
             for r in p.findall(f"{W}r"):
-                fonts, size = r.find(f"{W}rPr/{W}rFonts"), r.find(f"{W}rPr/{W}sz")
-                found.append(("".join(t.text or "" for t in r.iter(f"{W}t")),
-                              {} if fonts is None else
-                              {k[len(W):]: v for k, v in fonts.attrib.items()},
-                              None if size is None else size.get(f"{W}val")))
+                self.assertEqual([e.tag for e in r if e.tag != f"{W}rPr"], [f"{W}t"])
+                found.append((r.find(f"{W}t").text, props(r.find(f"{W}rPr"))))
             return found
 
-        paragraphs = [runs(p) for p in body.findall(f"{W}p")]
-        self.assertEqual(paragraphs[-1], [("End of the document.", {}, None)])
-        labels = [i for i, p in enumerate(paragraphs) if p and p[0][0].startswith("Case ")]
-        self.assertEqual([paragraphs[i][0][0][:7] for i in labels],
-                         ["Case 01", "Case 02", "Case 03"])
-        cases = [paragraphs[start + 1:end]
-                 for start, end in zip(labels, labels[1:] + [len(paragraphs) - 1])]
-        # Case 01: the barcode at 36 pt alone in its paragraph, and its value in the
-        # paragraph below it, in the default font.
-        self.assertEqual(cases[0], [[(bars, slots("Libre Barcode 128"), "72")],
-                                    [("OW-2026-0001", {}, None)]])
-        # Case 02: the barcode at 24 pt inside a line of text in the default font.
-        self.assertEqual(cases[1], [[("Total due: 125.00 ", {}, None),
-                                     (bars, slots("Libre Barcode 128"), "48"),
-                                     (" Thank you.", {}, None)]])
-        # Case 03: the same characters in the default font and size.
-        self.assertEqual(cases[2], [[(bars, {}, None)]])
+        def barcode(half_points):
+            return [("rFonts", slots("Libre Barcode 128")), ("sz", {"val": half_points}),
+                    ("szCs", {"val": half_points})]
+
+        self.assertEqual([e.tag for e in body], [f"{W}p"] * 8 + [f"{W}sectPr"])
+        self.assertEqual([runs(p) for p in body.findall(f"{W}p")], [
+            # Case 01: the barcode at 36 pt alone in its paragraph, and its value in the
+            # paragraph below it, in the default font.
+            [("Case 01: the Code 128 barcode of OW-2026-0001 in Libre Barcode 128 at 36 pt, "
+              "a paragraph of its own, its text below it in Calibri", [])],
+            [(bars, barcode("72"))],
+            [("OW-2026-0001", [])],
+            # Case 02: the barcode at 24 pt inside a line of text in the default font.
+            [("Case 02: the same barcode in Libre Barcode 128 at 24 pt, inline in a line of "
+              "text", [])],
+            [("Total due: 125.00 ", []), (bars, barcode("48")), (" Thank you.", [])],
+            # Case 03: the same characters in the default font and size.
+            [("Case 03: the same characters in Calibri, 11 pt: the text the barcode is made "
+              "of", [])],
+            [(bars, [])],
+            [("End of the document.", [])],
+        ])
         # The default font is Calibri at 11 pt, and no style of a paragraph or run gives
-        # another.
+        # another: no paragraph or run names a style, and no style has run properties.
         styles = ElementTree.fromstring(parts["word/styles.xml"])
-        defaults = styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")
-        self.assertEqual({k[len(W):]: v for k, v in defaults.find(f"{W}rFonts").attrib.items()},
-                         slots("Calibri"))
-        self.assertEqual(defaults.find(f"{W}sz").get(f"{W}val"), "22")
+        self.assertEqual(props(styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")), [
+            ("rFonts", slots("Calibri")), ("sz", {"val": "22"}), ("szCs", {"val": "22"}),
+            ("lang", {"val": "en-US", "eastAsia": "en-US", "bidi": "ar-SA"})])
         self.assertIsNone(body.find(f".//{W}pStyle"))
         self.assertIsNone(body.find(f".//{W}rStyle"))
+        self.assertEqual(styles.findall(f".//{W}style//{W}rPr"), [])
         normal = styles.find(f"{W}style[@{W}type='paragraph'][@{W}default='1']")
         self.assertEqual(normal.get(f"{W}styleId"), "Normal")
-        self.assertIsNone(normal.find(f"{W}rPr"))
         self.assertIn(b'w:name="Libre Barcode 128"', parts["word/fontTable.xml"])
 
     def test_symbol_font_cases_have_the_markup_their_labels_name(self):
