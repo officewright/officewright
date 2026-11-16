@@ -140,12 +140,13 @@ impl<'a> VmlDrawing<'a> {
             .is_some()
     }
 
-    /// Whether one of its own shapes floats with text wrapping around it: a shape,
-    /// picture, text box or group placed `position:absolute` whose `w10:wrap` is of type
-    /// `square`, `tight`, `through` or `topAndBottom` (ECMA-376 Part 4, §19.3.2.6).
+    /// How many of its own shapes float with text wrapping around them: shapes,
+    /// pictures, text boxes or groups placed `position:absolute`, not hidden, whose
+    /// `w10:wrap` is of type `square`, `tight`, `through` or `topAndBottom` (ECMA-376 Part
+    /// 4, §19.3.2.6). A hidden shape is left out, as Word does not show it.
     // reason: only the translation into the layout IR asks for it.
     #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
-    pub(crate) fn wraps_text(self) -> bool {
+    pub(crate) fn wrapping_shapes(self) -> usize {
         let names = &self.document.names;
         self.document
             .element(self.element)
@@ -155,8 +156,10 @@ impl<'a> VmlDrawing<'a> {
                     .local_in(&names.v)
                     .is_some_and(|local| local != "shapetype")
             })
+            .filter(|shape| !is_hidden(*shape))
             .filter_map(|shape| anchor(shape, names, &mut |_, _, _| {}))
-            .any(|anchor| anchor.wrap().is_some_and(WrapKind::wraps))
+            .filter(|anchor| anchor.wrap().is_some_and(WrapKind::wraps))
+            .count()
     }
 }
 
@@ -249,6 +252,26 @@ impl<'a> EmbeddedObject<'a> {
             .element(self.element)
             .children_through_alternates(names.mc)
             .any(|child| child.is(&names.w, "drawing"))
+    }
+
+    /// Whether the drawing it holds ([`has_drawing`](Self::has_drawing)) floats with text
+    /// wrapping around it (a `wp:anchor` with `wp:wrapSquare`, `wrapTight`, `wrapThrough`
+    /// or `wrapTopAndBottom`).
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn drawing_wraps_text(self) -> bool {
+        let names = &self.document.names;
+        self.document
+            .element(self.element)
+            .children_through_alternates(names.mc)
+            .filter(|child| child.is(&names.w, "drawing"))
+            .filter_map(|drawing| super::drawing::frame(drawing, names))
+            .filter(|frame| frame.is(&names.wp, "anchor"))
+            .any(|frame| {
+                super::drawing::anchor(frame, names, &mut |_, _, _| {})
+                    .wrap()
+                    .is_some_and(WrapKind::wraps)
+            })
     }
 }
 

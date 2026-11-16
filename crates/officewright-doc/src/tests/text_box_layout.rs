@@ -733,6 +733,13 @@ fn lists_once_that_text_does_not_wrap_around_floating_drawings_left_out() {
             r#"<v:rect style="{position}width:10pt;height:10pt">{wrap}</v:rect>"#
         ))
     };
+    // A floating VML picture that wraps, with a size or none.
+    let vml_floating_picture = |sized: bool| {
+        let height = if sized { "height:10pt;" } else { "" };
+        format!(
+            r#"<v:shape style="position:absolute;width:10pt;{height}"><v:imagedata r:id="rIdPng"/><w10:wrap type="square"/></v:shape>"#
+        )
+    };
     let vml_group = format!(
         r#"<v:group style="position:absolute;width:10pt;height:10pt" coordsize="100,100"><w10:wrap type="square"/><v:shape style="width:100;height:100"><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape></v:group>"#,
         p("x")
@@ -773,6 +780,75 @@ fn lists_once_that_text_does_not_wrap_around_floating_drawings_left_out() {
             true,
         ),
         (pict(&vml_group), true),
+        // A VML picture without a size, also as the preview of an embedded object.
+        (pict(&vml_floating_picture(false)), true),
+        (
+            format!(
+                r#"<w:r><w:object {NAMESPACES}>{}<o:OLEObject Type="Embed" ProgID="Package"/></w:object></w:r>"#,
+                vml_floating_picture(false)
+            ),
+            true,
+        ),
+        // An embedded object shown by a floating drawing that wraps.
+        (
+            format!(
+                r#"<w:r><w:object {NAMESPACES}>{}</w:object></w:r>"#,
+                floating_with(square, true, rect)
+                    .trim_start_matches("<w:r>")
+                    .trim_end_matches("</w:r>")
+            ),
+            true,
+        ),
+        // A drawn picture or text box beside another shape that is left out: listed where
+        // the one left out wraps, not where only the drawn one does, which the layout lists.
+        (
+            pict(&format!(
+                "{}{}",
+                vml_floating_picture(true),
+                r#"<v:rect style="position:absolute;width:5pt;height:5pt"><w10:wrap type="square"/></v:rect>"#
+            )),
+            true,
+        ),
+        (
+            pict(&format!(
+                "{}{}",
+                vml_floating_picture(true),
+                r#"<v:rect style="position:absolute;width:5pt;height:5pt"><w10:wrap type="none"/></v:rect>"#
+            )),
+            false,
+        ),
+        (
+            pict(&format!(
+                r#"<v:shape style="position:absolute;width:10pt;height:10pt"><w10:wrap type="square"/><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape><v:rect style="position:absolute;width:5pt;height:5pt"><w10:wrap type="square"/></v:rect>"#,
+                p("x")
+            )),
+            true,
+        ),
+        (
+            pict(&format!(
+                r#"<v:shape style="position:absolute;width:10pt;height:10pt"><w10:wrap type="square"/><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape><v:rect style="position:absolute;width:5pt;height:5pt"/>"#,
+                p("x")
+            )),
+            false,
+        ),
+        // A hidden picture is not drawn, nor counted: its neighbour that wraps is listed.
+        (
+            pict(&format!(
+                "{}{}",
+                vml_floating_picture(true)
+                    .replace("position:absolute;", "visibility:hidden;position:absolute;"),
+                r#"<v:rect style="position:absolute;width:5pt;height:5pt"><w10:wrap type="square"/></v:rect>"#
+            )),
+            true,
+        ),
+        // A hidden shape, which Word does not show.
+        (
+            vml_rect(
+                "visibility:hidden;position:absolute;",
+                r#"<w10:wrap type="square"/>"#,
+            ),
+            false,
+        ),
     ];
     for (run, listed) in &cases {
         let translation = translate(&with_images(&format!("<w:p>{run}</w:p>")));
