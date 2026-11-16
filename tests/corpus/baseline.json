@@ -1142,11 +1142,11 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-footnote-numbering-settings.docx": {
-      "line_agreement": 0.4737,
+      "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9985,
-      "ssim_min": 0.998,
-      "text_score": 0.976
+      "ssim_mean": 0.9992,
+      "ssim_min": 0.9988,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-footnote-numbering.docx": {
       "line_agreement": 0.8909,

@@ -11,6 +11,7 @@ repository.workspace = true
 # crate.
 exclude = [
   "tests/default_theme.rs",
+  "tests/footnote_numbering.rs",
   "tests/layout_corpus.rs",
   "tests/paragraph_units.rs",
   "tests/text_box_lines.rs",
