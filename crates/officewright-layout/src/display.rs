@@ -225,19 +225,24 @@ pub(crate) fn stack(items: Vec<DisplayItem>, mut floats: Vec<Float>) -> Vec<Disp
 /// confirm the page down and the column across, with a negative offset
 /// (`letter-cfpb-validation-notice`), and that the offset positions the frame, not the box
 /// its effects reach (the header logo of `report-hhs-usability-test-plan`). A paragraph's
-/// top is above its space before: Word's renders of `E-textbox-from-paragraph` (DrawingML,
-/// 4 pt before) and `E-textbox-vml` (VML, 6 pt before) put the frames that much higher
-/// than the first line's top, and those of paragraphs with no space before at it (#541).
+/// top is where the space after of the paragraph above it ends, so above the part of its
+/// space before that goes past that space after (#541): Word's renders of
+/// `E-textbox-from-paragraph` (DrawingML, 4 pt before) and `E-textbox-vml` (VML, 6 pt
+/// before), under paragraphs with no space after, put the frames that much higher than
+/// the first line's top, and those of paragraphs with no space before at it; those of
+/// `letter-cfpb-validation-notice` and its `-es` twin, 4 pt before under 2 pt after, which
+/// make 4 pt between the lines, 2 pt higher.
 ///
 /// Hypotheses until Word renders the rule documents of #314: down, the inside margin is
 /// the top one on odd pages and the bottom one on even pages, as across (ST_RelFromV and
 /// ST_AlignV do not say); a line is aligned to from its top to its bottom, a paragraph
-/// and a character are points; a paragraph's top on this page is above as much of its
-/// own space before as is laid out there (none where the top of a page or contextual
-/// spacing leaves it out, only its own where the space after of the paragraph above is
-/// larger), and in the later part of a paragraph split over pages that part's top; the
-/// gutter counts into the left margin, and mirrored margins (`w:mirrorMargins`, not laid
-/// out yet) do not swap the left and right ones.
+/// and a character are points; a paragraph's top is its first line's where the space
+/// after of the paragraph above is as large as its own space before, where the top of a
+/// page drops its space before, and where contextual spacing leaves it out; below a table
+/// or at the top of a page that keeps it, above all its space before; in the later part
+/// of a paragraph split over pages, that part's top; the gutter counts into the left
+/// margin, and mirrored margins (`w:mirrorMargins`, not laid out yet) do not swap the
+/// left and right ones.
 pub(crate) fn float_position(
     object: &AnchoredObject,
     page: &PageBox,
@@ -1226,11 +1231,10 @@ impl Painting<'_, '_, '_> {
         let layout = self.layout;
         if let Some(laid) = layout.text_box(item) {
             let insets = text_box.insets();
-            // Centred and bottom text, as DrawingML describes them: hypotheses, since in
-            // Word's references of `letter-cfpb-validation-notice` and its `-es` twin the
-            // text of a centred box is about 2 pt from where centring puts it: where the
-            // bottom would put it, with its paragraph's top above its space before, where
-            // `float_position` takes it, or where the top would, with it below (#465).
+            // Centred text, as DrawingML describes it: Word's references of
+            // `letter-cfpb-validation-notice` and its `-es` twin draw the text of a centred
+            // box where this puts it, to a few tenths of a point (#465, #541). Bottom text is
+            // a hypothesis.
             let free = (height - insets.top().0 - insets.bottom().0 - laid.height).max(0.0);
             let start = top
                 + insets.top().0

@@ -809,18 +809,20 @@ fn stack_space(document: &Document, above: Option<&Flowed<'_>>, below: &Flowed<'
     }
 }
 
-/// How much of the space before a paragraph with `props` is laid out above its first
-/// line, which is `gap` below the paragraph with `above`, or below what is above it where
-/// that is no paragraph or nothing is: its own space before, as far as the gap holds it.
+/// How far above its first line the top of a paragraph with `props` is, which the objects
+/// it anchors are positioned from, where `gap` is laid out between it and the paragraph
+/// with `above`, or what is above it where that is no paragraph or nothing is: the part of
+/// the gap below that paragraph's space after (`float_position`).
 fn space_laid_above(
     document: &Document,
     above: Option<&ParagraphProps>,
     props: &ParagraphProps,
     gap: f64,
 ) -> f64 {
-    paragraph::own_space_before(document, props, above)
-        .0
-        .min(gap.max(0.0))
+    let after = above.map_or(0.0, |above| {
+        paragraph::own_space_after(document, above, Some(props)).0
+    });
+    (gap - after).max(0.0)
 }
 
 /// The space below `last`, the last of a stack.
@@ -1614,7 +1616,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         // through its own paragraph's space only), a gap larger than the paragraph's own
         // space, the cut at the body's bottom and a paragraph split over pages.
         let props = paragraph.props();
-        let above = space_laid_above(self.document, neighbours.0, props, top - self.cursor);
+        let above = paragraph::own_space_before(self.document, props, neighbours.0)
+            .0
+            .min((top - self.cursor).max(0.0));
         let below = if lines.end >= layout.lines.len() {
             paragraph::own_space_after(self.document, props, neighbours.1)
                 .0
@@ -1635,9 +1639,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             bar_reach: (above, below),
         };
         painting.paint_shading(lines.clone(), origin, &mut items);
-        // Floating objects positioned from the paragraph are measured from above the space
-        // before it that the page lays out (`float_position`).
-        painting.paint_with_space_before(lines.clone(), origin, above, &mut items);
+        // Floating objects positioned from the paragraph are measured from its top
+        // (`float_position`).
+        let space = space_laid_above(self.document, neighbours.0, props, top - self.cursor);
+        painting.paint_with_space_before(lines.clone(), origin, space, &mut items);
         let floats = painting.floats;
         if let Some(page) = self.pages.last_mut() {
             page.items.extend(items);
@@ -5085,54 +5090,69 @@ mod tests {
     }
 
     #[test]
-    fn a_floating_object_from_its_paragraph_is_placed_from_above_its_space_before() {
+    fn a_floating_object_from_its_paragraph_is_placed_below_the_space_after_above_it() {
         use crate::ir::{Note, NoteKind, NotePosition};
-        // Word's renders of `E-textbox-from-paragraph` and `E-textbox-vml` (#541): an object
-        // placed from its paragraph is measured from the paragraph's top above its space
-        // before. Each paragraph anchors one picture from itself and one from its line: the
-        // first is higher by the space laid out above the paragraph's first line.
-        // In the text: 1, 4 pt before at the start of the document, 10 after; 2, 6 pt
-        // before, of which all is laid out within the 10 the paragraph above keeps, and 10
-        // after; 3, 8 pt before left out by contextual spacing; 8, 6 pt before dropped at the
-        // top of the next page, after a page break. In a note: 4, 4 pt before under the
-        // separator; 5, 6 pt before under the note's first paragraph.
+        // Word's renders of `E-textbox-from-paragraph`, `E-textbox-vml` and
+        // `letter-cfpb-validation-notice` (#541): an object placed from its paragraph is
+        // measured from the paragraph's top, where the space after of the paragraph above it
+        // ends. Each paragraph anchors one picture from itself and one from its line: the
+        // first is higher by the space between the paragraph's top and its first line.
+        // In the text, all of one style:
+        // - 1: 4 pt before at the start of the document, and 10 after;
+        // - 2: 6 pt before, under 10 pt after, which make 10 pt between the lines, and 2 after;
+        // - 9: 4 pt before under those 2 pt, which make 4 pt between the lines;
+        // - then a paragraph with 6 pt after and contextual spacing, which leaves it out;
+        // - 3: 4 pt before under it;
+        // - 8: 6 pt before, dropped at the top of the next page, after a page break.
+        // In a note: 4, 4 pt before under the separator; 5, 6 pt before and after, both left
+        // out by contextual spacing; 11, 6 pt before under it.
+        let page = setup().with_size(PageSize::new(Pt(300.0), Pt(400.0)));
         let document = with_notes(
-            setup(),
+            page,
             NotePosition::PageBottom,
             Inline::separator,
             |document, style, mark| {
                 let [p4, l4] = from_paragraph_and_line(document, 4);
                 let [p5, l5] = from_paragraph_and_line(document, 5);
-                let first = Paragraph::new(style)
-                    .with_props(spacing(4.0, 0.0))
-                    .with_inlines([Inline::note_number(mark), p4, l4, Inline::text("N", style)]);
-                let second = Paragraph::new(style)
-                    .with_props(spacing(6.0, 0.0))
-                    .with_inlines([p5, l5, Inline::text("N", style)]);
-                let note =
-                    document.add_note(Note::new(NoteKind::Footnote, [first.into(), second.into()]));
+                let [p11, l11] = from_paragraph_and_line(document, 11);
+                let note = [
+                    Paragraph::new(style)
+                        .with_props(spacing(4.0, 0.0))
+                        .with_inlines([Inline::note_number(mark), p4, l4, Inline::text("N", style)])
+                        .into(),
+                    Paragraph::new(style)
+                        .with_props(spacing(6.0, 6.0).with_contextual_spacing(true))
+                        .with_inlines([p5, l5, Inline::text("N", style)])
+                        .into(),
+                    Paragraph::new(style)
+                        .with_props(spacing(6.0, 0.0))
+                        .with_inlines([p11, l11, Inline::text("N", style)])
+                        .into(),
+                ];
+                let note = document.add_note(Note::new(NoteKind::Footnote, note));
                 let [p1, l1] = from_paragraph_and_line(document, 1);
                 let [p2, l2] = from_paragraph_and_line(document, 2);
+                let [p9, l9] = from_paragraph_and_line(document, 9);
                 let [p3, l3] = from_paragraph_and_line(document, 3);
                 let [p8, l8] = from_paragraph_and_line(document, 8);
                 let reference = Inline::note_reference(note, false, style);
+                let paragraph = |props: ParagraphProps, inlines: Vec<Inline>| -> Block {
+                    Paragraph::new(style)
+                        .with_props(props)
+                        .with_inlines(inlines)
+                        .into()
+                };
+                let a = || Inline::text("A", style);
                 vec![
-                    Paragraph::new(style)
-                        .with_props(spacing(4.0, 10.0))
-                        .with_inlines([p1, l1, Inline::text("A", style), reference])
-                        .into(),
-                    Paragraph::new(style)
-                        .with_props(spacing(6.0, 10.0))
-                        .with_inlines([p2, l2, Inline::text("A", style)])
-                        .into(),
-                    Paragraph::new(style)
-                        .with_props(spacing(8.0, 0.0).with_contextual_spacing(true))
-                        .with_inlines([p3, l3, Inline::text("A", style)])
-                        .into(),
-                    Paragraph::new(style)
-                        .with_props(spacing(6.0, 0.0).with_page_break_before(true))
-                        .with_inlines([p8, l8, Inline::text("A", style)])
-                        .into(),
+                    paragraph(spacing(4.0, 10.0), vec![p1, l1, a(), reference]),
+                    paragraph(spacing(6.0, 2.0), vec![p2, l2, a()]),
+                    paragraph(spacing(4.0, 0.0), vec![p9, l9, a()]),
+                    paragraph(spacing(0.0, 6.0).with_contextual_spacing(true), vec![a()]),
+                    paragraph(spacing(4.0, 0.0), vec![p3, l3, a()]),
+                    paragraph(
+                        spacing(6.0, 0.0).with_page_break_before(true),
+                        vec![p8, l8, a()],
+                    ),
                 ]
             },
         );
@@ -5141,10 +5161,20 @@ mod tests {
         assert_eq!(pages.len(), 2);
         assert_eq!(
             paragraph_tops_above_lines(&pages),
-            [(1, 4.0), (2, 6.0), (3, 0.0), (4, 4.0), (5, 6.0), (8, 0.0)]
+            [
+                (1, 4.0),
+                (2, 0.0),
+                (3, 4.0),
+                (4, 4.0),
+                (5, 0.0),
+                (8, 0.0),
+                (9, 2.0),
+                (11, 6.0)
+            ]
         );
 
-        // In a header: 6, 3 pt before at its top; 7, 5 pt before under its first paragraph.
+        // In a header: 6, 3 pt before at its top; 7, 5 pt before and 6 after, both left out
+        // by contextual spacing; 12, 5 pt before under it.
         let mut document = Document::default();
         let style = document.add_run_style(
             RunStyle::default()
@@ -5153,14 +5183,19 @@ mod tests {
         );
         let [p6, l6] = from_paragraph_and_line(&mut document, 6);
         let [p7, l7] = from_paragraph_and_line(&mut document, 7);
+        let [p12, l12] = from_paragraph_and_line(&mut document, 12);
         let header = [
             Paragraph::new(style)
                 .with_props(spacing(3.0, 0.0))
                 .with_inlines([p6, l6, Inline::text("H", style)])
                 .into(),
             Paragraph::new(style)
-                .with_props(spacing(5.0, 0.0))
+                .with_props(spacing(5.0, 6.0).with_contextual_spacing(true))
                 .with_inlines([p7, l7, Inline::text("H", style)])
+                .into(),
+            Paragraph::new(style)
+                .with_props(spacing(5.0, 0.0))
+                .with_inlines([p12, l12, Inline::text("H", style)])
                 .into(),
         ];
         document.add_section(
@@ -5170,7 +5205,10 @@ mod tests {
         );
         let (result, _) = laid(&document, 10);
         let pages = result.expect("pages").pages;
-        assert_eq!(paragraph_tops_above_lines(&pages), [(6, 3.0), (7, 5.0)]);
+        assert_eq!(
+            paragraph_tops_above_lines(&pages),
+            [(6, 3.0), (7, 0.0), (12, 5.0)]
+        );
     }
 
     #[test]

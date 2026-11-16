@@ -1048,39 +1048,36 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let x = page.body.left;
         let mut items = Vec::new();
         let mut floats = Vec::new();
-        // What is drawn, in order: each with its part, and its top and bottom from the top
-        // of the notes' room.
+        // What is drawn, in order: each with its part, its top and bottom from the top of the
+        // notes' room, and whether it is placed under what is above it with its own space
+        // before only, as the continuation notice is.
         let separator = notes.separator.iter().map(|separator| {
-            (
-                separator,
-                (At::default(), separator.end()),
-                0.0,
-                separator.height,
-            )
+            let span = (At::default(), separator.end());
+            (separator, span, (0.0, separator.height), false)
         });
         let placed = notes
             .notes
             .iter()
             .filter(|placed| !placed.is_empty())
             .map(|placed| {
-                (
-                    &placed.layout,
-                    (placed.from, placed.to),
-                    placed.top,
-                    placed.bottom,
-                )
+                let span = (placed.from, placed.to);
+                (&placed.layout, span, (placed.top, placed.bottom), false)
             });
-        let notice = notes
-            .notice
-            .iter()
-            .map(|(notice, y, _)| (notice, (At::default(), notice.end()), *y, y + notice.height));
+        let notice = notes.notice.iter().map(|(notice, y, _)| {
+            let span = (At::default(), notice.end());
+            (notice, span, (*y, y + notice.height), true)
+        });
         // What ends above the part painted next and where, for the space laid out above its
         // first paragraph.
         let mut above: (Option<&Flowed<'d>>, f64) = (None, 0.0);
-        for (layout, (from, to), y, bottom) in separator.chain(placed).chain(notice) {
+        for (layout, (from, to), (y, bottom), alone) in separator.chain(placed).chain(notice) {
             let space = match layout.starting(from).and_then(Flowed::paragraph) {
                 Some(first) => {
-                    let props = above.0.and_then(Flowed::paragraph).map(Paragraph::props);
+                    let props = above
+                        .0
+                        .filter(|_| !alone)
+                        .and_then(Flowed::paragraph)
+                        .map(Paragraph::props);
                     space_laid_above(self.document, props, first.props(), y - above.1)
                 }
                 None => 0.0,
