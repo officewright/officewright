@@ -166,8 +166,15 @@
     "tests/corpus/resaved/word-rules/E-autospacing-nohtml.docx": "opened",
     "tests/corpus/resaved/word-rules/E-autospacing.docx": "opened",
     "tests/corpus/resaved/word-rules/E-bar-tab.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-barcode-field.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-barcode-font.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-barcode-pictures.docx": "opened",
     "tests/corpus/resaved/word-rules/E-bold-italic-missing.docx": "opened",
     "tests/corpus/resaved/word-rules/E-bold-missing.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-cell-mark-height-14.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-cell-mark-height.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-cut-lines-shapes.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-cut-lines-text.docx": "opened",
     "tests/corpus/resaved/word-rules/E-default-paragraph-style-after-normal.docx": "opened",
     "tests/corpus/resaved/word-rules/E-default-paragraph-style.docx": "opened",
     "tests/corpus/resaved/word-rules/E-defaults-empty.docx": "opened",
@@ -273,6 +280,7 @@
     "tests/corpus/resaved/word-rules/E-table-autofit-grow-15.docx": "opened",
     "tests/corpus/resaved/word-rules/E-table-autofit-shares.docx": "opened",
     "tests/corpus/resaved/word-rules/E-table-cell-margins-nil.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-table-cell-margins-style.docx": "opened",
     "tests/corpus/resaved/word-rules/E-table-cell-margins.docx": "opened",
     "tests/corpus/resaved/word-rules/E-table-float-align.docx": "opened",
     "tests/corpus/resaved/word-rules/E-table-float-center-margins.docx": "opened",
@@ -306,6 +314,9 @@
     "tests/corpus/resaved/word-rules/E-table-style-header-rows-on.docx": "opened",
     "tests/corpus/resaved/word-rules/E-table-style-look.docx": "opened",
     "tests/corpus/resaved/word-rules/E-table-style-not-allowed.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-table-style-override-off-11pt-14.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-table-style-override-off-11pt.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-table-style-override-off-12pt.docx": "opened",
     "tests/corpus/resaved/word-rules/E-table-style-rows-cols.docx": "opened",
     "tests/corpus/resaved/word-rules/E-table-style-size-11pt-14.docx": "opened",
     "tests/corpus/resaved/word-rules/E-table-style-size-11pt-none.docx": "opened",
@@ -329,6 +340,7 @@
     "tests/corpus/resaved/word-rules/E-textbox-insets.docx": "opened",
     "tests/corpus/resaved/word-rules/E-textbox-lists.docx": "opened",
     "tests/corpus/resaved/word-rules/E-textbox-spacing.docx": "opened",
+    "tests/corpus/resaved/word-rules/E-textbox-vml-inline.docx": "opened",
     "tests/corpus/resaved/word-rules/E-textbox-vml.docx": "opened",
     "tests/corpus/resaved/word-rules/E-theme-colors.docx": "opened",
     "tests/corpus/resaved/word-rules/E-theme-fonts.docx": "opened",
@@ -1023,6 +1035,25 @@
       "ssim_min": 0.9904,
       "text_score": 1.0
     },
+    "tests/corpus/word-rules/E-barcode-field.docx": {
+      "line_agreement": 0.4375,
+      "ssim_mean": 0.8629,
+      "ssim_min": 0.8629,
+      "text_score": 0.8785
+    },
+    "tests/corpus/word-rules/E-barcode-font.docx": {
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9965,
+      "ssim_min": 0.9965,
+      "text_score": 1.0
+    },
+    "tests/corpus/word-rules/E-barcode-pictures.docx": {
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9476,
+      "ssim_min": 0.9059,
+      "text_score": 1.0
+    },
     "tests/corpus/word-rules/E-bold-italic-missing.docx": {
       "line_agreement": 0.8421,
       "ssim_mean": 0.8539,
@@ -1034,6 +1065,32 @@
       "ssim_mean": 0.772,
       "ssim_min": 0.772,
       "text_score": 0.8977
+    },
+    "tests/corpus/word-rules/E-cell-mark-height-14.docx": {
+      "line_agreement": 0.8846,
+      "ssim_mean": 0.707,
+      "ssim_min": 0.707,
+      "text_score": 0.9271
+    },
+    "tests/corpus/word-rules/E-cell-mark-height.docx": {
+      "line_agreement": 0.8846,
+      "ssim_mean": 0.7065,
+      "ssim_min": 0.7065,
+      "text_score": 0.9271
+    },
+    "tests/corpus/word-rules/E-cut-lines-shapes.docx": {
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9645,
+      "ssim_min": 0.9414,
+      "text_score": 1.0
+    },
+    "tests/corpus/word-rules/E-cut-lines-text.docx": {
+      "line_agreement": 0.9836,
+      "page_break_agreement": 0.0,
+      "ssim_mean": 0.791,
+      "ssim_min": 0.727,
+      "text_score": 0.9777
     },
     "tests/corpus/word-rules/E-default-paragraph-style-after-normal.docx": {
       "line_agreement": 1.0,
@@ -1717,6 +1774,12 @@
       "ssim_min": 0.9854,
       "text_score": 1.0
     },
+    "tests/corpus/word-rules/E-table-cell-margins-style.docx": {
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9299,
+      "ssim_min": 0.9299,
+      "text_score": 1.0
+    },
     "tests/corpus/word-rules/E-table-cell-margins.docx": {
       "line_agreement": 1.0,
       "ssim_mean": 0.9913,
@@ -1928,6 +1991,24 @@
       "ssim_min": 0.9911,
       "text_score": 1.0
     },
+    "tests/corpus/word-rules/E-table-style-override-off-11pt-14.docx": {
+      "line_agreement": 0.75,
+      "ssim_mean": 0.9642,
+      "ssim_min": 0.9642,
+      "text_score": 0.9288
+    },
+    "tests/corpus/word-rules/E-table-style-override-off-11pt.docx": {
+      "line_agreement": 0.75,
+      "ssim_mean": 0.9628,
+      "ssim_min": 0.9628,
+      "text_score": 0.9288
+    },
+    "tests/corpus/word-rules/E-table-style-override-off-12pt.docx": {
+      "line_agreement": 0.75,
+      "ssim_mean": 0.9692,
+      "ssim_min": 0.9692,
+      "text_score": 0.9288
+    },
     "tests/corpus/word-rules/E-table-style-rows-cols.docx": {
       "line_agreement": 1.0,
       "ssim_mean": 0.9577,
@@ -2068,6 +2149,12 @@
       "page_break_agreement": 1.0,
       "ssim_mean": 0.9963,
       "ssim_min": 0.996,
+      "text_score": 1.0
+    },
+    "tests/corpus/word-rules/E-textbox-vml-inline.docx": {
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9033,
+      "ssim_min": 0.9033,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-textbox-vml.docx": {
