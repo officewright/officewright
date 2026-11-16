@@ -1149,11 +1149,11 @@
       "text_score": 0.976
     },
     "tests/corpus/word-rules/E-footnote-numbering.docx": {
-      "line_agreement": 0.8909,
+      "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9981,
-      "ssim_min": 0.9952,
-      "text_score": 0.9907
+      "ssim_mean": 0.9986,
+      "ssim_min": 0.9974,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-footnote-separator.docx": {
       "line_agreement": 1.0,
@@ -1163,11 +1163,11 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-footnote-start-continuous.docx": {
-      "line_agreement": 0.5385,
+      "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.998,
-      "ssim_min": 0.9976,
-      "text_score": 0.9724
+      "ssim_mean": 0.9988,
+      "ssim_min": 0.9985,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-footnote-table.docx": {
       "line_agreement": 0.9562,
