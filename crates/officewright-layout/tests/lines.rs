@@ -1658,10 +1658,11 @@ fn every_tab_past_the_end_hangs_and_condensed_text_never_moves_back() -> TestRes
         first.text()
     );
     // Justified, a line that ends in a hanging tab still fills the column: its last tab
-    // that does not hang is where the stretching starts (here, there is none).
+    // that does not hang is where the stretching starts (here, there is none). The word
+    // joiner keeps the line from ending at the space, which it widens.
     let justified = ParagraphProps::default().with_alignment(Alignment::Both);
     let paragraph = Paragraph::new(style).with_props(justified).with_inlines([
-        Inline::text("one\u{00A0}two(      ", style),
+        Inline::text("one \u{2060}two(      ", style),
         Inline::tab(style),
         Inline::text("next", style),
     ]);

@@ -102,6 +102,25 @@ pub enum Inline {
         /// The formatting.
         style: RunStyleId,
     },
+    /// The start of a hyperlink (`w:hyperlink`, a `HYPERLINK` field): what the paragraph
+    /// draws from here to the next [`LinkEnd`](Self::LinkEnd), the next link's start or
+    /// the end of the paragraph goes to `target` when it is clicked. The marks are read in
+    /// reading order, those in a field's result where the layout shows that result: not in
+    /// the stored result of a field it computes, such as `PAGE`.
+    #[non_exhaustive]
+    LinkStart {
+        /// Where the link goes.
+        target: LinkTarget,
+    },
+    /// The end of the link started last; outside a link it does nothing.
+    LinkEnd,
+    /// The start of a bookmark (`w:bookmarkStart`): the place that links to its name go
+    /// to ([`LinkTarget::Bookmark`]), the top of the line that holds what follows it.
+    #[non_exhaustive]
+    Bookmark {
+        /// The bookmark's name.
+        name: String,
+    },
 }
 
 impl Inline {
@@ -190,6 +209,21 @@ impl Inline {
     pub fn continuation_separator(style: RunStyleId) -> Self {
         Self::ContinuationSeparator { style }
     }
+
+    /// The start of a link to `target`.
+    pub fn link_start(target: LinkTarget) -> Self {
+        Self::LinkStart { target }
+    }
+
+    /// The end of a link.
+    pub fn link_end() -> Self {
+        Self::LinkEnd
+    }
+
+    /// The start of the bookmark `name`.
+    pub fn bookmark(name: impl Into<String>) -> Self {
+        Self::Bookmark { name: name.into() }
+    }
 }
 
 impl From<InlineObject> for Inline {
@@ -227,6 +261,9 @@ impl Check for Inline {
             | Self::ContinuationSeparator { style } => checker.visit("style", style),
             Self::Object(object) => object.check(checker),
             Self::Anchored(object) => object.check(checker),
+            // Any target and name can be written: the painter leaves out what a PDF
+            // cannot hold, and reports it.
+            Self::LinkStart { .. } | Self::LinkEnd | Self::Bookmark { .. } => Ok(()),
             Self::NoteReference { note, style, .. } => {
                 // Notes are laid out where they are referenced, so a reference in a note
                 // could make a note contain itself.
@@ -338,6 +375,44 @@ impl Field {
             style,
         }
     }
+}
+
+/// Where a link goes ([`Inline::LinkStart`]).
+///
+/// ```
+/// use officewright_core::PageSize;
+/// use officewright_layout::ir::{
+///     Document, Inline, LinkTarget, PageSetup, Paragraph, RunStyle, Section,
+/// };
+///
+/// let mut document = Document::default();
+/// let style = document.add_run_style(RunStyle::default());
+/// // "the terms" goes to the heading that the bookmark "Terms" starts.
+/// let text = Paragraph::new(style).with_inlines([
+///     Inline::text("See ", style),
+///     Inline::link_start(LinkTarget::Bookmark("Terms".into())),
+///     Inline::text("the terms", style),
+///     Inline::link_end(),
+///     Inline::text(" and ", style),
+///     Inline::link_start(LinkTarget::Uri("https://example.com/".into())),
+///     Inline::text("our site", style),
+///     Inline::link_end(),
+/// ]);
+/// let heading =
+///     Paragraph::new(style).with_inlines([Inline::bookmark("Terms"), Inline::text("Terms", style)]);
+/// document.add_section(
+///     Section::new(PageSetup::new(PageSize::A4)).with_blocks([text.into(), heading.into()]),
+/// );
+/// assert!(document.validate().is_ok());
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum LinkTarget {
+    /// A URI, such as `https://example.com/` or `mailto:office@example.com`, as the
+    /// document gives it.
+    Uri(String),
+    /// The bookmark of this name ([`Inline::Bookmark`]) in the document.
+    Bookmark(String),
 }
 
 /// What a field is.
