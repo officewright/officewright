@@ -5105,7 +5105,8 @@ mod tests {
         // - 3: 4 pt before under it;
         // - 8: 6 pt before, dropped at the top of the next page, after a page break.
         // In a note: 4, 4 pt before under the separator; 5, 6 pt before and after, both left
-        // out by contextual spacing; 11, 6 pt before under it.
+        // out by contextual spacing; 11, 6 pt before under it, and 6 after; 14, 4 pt before
+        // under those 6 pt, and 6 after. In a second note: 15, 4 pt before under those 6 pt.
         let page = setup().with_size(PageSize::new(Pt(300.0), Pt(400.0)));
         let document = with_notes(
             page,
@@ -5115,6 +5116,8 @@ mod tests {
                 let [p4, l4] = from_paragraph_and_line(document, 4);
                 let [p5, l5] = from_paragraph_and_line(document, 5);
                 let [p11, l11] = from_paragraph_and_line(document, 11);
+                let [p14, l14] = from_paragraph_and_line(document, 14);
+                let [p15, l15] = from_paragraph_and_line(document, 15);
                 let note = [
                     Paragraph::new(style)
                         .with_props(spacing(4.0, 0.0))
@@ -5125,17 +5128,31 @@ mod tests {
                         .with_inlines([p5, l5, Inline::text("N", style)])
                         .into(),
                     Paragraph::new(style)
-                        .with_props(spacing(6.0, 0.0))
+                        .with_props(spacing(6.0, 6.0))
                         .with_inlines([p11, l11, Inline::text("N", style)])
+                        .into(),
+                    Paragraph::new(style)
+                        .with_props(spacing(4.0, 6.0))
+                        .with_inlines([p14, l14, Inline::text("N", style)])
                         .into(),
                 ];
                 let note = document.add_note(Note::new(NoteKind::Footnote, note));
+                let second = Paragraph::new(style)
+                    .with_props(spacing(4.0, 0.0))
+                    .with_inlines([
+                        Inline::note_number(mark),
+                        p15,
+                        l15,
+                        Inline::text("N", style),
+                    ]);
+                let second = document.add_note(Note::new(NoteKind::Footnote, [second.into()]));
                 let [p1, l1] = from_paragraph_and_line(document, 1);
                 let [p2, l2] = from_paragraph_and_line(document, 2);
                 let [p9, l9] = from_paragraph_and_line(document, 9);
                 let [p3, l3] = from_paragraph_and_line(document, 3);
                 let [p8, l8] = from_paragraph_and_line(document, 8);
                 let reference = Inline::note_reference(note, false, style);
+                let second = Inline::note_reference(second, false, style);
                 let paragraph = |props: ParagraphProps, inlines: Vec<Inline>| -> Block {
                     Paragraph::new(style)
                         .with_props(props)
@@ -5144,7 +5161,7 @@ mod tests {
                 };
                 let a = || Inline::text("A", style);
                 vec![
-                    paragraph(spacing(4.0, 10.0), vec![p1, l1, a(), reference]),
+                    paragraph(spacing(4.0, 10.0), vec![p1, l1, a(), reference, second]),
                     paragraph(spacing(6.0, 2.0), vec![p2, l2, a()]),
                     paragraph(spacing(4.0, 0.0), vec![p9, l9, a()]),
                     paragraph(spacing(0.0, 6.0).with_contextual_spacing(true), vec![a()]),
@@ -5169,12 +5186,15 @@ mod tests {
                 (5, 0.0),
                 (8, 0.0),
                 (9, 2.0),
-                (11, 6.0)
+                (11, 6.0),
+                (14, 0.0),
+                (15, 0.0)
             ]
         );
 
         // In a header: 6, 3 pt before at its top; 7, 5 pt before and 6 after, both left out
-        // by contextual spacing; 12, 5 pt before under it.
+        // by contextual spacing; 12, 5 pt before under it, and 6 after; 13, 4 pt before
+        // under those 6 pt.
         let mut document = Document::default();
         let style = document.add_run_style(
             RunStyle::default()
@@ -5184,6 +5204,7 @@ mod tests {
         let [p6, l6] = from_paragraph_and_line(&mut document, 6);
         let [p7, l7] = from_paragraph_and_line(&mut document, 7);
         let [p12, l12] = from_paragraph_and_line(&mut document, 12);
+        let [p13, l13] = from_paragraph_and_line(&mut document, 13);
         let header = [
             Paragraph::new(style)
                 .with_props(spacing(3.0, 0.0))
@@ -5194,8 +5215,12 @@ mod tests {
                 .with_inlines([p7, l7, Inline::text("H", style)])
                 .into(),
             Paragraph::new(style)
-                .with_props(spacing(5.0, 0.0))
+                .with_props(spacing(5.0, 6.0))
                 .with_inlines([p12, l12, Inline::text("H", style)])
+                .into(),
+            Paragraph::new(style)
+                .with_props(spacing(4.0, 0.0))
+                .with_inlines([p13, l13, Inline::text("H", style)])
                 .into(),
         ];
         document.add_section(
@@ -5207,7 +5232,7 @@ mod tests {
         let pages = result.expect("pages").pages;
         assert_eq!(
             paragraph_tops_above_lines(&pages),
-            [(6, 3.0), (7, 0.0), (12, 5.0)]
+            [(6, 3.0), (7, 0.0), (12, 5.0), (13, 0.0)]
         );
     }
 
