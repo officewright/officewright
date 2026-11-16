@@ -5212,6 +5212,71 @@ mod tests {
     }
 
     #[test]
+    fn the_continuation_notice_s_floating_objects_are_placed_from_its_own_space_before() {
+        use crate::ir::{Note, NoteKind, NotePosition, NoteSeparators};
+        // As in `the_continuation_notice_goes_under_the_part_of_a_footnote_cut`, but the note
+        // is two paragraphs, the first of three lines with 6 pt after, which alone goes on
+        // the first page. The notice, with 10 pt before, follows it with that space only:
+        // its picture from its paragraph is 10 pt above its line, case 13.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let [p13, l13] = from_paragraph_and_line(document, 13);
+                let line = |inline: Inline| [holding(style, vec![inline])];
+                document.set_note_separators(
+                    NoteKind::Footnote,
+                    NoteSeparators::default()
+                        .with_separator(line(Inline::separator(style)))
+                        .with_continuation_separator(line(Inline::continuation_separator(style)))
+                        .with_continuation_notice([Paragraph::new(style)
+                            .with_props(spacing(10.0, 0.0))
+                            .with_inlines([p13, l13, Inline::text("C", style)])
+                            .into()]),
+                );
+                let lines_of = |count: usize, first: Option<Inline>| {
+                    let mut inlines: Vec<Inline> = first.into_iter().collect();
+                    for n in 0..count {
+                        if n > 0 {
+                            inlines.push(Inline::line_break(BreakClear::None, style));
+                        }
+                        inlines.push(Inline::text("N", style));
+                    }
+                    inlines
+                };
+                let note = document.add_note(Note::new(
+                    NoteKind::Footnote,
+                    [
+                        Paragraph::new(style)
+                            .with_props(spacing(0.0, 6.0))
+                            .with_inlines(lines_of(3, Some(Inline::note_number(mark))))
+                            .into(),
+                        Paragraph::new(style)
+                            .with_props(spacing(0.0, 0.0))
+                            .with_inlines(lines_of(6, None))
+                            .into(),
+                    ],
+                ));
+                vec![
+                    lines(style, 1, spacing(0.0, 0.0)),
+                    referencing(style, (0, 0), &[note], spacing(0.0, 0.0)),
+                ]
+            },
+        );
+        let (result, _) = laid(&document, 10);
+        let pages = result.expect("pages").pages;
+        assert_eq!(pages.len(), 2);
+        assert_eq!(paragraph_tops_above_lines(&pages[..1]), [(13, 10.0)]);
+        // The notice's line is at the bottom of the first page.
+        let line = picture_places(&pages[0])
+            .into_iter()
+            .find(|place| (place.0 - 235.0).abs() < 0.01)
+            .map(|place| place.1);
+        assert_eq!(line, Some(160.0));
+    }
+
+    #[test]
     fn floating_pictures_take_the_inside_margin_of_their_page_s_parity() {
         use crate::ir::{
             AnchorHorizontalAlign, HorizontalPlacement, HorizontalReference, VerticalPlacement,
