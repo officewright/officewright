@@ -61,9 +61,9 @@ def section(notices, font):
 
 
 def pin_errors(script, notices):
-    """What is wrong with the pins of `script`: each of the six must be assigned once, have
-    its shape, and stand in the notices' section of its font with the text around it there,
-    whitespace collapsed."""
+    """What is wrong with the pins of `script`: each pin EXPECTED names must be assigned
+    once, have its shape, and stand in the notices' section of its font with the text around
+    it there, whitespace collapsed."""
     errors = []
     assignments = re.findall(PIN, script, re.M)
     names = [name for name, _ in assignments]
