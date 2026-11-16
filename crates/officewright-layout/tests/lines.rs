@@ -837,17 +837,23 @@ fn in_word_2013_a_tab_to_a_start_stop_past_the_end_starts_the_next_line() -> Tes
     );
     // Tabs to centre and decimal stops past the end reach the end, and the text after
     // them wraps, as before, a hypothesis until a Word render.
-    for kind in [TabKind::Center, TabKind::Decimal] {
+    // A number without a separator aligns at a decimal stop as at an end stop, so it
+    // would fit at a decimal stop taken at the end.
+    for (kind, number) in [
+        (TabKind::Center, "1.5"),
+        (TabKind::Decimal, "1.5"),
+        (TabKind::Decimal, "12"),
+    ] {
         let props = ParagraphProps::default()
             .with_tabs([TabStop::default().with_position(Pt(300.0)).with_kind(kind)]);
         let inlines = vec![
             Inline::text("Name", style),
             Inline::tab(style),
-            Inline::text("1.5", style),
+            Inline::text(number, style),
         ];
         let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 200.0);
         let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
-        assert_eq!(lines, ["Name\t", "1.5"], "{kind:?}");
+        assert_eq!(lines, ["Name\t", number], "{kind:?}");
         let tab = laid
             .lines()
             .first()
@@ -860,27 +866,55 @@ fn in_word_2013_a_tab_to_a_start_stop_past_the_end_starts_the_next_line() -> Tes
 }
 
 #[test]
-fn in_word_2013_a_list_label_keeps_its_tab_past_the_end() -> TestResult {
+fn a_list_label_keeps_its_tab_past_the_end_in_every_mode() -> TestResult {
     use officewright_layout::ir::{
         Level, LevelAlignment, LevelTextPart, ListDefinition, ListInstance, ListItem, Suffix,
+        TabKind,
     };
 
-    // A label "1." and its tab, whose stop is past the end of a column 30 pt wide: no
-    // render shows it, so the label keeps its tab, which reaches the end, as before
-    // Word's renders of tabs past the margin were taken in (a hypothesis).
+    // A label "1." and its tab, whose stop is past the end: no render shows it, so the
+    // label keeps its tab, which reaches the end, as before Word's renders of tabs past
+    // the margin were taken in (a hypothesis).
     let book = book()?;
-    let (mut document, style) = eleven_points_in(CompatMode::Word2013, "Liberation Sans");
-    let level = Level::default()
-        .with_text([LevelTextPart::Literal("1.".into())])
-        .with_alignment(LevelAlignment::Start)
-        .with_suffix(Suffix::Tab);
-    let list = document.add_list(ListDefinition::default().with_levels([level]));
-    let instance = document.add_list_instance(ListInstance::new(list));
-    let item = |inlines: Vec<Inline>| {
-        Paragraph::new(style)
-            .with_list(Some(ListItem::new(instance, 0, style)))
-            .with_inlines(inlines)
+    let labelled = |mode, stop: Option<TabStop>| {
+        let (mut document, style) = eleven_points_in(mode, "Liberation Sans");
+        let level = Level::default()
+            .with_text([LevelTextPart::Literal("1.".into())])
+            .with_alignment(LevelAlignment::Start)
+            .with_suffix(Suffix::Tab);
+        let list = document.add_list(ListDefinition::default().with_levels([level]));
+        let instance = document.add_list_instance(ListInstance::new(list));
+        let props = ParagraphProps::default().with_tabs(stop);
+        let item = move |inlines: Vec<Inline>| {
+            Paragraph::new(style)
+                .with_props(props.clone())
+                .with_list(Some(ListItem::new(instance, 0, style)))
+                .with_inlines(inlines)
+        };
+        (document, style, item)
     };
+    // Its tab to a start stop of the paragraph's own past the end, before mode 15, and to
+    // an end stop past the end in mode 15, in a column 200 pt wide.
+    let own = TabStop::default().with_position(Pt(300.0));
+    let end = own.with_kind(TabKind::End);
+    for (mode, stop) in [
+        (CompatMode::Word2003, &own),
+        (CompatMode::Word2007, &own),
+        (CompatMode::Word2010, &own),
+        (CompatMode::Word2013, &end),
+    ] {
+        let (document, style, item) = labelled(mode, Some(*stop));
+        let laid = fuzzing::lay_out(
+            &book,
+            &document,
+            &item(vec![Inline::text("Item text more", style)]),
+            200.0,
+        );
+        let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
+        assert_eq!(lines, ["1.\t", "Item text more"], "{mode:?}");
+    }
+    // In mode 15 the line does not end before it, in a column 30 pt wide.
+    let (document, style, item) = labelled(CompatMode::Word2013, None);
     let laid = fuzzing::lay_out(
         &book,
         &document,

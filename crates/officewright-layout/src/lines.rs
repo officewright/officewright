@@ -74,11 +74,13 @@ struct Fit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PastEnd {
     /// Word 2013 and later: the line ends before a tab to a start stop past its end, and
-    /// an end stop past it is taken at the end.
+    /// an end stop past it is taken at the end; in table cells and text boxes too, a
+    /// hypothesis until a Word render.
     Wrap,
     /// Before mode 15: a start stop of the paragraph's own past the end is taken.
     Take,
-    /// Before mode 15, in a table cell or a text box: the tab reaches the end.
+    /// Before mode 15, in a table cell or a text box, and a list label's tab in every
+    /// mode: the tab reaches the end.
     Reach,
 }
 
@@ -851,10 +853,9 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let mut overflow = false;
         let mut hanging_tab: Option<usize> = None;
         let past_end = self.past_end();
-        // The items of the list label and its suffix, which keep the label's tab on its
-        // line: no render shows a label's tab past the end, so it is laid out as before
-        // Word's renders of `E-tab-margin` were taken in (a hypothesis until a Word render).
-        let label_end = self.itemized.label.map_or(0, |label| label.with_suffix);
+        // The items of the list label and its suffix: the label's tab keeps its line, and
+        // takes no stop past the end (`Breaker::label_end`).
+        let label_end = self.label_end();
         // Whether the line holds anything of the paragraph's own that shows, before the unit
         // at hand: not spaces, floating objects or the list label. A tab counts, as text
         // does before a tab in `E-tab-margin`; that a line that holds only tabs ends before
@@ -932,7 +933,12 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                         return wrap(index, false, overflow, hanging_tab, beyond);
                     }
                     let from = cursor.x;
-                    cursor.tab(&self.tabs, right, past_end);
+                    let rule = if *item >= label_end {
+                        past_end
+                    } else {
+                        PastEnd::Reach
+                    };
+                    cursor.tab(&self.tabs, right, rule);
                     if from.0 <= right.0 + EPSILON && cursor.x.0 > right.0 + EPSILON {
                         beyond.get_or_insert(index);
                     }
@@ -1033,7 +1039,17 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         }
     }
 
-    /// What a tab to a stop past the end of a line of the paragraph does.
+    /// The item after those of the list label and its suffix. No render shows a label's
+    /// tab past the end, so it is laid out as before Word's renders of `E-tab-margin` were
+    /// taken in, in every mode: the line does not end before it, and it takes no stop past
+    /// the end but reaches the end ([`PastEnd::Reach`]); a hypothesis until a Word render.
+    fn label_end(&self) -> usize {
+        self.itemized.label.map_or(0, |label| label.with_suffix)
+    }
+
+    /// What a tab to a stop past the end of a line of the paragraph does. That table cells
+    /// and text boxes follow the rule of mode 15 as the body does is a hypothesis until a
+    /// Word render: the renders show body paragraphs only.
     fn past_end(&self) -> PastEnd {
         if self.document.settings().compat_mode() >= CompatMode::Word2013 {
             PastEnd::Wrap
@@ -1312,7 +1328,12 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     content_end = Pt(origin + offset);
                 }
                 let hanging = index >= last_content;
-                let (x, width, leader) = cursor.tab(&self.tabs, right, self.past_end());
+                let rule = if item >= self.label_end() {
+                    self.past_end()
+                } else {
+                    PastEnd::Reach
+                };
+                let (x, width, leader) = cursor.tab(&self.tabs, right, rule);
                 pieces.push(Piece {
                     x,
                     width,
@@ -1881,9 +1902,11 @@ impl Cursor {
     /// A tab whose stop is past the end of the line, or that has no stop, reaches the
     /// end of the line with that stop's leader, so that the text after it goes on the
     /// next line. In mode 15 the line ends before a tab to a start stop past its end
-    /// after anything that shows ([`Breaker::fit`]), so such a tab reaches the end only
-    /// from the start of a line: Word's render of `E-tab-margin-alone.docx` draws its dot
-    /// leader alone on a line, from the line's start to the margin. That the tabs to
+    /// after anything of the paragraph's own that shows ([`Breaker::fit`]), so such a tab
+    /// reaches the end only after nothing of that kind (spaces, floating objects and a
+    /// list label are not), as at the start of a line, where Word's render of
+    /// `E-tab-margin-alone.docx` draws its dot leader alone on a line, from the line's
+    /// start to the margin. That the tabs to
     /// centre and decimal stops past the end reach it too, in every mode, is a hypothesis
     /// until a Word render. Two stops past the end are taken all the same:
     ///
