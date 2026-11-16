@@ -22,7 +22,7 @@ use super::capture::{Budget, Capture, Captured, Paused};
 use super::styles::{Properties, check_properties};
 use super::{
     A, A_STRICT, O, PIC, PIC_STRICT, R, R_STRICT, V, W, W_STRICT, W10, WNE, WP, WP_STRICT, WPS,
-    section, shorten,
+    properties, section, shorten,
 };
 use crate::diagnostic::{DiagnosticKind, Diagnostics};
 use crate::model::Names;
@@ -522,6 +522,12 @@ impl Reading<'_, '_, '_> {
                 },
                 Level::Run,
             ),
+            (Level::Block | Level::Inline | Level::Row | Level::Cell, "bookmarkStart") => {
+                self.bookmark(reader, mce, tag, parent, true)
+            }
+            (Level::Block | Level::Inline | Level::Row | Level::Cell, "bookmarkEnd") => {
+                self.bookmark(reader, mce, tag, parent, false)
+            }
             (Level::Inline, "hyperlink") => {
                 let data = self.hyperlink(&tag);
                 self.open(parent, Kind::Hyperlink(Box::new(data)), Level::Inline)
@@ -1111,14 +1117,86 @@ impl Reading<'_, '_, '_> {
         columns
     }
 
-    /// A hyperlink's anchor and external target. The `w:tooltip`, `w:tgtFrame` and
-    /// `w:docLocation` attributes are not read yet.
+    /// A hyperlink's external target, its anchor, the location in its target, the frame
+    /// it opens in, its tooltip and whether it goes into the list of links followed
+    /// (ECMA-376 Part 1, §17.16.22).
     fn hyperlink(&mut self, tag: &StartTag<'_>) -> HyperlinkData {
         let id = self.r.iter().find_map(|&r| tag.attribute(Some(r), "id"));
+        let history = self.w_attribute(tag, "history").and_then(|value| {
+            let on = match value {
+                "true" | "on" | "1" => Some(true),
+                "false" | "off" | "0" => Some(false),
+                _ => None,
+            };
+            if on.is_none() {
+                self.invalid(tag, "history", value);
+            }
+            on
+        });
         HyperlinkData {
             target: id.and_then(|id| self.link_target(tag, id)),
             anchor: self.w_attribute(tag, "anchor").map(Into::into),
+            doc_location: self.w_attribute(tag, "docLocation").map(Into::into),
+            target_frame: self.w_attribute(tag, "tgtFrame").map(Into::into),
+            tooltip: self.w_attribute(tag, "tooltip").map(Into::into),
+            history,
         }
+    }
+
+    /// A bookmark's start (`w:bookmarkStart`, ECMA-376 Part 1, §17.13.6.2) or end
+    /// (`w:bookmarkEnd`, §17.13.6.1), kept as read where it stands: in a paragraph, among
+    /// blocks, between the rows of a table or between the cells of a row. Its id, and the
+    /// name and columns of a start, are checked here and read by its view.
+    fn bookmark(
+        &mut self,
+        reader: &mut Reader<'_>,
+        mce: &mut Processor,
+        tag: StartTag<'_>,
+        parent: Parent,
+        start: bool,
+    ) -> Result<()> {
+        let element = if start {
+            "w:bookmarkStart"
+        } else {
+            "w:bookmarkEnd"
+        };
+        match self.w_attribute(&tag, "id") {
+            None => self
+                .c
+                .diagnose(tag.offset(), DiagnosticKind::InvalidValue, || {
+                    format!("{element} has no w:id")
+                }),
+            Some(id) if properties::integer(id).is_none() => {
+                let id = id.to_owned();
+                self.invalid(&tag, "id", &id);
+            }
+            Some(_) => {}
+        }
+        if start {
+            if self.w_attribute(&tag, "name").is_none() {
+                self.c
+                    .diagnose(tag.offset(), DiagnosticKind::InvalidValue, || {
+                        format!("{element} has no w:name")
+                    });
+            }
+            for column in ["colFirst", "colLast"] {
+                if let Some(value) = self.w_attribute(&tag, column) {
+                    if properties::integer(value).is_none() {
+                        let value = value.to_owned();
+                        self.invalid(&tag, column, &value);
+                    }
+                }
+            }
+        }
+        let span = self
+            .c
+            .capture(reader, mce, tag, Some(Disposition::Understood))?;
+        let kind = if start {
+            Kind::BookmarkStart(span)
+        } else {
+            Kind::BookmarkEnd(span)
+        };
+        self.add(parent, kind).map(drop)
     }
 
     /// The external target of a relationship of the part. A target is copied once,
