@@ -614,25 +614,25 @@
       "text_score": 0.9764
     },
     "tests/corpus/business/form-ec-state-aid-notification-bg.docx": {
-      "line_agreement": 0.9257,
-      "page_break_agreement": 0.3889,
-      "ssim_mean": 0.7291,
-      "ssim_min": 0.578,
-      "text_score": 0.9049
+      "line_agreement": 0.9498,
+      "page_break_agreement": 0.4444,
+      "ssim_mean": 0.733,
+      "ssim_min": 0.587,
+      "text_score": 0.9366
     },
     "tests/corpus/business/form-ec-state-aid-notification-de.docx": {
-      "line_agreement": 0.8489,
-      "page_break_agreement": 0.3158,
-      "ssim_mean": 0.6519,
+      "line_agreement": 0.884,
+      "page_break_agreement": 0.6316,
+      "ssim_mean": 0.671,
       "ssim_min": 0.0,
-      "text_score": 0.778
+      "text_score": 0.8803
     },
     "tests/corpus/business/form-ec-state-aid-notification-el.docx": {
-      "line_agreement": 0.8105,
+      "line_agreement": 0.8412,
       "page_break_agreement": 0.1053,
-      "ssim_mean": 0.612,
+      "ssim_mean": 0.6214,
       "ssim_min": 0.0,
-      "text_score": 0.5925
+      "text_score": 0.6445
     },
     "tests/corpus/business/form-gsa-dira-dias-template.docx": {
       "line_agreement": 0.9027,
@@ -1170,11 +1170,11 @@
       "text_score": 0.9724
     },
     "tests/corpus/word-rules/E-footnote-table.docx": {
-      "line_agreement": 0.9562,
-      "page_break_agreement": 0.75,
-      "ssim_mean": 0.9879,
-      "ssim_min": 0.9752,
-      "text_score": 0.8302
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.996,
+      "ssim_min": 0.9918,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-footnote-two-notes.docx": {
       "line_agreement": 1.0,
