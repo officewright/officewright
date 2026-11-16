@@ -358,7 +358,9 @@ impl<'a> Formats<'a> {
     ///   group's edges, and `w:insideH` or `w:insideV` on the others.
     /// - A conditional format's no wrapping, margins and vertical alignment apply to every
     ///   cell of a row one of whose cells it applies to (§17.7.6.8(a)).
-    /// - A border the cell itself sets to `none` takes the style's (§17.4.66(a)).
+    /// - A border the cell itself sets to `none` takes the style's (§17.4.66(a)), and a
+    ///   top or bottom margin it gives as `nil`, a percentage or `auto` takes the style's
+    ///   margin there, as Word draws them.
     ///
     /// ```
     /// # fn main() -> officewright_doc::Result<()> {
