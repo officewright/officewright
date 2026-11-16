@@ -861,7 +861,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
             // rows taller below. Word's render of generated/invoice-ru shows a row of only
             // merged cells a line of their one-line text high, the next row only as tall
             // as its own text; that it is the first line, not all of a taller merged cell,
-            // is a hypothesis until a Word render shows a taller one (#574).
+            // is a hypothesis until a Word render shows a taller one (#582).
             let own = cells().any(|(placed, _)| placed.merge == Merge::Single);
             let content = if own {
                 tallest(|merge| merge == Merge::Single, LaidCell::height)
@@ -1518,7 +1518,8 @@ impl LaidCell<'_> {
         self.margins.top().0 + self.content.height + self.margins.bottom().0
     }
 
-    /// The height of its first line, with its margins.
+    /// The height of its first unit, with its margins: a paragraph's first line with the
+    /// space before it, or the first band of a table and the border below it.
     fn first_line(&self) -> f64 {
         let first = self.content.extent(0, self.content.units.len().min(1));
         self.margins.top().0 + first + self.margins.bottom().0
@@ -2963,6 +2964,31 @@ mod tests {
         let (_, bands) = laid(&document, &table, (400.0, &[]));
         let heights: Vec<f64> = bands.iter().map(|band| band.height.0).collect();
         assert_eq!(heights, [80.0]);
+        // With margins of 5 pt above and below the merge, the row takes them with its
+        // first line.
+        let margins = CellMargins::default()
+            .with_top(Pt(5.0))
+            .with_bottom(Pt(5.0));
+        let spaced = |merge| two(merge).with_margins(Some(margins));
+        let table = Table::default()
+            .with_grid([Pt(100.0), Pt(100.0)])
+            .with_rows(vec![
+                row(vec![
+                    merged(VerticalMerge::Restart, "A"),
+                    cell(vec![lines(style, 1, "B")]),
+                ]),
+                row(vec![
+                    merged(VerticalMerge::Continue, ""),
+                    spaced(VerticalMerge::Restart),
+                ]),
+                row(vec![
+                    cell(vec![lines(style, 2, "D")]),
+                    spaced(VerticalMerge::Continue),
+                ]),
+            ]);
+        let (_, bands) = laid(&document, &table, (400.0, &[]));
+        let heights: Vec<f64> = bands.iter().map(|band| band.height.0).collect();
+        assert_eq!(heights, [90.0]);
     }
 
     #[test]
