@@ -293,10 +293,7 @@ impl Piece {
                 if let (Some(start), Some(text)) = (run_start, &text) {
                     let end = next.map_or(text.end, |next| start + next.cluster);
                     let cluster = itemized.text.get(start + glyph.cluster..end).unwrap_or("");
-                    let spaces = cluster
-                        .chars()
-                        .filter(|&ch| ch == ' ' || ch == '\u{00A0}')
-                        .count();
+                    let spaces = cluster.chars().filter(|&ch| stretches(ch)).count();
                     advance += spaces as f64 * space_extra.0;
                 }
                 if next.is_some() || last_extra {
@@ -1968,14 +1965,22 @@ fn is_space(itemized: &Itemized, text: &Range<usize>) -> bool {
         .is_some_and(|text| !text.is_empty() && text.chars().all(|ch| ch == ' '))
 }
 
-/// How many spaces that justification widens bytes `text` of the drawn text hold: the
-/// space and the no-break space.
+/// How many spaces that justification widens bytes `text` of the drawn text hold.
 fn stretchable_spaces(itemized: &Itemized, text: &Range<usize>) -> usize {
-    itemized.text.get(text.clone()).map_or(0, |text| {
-        text.chars()
-            .filter(|&ch| ch == ' ' || ch == '\u{00A0}')
-            .count()
-    })
+    itemized
+        .text
+        .get(text.clone())
+        .map_or(0, |text| text.chars().filter(|&ch| stretches(ch)).count())
+}
+
+/// Whether justification widens `ch`: the space only. Word keeps a no-break space at its
+/// width and spreads the room over the line's spaces (business/contract-ec-data-processing-
+/// clauses-el, page 2, item ε: «(ΕΕ)» and «2016/679», joined by U+00A0, are 3.11 pt apart
+/// in Word's PDF, while the line's other gaps are 20.2 to 20.3 pt). The documents that
+/// show it are saved in compatibility mode 14; that mode 15 does the same is a hypothesis
+/// until a rule document shows it (#601).
+fn stretches(ch: char) -> bool {
+    ch == ' '
 }
 
 /// Whether `unit` shows on its line: it takes room, or it is glyphs with an advance of
@@ -2188,6 +2193,36 @@ mod tests {
 
     fn widths(layout: &ParagraphLayout) -> Vec<f64> {
         layout.lines.iter().map(|line| line.width.0).collect()
+    }
+
+    #[test]
+    fn justification_widens_the_spaces_but_not_a_no_break_space() {
+        // "A A A A" joined by a no-break space after the first A: 31.5 pt of 35 pt on the
+        // first line. The 3.5 pt go to its two spaces, 1.75 pt each; the no-break space
+        // keeps its 2.5 pt.
+        let both = ParagraphProps::default().with_alignment(Alignment::Both);
+        let (layout, _) = lay(text("A\u{A0}A A A A"), both, 35.0);
+        assert_eq!(widths(&layout), [35.0, 6.0]);
+        let line = layout.lines.first().expect("a line");
+        let glyphs: Vec<(f64, f64)> = line
+            .pieces
+            .iter()
+            .flat_map(|piece| piece.glyphs(&layout.itemized))
+            .map(|glyph| (glyph.x.0, glyph.advance.0))
+            .collect();
+        assert_eq!(
+            glyphs,
+            [
+                (0.0, 6.0),
+                (6.0, 2.5),
+                (8.5, 6.0),
+                (14.5, 4.25),
+                (18.75, 6.0),
+                (24.75, 4.25),
+                (29.0, 6.0),
+                (35.0, 2.5)
+            ]
+        );
     }
 
     #[test]
