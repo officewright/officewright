@@ -15,8 +15,8 @@ use unicode_script::{Script, UnicodeScript};
 
 use crate::fonts::{Choice, Fonts};
 use crate::ir::{
-    BreakKind, Document, Field, FieldKind, Inline, LevelAlignment, NoteId, NoteKind, NumberFormat,
-    RunFonts, RunStyle, RunStyleId, Suffix, VerticalPosition,
+    BreakKind, Document, Field, FieldKind, Inline, LevelAlignment, LinkTarget, NoteId, NoteKind,
+    NumberFormat, RunFonts, RunStyle, RunStyleId, Suffix, VerticalPosition,
 };
 use crate::lists::Label;
 use crate::notes::NoteNumbers;
@@ -53,6 +53,28 @@ pub(crate) struct Itemized {
     pub(crate) page_fields: Vec<Range<usize>>,
     /// The list label the paragraph starts with, if it is a list item.
     pub(crate) label: Option<LabelItems>,
+    /// The links, in order: none overlaps another, none is empty.
+    pub(crate) links: Vec<LinkSpan>,
+    /// The bookmarks the paragraph starts, in order, each where it starts.
+    pub(crate) bookmarks: Vec<(Mark, Arc<str>)>,
+}
+
+/// A place between the pieces of a paragraph: after `item` items and `text` bytes of the
+/// drawn text. A run of text may go on past it, as a link or bookmark does not cut the
+/// text into runs: a text item is before or after it by the bytes of its text, any other
+/// item by its index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Mark {
+    pub(crate) item: usize,
+    pub(crate) text: usize,
+}
+
+/// A link of a paragraph: what lies between its start and its end goes to its target.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LinkSpan {
+    pub(crate) start: Mark,
+    pub(crate) end: Mark,
+    pub(crate) target: Arc<LinkTarget>,
 }
 
 /// Where a paragraph's list label is among its items.
@@ -204,12 +226,14 @@ pub(crate) fn itemize_with(
         path: Vec::new(),
         languages: Vec::new(),
         shaper: Shaper::with_capacity(0),
+        link: None,
     };
     if let Some(label) = label {
         builder.label(label);
     }
     builder.inlines(inlines);
     builder.flush();
+    builder.end_link();
     builder.out
 }
 
@@ -228,6 +252,8 @@ struct Builder<'d, 'f, 'a> {
     languages: Vec<Arc<str>>,
     /// Shapes the text of a run cut for its length, to find where its clusters start.
     shaper: Shaper,
+    /// The link open, where it started.
+    link: Option<(Mark, Arc<LinkTarget>)>,
 }
 
 /// Whether `ch` is written from right to left. The layout shapes every run from left to right
@@ -402,12 +428,40 @@ impl Builder<'_, '_, '_> {
             Inline::ContinuationSeparator { style, .. } => {
                 self.item(Item::Separator(true, *style));
             }
+            Inline::LinkStart { target, .. } => {
+                self.end_link();
+                self.link = Some((self.mark(), Arc::new(target.clone())));
+            }
+            Inline::LinkEnd => self.end_link(),
+            Inline::Bookmark { name, .. } => {
+                let mark = self.mark();
+                self.out.bookmarks.push((mark, Arc::from(name.as_str())));
+            }
         }
     }
 
     fn item(&mut self, item: Item) {
         self.flush();
         self.out.items.push(item);
+    }
+
+    /// Where the paragraph is: after the items so far and the text so far, which the
+    /// characters waiting for a run are part of.
+    fn mark(&self) -> Mark {
+        Mark {
+            item: self.out.items.len(),
+            text: self.out.text.len(),
+        }
+    }
+
+    /// Ends the link open, if there is one, here; one that holds nothing is left out.
+    fn end_link(&mut self) {
+        if let Some((start, target)) = self.link.take() {
+            let end = self.mark();
+            if end != start {
+                self.out.links.push(LinkSpan { start, end, target });
+            }
+        }
     }
 
     /// Reports, once in the document, a feature the layout leaves out or shows otherwise.
@@ -1020,8 +1074,13 @@ fn inline_style(inline: &Inline) -> Option<RunStyleId> {
         | Inline::NoteNumber { style, .. }
         | Inline::Separator { style, .. }
         | Inline::ContinuationSeparator { style, .. } => Some(*style),
-        // A field's result has styles of its own; objects have none.
-        Inline::Field(_) | Inline::Object(_) | Inline::Anchored(_) => None,
+        // A field's result has styles of its own; objects and marks have none.
+        Inline::Field(_)
+        | Inline::Object(_)
+        | Inline::Anchored(_)
+        | Inline::LinkStart { .. }
+        | Inline::LinkEnd
+        | Inline::Bookmark { .. } => None,
     }
 }
 

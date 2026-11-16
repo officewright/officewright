@@ -1161,6 +1161,28 @@ fn display_text(items: &[crate::display::DisplayItem], fonts: &mut Fonts<'_>) ->
                 twips(*height)
             ),
             DisplayItem::PopClip => writeln!(text, "end clip"),
+            DisplayItem::Link {
+                at,
+                width,
+                height,
+                target,
+            } => {
+                let target = match &**target {
+                    crate::ir::LinkTarget::Uri(uri) => format!("uri {uri}"),
+                    crate::ir::LinkTarget::Bookmark(name) => format!("bookmark {name}"),
+                };
+                writeln!(
+                    text,
+                    "link @{},{} {}x{} to {target}",
+                    twips(at.x),
+                    twips(at.y),
+                    twips(*width),
+                    twips(*height)
+                )
+            }
+            DisplayItem::Destination { at, name } => {
+                writeln!(text, "destination {name} @{},{}", twips(at.x), twips(at.y))
+            }
         };
     }
     text
@@ -1600,12 +1622,16 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
                         && line.to.y.0.is_finite()
                 }
                 DisplayItem::Image(image) => image.at.x.0.is_finite() && image.at.y.0.is_finite(),
-                DisplayItem::PushClip { at, width, height } => {
+                DisplayItem::PushClip { at, width, height }
+                | DisplayItem::Link {
+                    at, width, height, ..
+                } => {
                     at.x.0.is_finite()
                         && at.y.0.is_finite()
                         && width.0.is_finite()
                         && height.0.is_finite()
                 }
+                DisplayItem::Destination { at, .. } => at.x.0.is_finite() && at.y.0.is_finite(),
                 DisplayItem::PopClip => true,
             };
             if !finite {
