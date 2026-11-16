@@ -3760,7 +3760,11 @@ class Packages(unittest.TestCase):
                 (e.tag[len(W):], {k[len(W):]: v for k, v in e.attrib.items()}) for e in rpr]
 
         def runs(p):
-            """The text and the properties of each run of paragraph p."""
+            """The text and the properties of each run of paragraph p, which holds nothing
+            but its runs and paragraph properties that give its mark no run properties."""
+            self.assertEqual([e.tag for e in p if e.tag != f"{W}pPr"],
+                             [f"{W}r"] * len(p.findall(f"{W}r")))
+            self.assertIsNone(p.find(f"{W}pPr/{W}rPr"))
             found = []
             for r in p.findall(f"{W}r"):
                 self.assertEqual([e.tag for e in r if e.tag != f"{W}rPr"], [f"{W}t"])
