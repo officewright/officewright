@@ -1759,12 +1759,12 @@ fn translates_settings_and_sections() {
             .with_start(Some(3))
     );
     assert_eq!(first.vertical_align(), ir::PageVerticalAlign::Center);
-    // Footnotes: the settings' number format, and the section's position, start and
-    // restart; Word ignores the settings' position (MS-OI29500 2.1.309 a).
+    // Footnotes: the section's position, start and restart, and none of the settings'
+    // footnote properties: Word ignores their position (MS-OI29500 2.1.309 a) and their
+    // number format too (`E-footnote-numbering-settings`, #579).
     assert_eq!(
         first.footnotes(),
         &ir::NoteProps::footnotes()
-            .with_format(ir::NumberFormat::UpperLetter)
             .with_position(ir::NotePosition::BeneathText)
             .with_start(2)
             .with_restart(ir::NoteRestart::EachPage)
@@ -1793,10 +1793,8 @@ fn translates_settings_and_sections() {
         ]
     );
     assert_eq!(last.start(), ir::SectionStart::NextPage);
-    assert_eq!(
-        last.footnotes(),
-        &ir::NoteProps::footnotes().with_format(ir::NumberFormat::UpperLetter)
-    );
+    // A section without its own: Word's defaults, not the settings' format.
+    assert_eq!(last.footnotes(), &ir::NoteProps::footnotes());
     assert_eq!(
         last.endnotes(),
         &ir::NoteProps::endnotes().with_position(ir::NotePosition::SectionEnd)

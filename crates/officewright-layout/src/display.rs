@@ -31,10 +31,6 @@ use crate::tables::border_line;
 /// reference shows it (`E-superscript.docx`).
 const SUPERSCRIPT_RISE: f64 = 1.0 / 3.0;
 
-/// How far the baseline of a subscript drops, as a fraction of the size its formatting
-/// gives. Hypothesis, like [`SUPERSCRIPT_RISE`].
-const SUBSCRIPT_DROP: f64 = 1.0 / 3.0;
-
 /// The width of the line a bar tab draws, as Word's reference of `E-bar-tab.docx` shows
 /// it (#309).
 const BAR_TAB_WIDTH: Pt = Pt(0.14);
@@ -224,15 +220,25 @@ pub(crate) fn stack(items: Vec<DisplayItem>, mut floats: Vec<Float>) -> Vec<Disp
 /// area inside the margins, as every section is laid out in one column. Word's renders
 /// confirm the page down and the column across, with a negative offset
 /// (`letter-cfpb-validation-notice`), and that the offset positions the frame, not the box
-/// its effects reach (the header logo of `report-hhs-usability-test-plan`).
+/// its effects reach (the header logo of `report-hhs-usability-test-plan`). A paragraph's
+/// top is where the space after of the paragraph above it ends, so above the part of its
+/// space before that goes past that space after (#541): Word's renders of
+/// `E-textbox-from-paragraph` (DrawingML, 4 pt before) and `E-textbox-vml` (VML, 6 pt
+/// before), under paragraphs with no space after, put the frames that much higher than
+/// the first line's top, and those of paragraphs with no space before at it; those of
+/// `letter-cfpb-validation-notice` and its `-es` twin, 4 pt before under 2 pt after, which
+/// make 4 pt between the lines, 2 pt higher.
 ///
 /// Hypotheses until Word renders the rule documents of #314: down, the inside margin is
 /// the top one on odd pages and the bottom one on even pages, as across (ST_RelFromV and
 /// ST_AlignV do not say); a line is aligned to from its top to its bottom, a paragraph
-/// and a character are points; a paragraph's top is that of its first line on this page,
-/// below its space before, and in the later part of a paragraph split over pages that
-/// part's top; the gutter counts into the left margin, and mirrored margins
-/// (`w:mirrorMargins`, not laid out yet) do not swap the left and right ones.
+/// and a character are points; a paragraph's top is its first line's where the space
+/// after of the paragraph above is as large as its own space before, where the top of a
+/// page drops its space before, and where contextual spacing leaves it out; below a table
+/// or at the top of a page that keeps it, above all its space before; in the later part
+/// of a paragraph split over pages, that part's top; the gutter counts into the left
+/// margin, and mirrored margins (`w:mirrorMargins`, not laid out yet) do not swap the
+/// left and right ones.
 pub(crate) fn float_position(
     object: &AnchoredObject,
     page: &PageBox,
@@ -412,8 +418,24 @@ pub(crate) struct Painting<'a, 'f, 'b> {
 impl Painting<'_, '_, '_> {
     /// Adds to `out` what `lines` of the paragraph draw, the first of them with its top
     /// at `origin.y`, in a column whose start edge is at `origin.x`: shading and
-    /// highlighting first, then the glyphs, the lines and the pictures.
+    /// highlighting first, then the glyphs, the lines and the pictures. The paragraph's
+    /// top, which the floating objects it anchors are positioned from, is that of the
+    /// first of `lines`.
     pub(crate) fn paint(&mut self, lines: Range<usize>, origin: Point, out: &mut Vec<DisplayItem>) {
+        self.paint_with_space_before(lines, origin, 0.0, out);
+    }
+
+    /// As [`paint`](Self::paint), where `space_before` of the paragraph's space before is
+    /// laid out above the first of `lines`: the paragraph's top, which the floating
+    /// objects it anchors are positioned from, is that far above `origin.y`.
+    pub(crate) fn paint_with_space_before(
+        &mut self,
+        lines: Range<usize>,
+        origin: Point,
+        space_before: f64,
+        out: &mut Vec<DisplayItem>,
+    ) {
+        let paragraph_top = origin.y.0 - space_before;
         let mut behind = Vec::new();
         let mut front = Vec::new();
         let mut top = origin.y.0;
@@ -484,7 +506,7 @@ impl Painting<'_, '_, '_> {
                         if matches!(itemized.items.get(*item), Some(Item::Separator(..))) {
                             self.separator(*item, (x, piece.width), baseline, &mut front);
                         } else {
-                            self.float(*item, (x, (top, top + line.height.0), origin.y.0));
+                            self.float(*item, (x, (top, top + line.height.0), paragraph_top));
                         }
                     }
                     PieceKind::Break { .. } => {}
@@ -711,7 +733,7 @@ impl Painting<'_, '_, '_> {
         if placed.is_empty() {
             return None;
         }
-        let rise = rise(run, style);
+        let rise = rise(run, style, self.fonts.face(face).as_deref());
         let origin = Point {
             x: Pt(x),
             y: Pt(baseline - rise),
@@ -765,7 +787,7 @@ impl Painting<'_, '_, '_> {
         let Some(face) = run.face.and_then(|id| self.fonts.face(id)) else {
             return;
         };
-        let baseline = baseline - rise(run, style);
+        let baseline = baseline - rise(run, style, Some(&face));
         // The piece's glyphs are placed from the column's start edge, `x` from the page's.
         let to_page = x - piece.x.0;
         let hyphen = matches!(piece.kind, PieceKind::Hyphen { .. });
@@ -895,7 +917,7 @@ impl Painting<'_, '_, '_> {
         let size = drawn_size(&style, formatted, false);
         let choice = self.fonts.choose(&family, bold, italic);
         let face = choice.face.and_then(|id| self.fonts.face(id));
-        let raised = baseline - rise_at(&style, formatted.0);
+        let raised = baseline - rise_at(&style, formatted, face.as_deref());
         let reach = self.reach(face.as_deref(), formatted, &style);
         let background = self.background_of(&style, behind, span, (baseline, reach), bounds);
         let color = text_color(style.color(), background);
@@ -1205,10 +1227,10 @@ impl Painting<'_, '_, '_> {
         let layout = self.layout;
         if let Some(laid) = layout.text_box(item) {
             let insets = text_box.insets();
-            // Centred and bottom text, as DrawingML describes them: hypotheses, since in
-            // Word's references of `letter-cfpb-validation-notice` and its `-es` twin the
-            // text of a centred box is where the top would put it, if its paragraph's top
-            // is where `float_position` takes it (#465).
+            // Centred text, as DrawingML describes it: Word's references of
+            // `letter-cfpb-validation-notice` and its `-es` twin draw the text of a centred
+            // box where this puts it, to a few tenths of a point (#465, #541). Bottom text is
+            // a hypothesis.
             let free = (height - insets.top().0 - insets.bottom().0 - laid.height).max(0.0);
             let start = top
                 + insets.top().0
@@ -1264,17 +1286,35 @@ impl Painting<'_, '_, '_> {
     }
 }
 
-/// How far the baseline of `run` in `style` is raised: superscripts up, subscripts down.
-fn rise(run: &TextRun, style: &RunStyle) -> f64 {
-    rise_at(style, run.formatted_size.0)
+/// How far the baseline of `run` in `style` and `face` is raised: superscripts up,
+/// subscripts down.
+fn rise(run: &TextRun, style: &RunStyle, face: Option<&ShapingFace>) -> f64 {
+    rise_at(style, run.formatted_size, face)
 }
 
-/// How far the baseline of text in `style` is raised, at `size`, the size its formatting
-/// gives.
-fn rise_at(style: &RunStyle, size: f64) -> f64 {
+/// How far the baseline of text in `style` and `face` is raised, at `size`, the size its
+/// formatting gives. A subscript drops by as much as the face's descent at that size
+/// exceeds its descent at the size the subscript is drawn at, so that its text ends
+/// where the text beside it does: 2.26 pt in Carlito (Calibri's metrics) at 24 pt.
+/// Word drops subscripts by whole half points, within half a point of that in Calibri
+/// and less in Liberation Sans, whose descent is shallower, at 8 to 48 pt: see
+/// `tests/corpus/word-rules/E-superscript.docx` (2.5 pt at 24 pt, 1 pt at 11 pt),
+/// `E-superscript-sizes.docx` and `E-superscript-steps.docx`. How Word comes to its
+/// half points is open.
+fn rise_at(style: &RunStyle, size: Pt, face: Option<&ShapingFace>) -> f64 {
     let vertical = match style.vertical() {
-        VerticalPosition::Superscript => size * SUPERSCRIPT_RISE,
-        VerticalPosition::Subscript => -size * SUBSCRIPT_DROP,
+        VerticalPosition::Superscript => size.0 * SUPERSCRIPT_RISE,
+        VerticalPosition::Subscript => {
+            let descent = |size| {
+                face.map_or_else(
+                    || no_font(size),
+                    |face| line_metrics(face.face(), size, TypoRule::default()),
+                )
+                .descent
+                .0
+            };
+            descent(drawn_size(style, size, false)) - descent(size)
+        }
         _ => 0.0,
     };
     style.position().0 + vertical
@@ -2315,8 +2355,9 @@ mod tests {
         let [plain, lowered, narrow] = runs.as_slice() else {
             panic!("{items:?}");
         };
-        // A subscript drops a third of its 10 pt.
-        assert!((lowered.origin.y.0 - plain.origin.y.0 - 10.0 / 3.0).abs() < 1e-9);
+        // A subscript drops by the test font's descent at 10 pt, 2.5, less its descent at
+        // the 6.5 pt it is drawn at, 1.625.
+        assert!((lowered.origin.y.0 - plain.origin.y.0 - 0.875).abs() < 1e-9);
         assert_eq!((plain.h_scale, narrow.h_scale), (1.0, 0.5));
         // The picture's frame, 8 by 5, inside the room its effects take: 3 to its left,
         // 2 above and 1 below, the room's bottom on the baseline.

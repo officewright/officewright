@@ -6858,9 +6858,12 @@ def cut_lines_shapes() -> Doc:
 
 # Libre Barcode 128 (tests/fonts-word/libre-barcode-128, installed for Word): a font whose
 # glyphs are the Code 128 symbols. Its character map, read from the font: symbol v below
-# 95 is the character U+0020 + v (symbol 0 also U+00C2, used here since a space may be
-# stretched or dropped), and symbol v of 95 and above the character U+0064 + v, from
-# U+00C3 to the stop symbol's U+00CE; the start symbol of code set B is U+00CC.
+# 95 is the character U+0020 + v, and symbol v of 95 and above the character U+0064 + v,
+# from U+00C3 to the stop symbol's U+00CE; the start symbol of code set B is U+00CC.
+# Symbol 0 is written as U+00C2, the other character the font has for it: U+0020 maps to
+# the glyph space, which has no outline, and the font draws symbol 0 for it only through
+# its calt lookup (space to uni00C2.code.space), which a renderer that does not apply calt
+# leaves out.
 BARCODE_FONT = "Libre Barcode 128"
 
 

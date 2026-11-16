@@ -232,18 +232,21 @@ pub(super) fn section<'a>(t: &mut Translator<'a>, section: Section<'a>) -> ir::S
         Some(VerticalJustification::Bottom) => ir::PageVerticalAlign::Bottom,
     };
     let settings = t.document.settings();
-    // Word places footnotes as the section says, not the document (MS-OI29500 2.1.309
-    // a), and endnotes as the document says, not the section (§17.11.22).
+    // Word places and numbers footnotes as the section says only. It ignores the
+    // settings' `w:footnotePr`: its placement (MS-OI29500 2.1.309 a), and its number
+    // format, start and restart too, though sections without their own take those from
+    // it by ECMA-376 Part 1 §17.11.11. Word's render of `E-footnote-numbering-settings`
+    // numbers in decimal from 1 through the pages where the settings say lower-case
+    // letters from 3, each page (#579). Endnotes are placed as the document says, not the
+    // section (§17.11.22); that their numbering comes from the settings where a section
+    // has none is a hypothesis until a Word render.
     let footnotes = notes(
         ir::NoteProps::footnotes(),
-        [
-            (settings.footnotes(), false),
-            (properties.footnotes(), true),
-        ],
+        &[(properties.footnotes(), true)],
     );
     let endnotes = notes(
         ir::NoteProps::endnotes(),
-        [(settings.endnotes(), true), (properties.endnotes(), false)],
+        &[(settings.endnotes(), true), (properties.endnotes(), false)],
     );
     let headers = t.header_footer_set(section, true);
     let footers = t.header_footer_set(section, false);
@@ -390,11 +393,11 @@ fn inlines_weight(inlines: &[ir::Inline]) -> usize {
         .sum()
 }
 
-/// Note properties: Word's defaults, then the document's settings, then the section's;
-/// the position only from the levels marked to give it.
-fn notes(defaults: ir::NoteProps, levels: [(Option<&NoteProperties>, bool); 2]) -> ir::NoteProps {
+/// Note properties: Word's defaults, then those of `levels` in turn, each over the ones
+/// before; the position only from the levels marked to give it.
+fn notes(defaults: ir::NoteProps, levels: &[(Option<&NoteProperties>, bool)]) -> ir::NoteProps {
     let mut props = defaults;
-    for (level, places) in levels {
+    for &(level, places) in levels {
         let Some(level) = level else {
             continue;
         };
