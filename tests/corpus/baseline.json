@@ -1476,11 +1476,11 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-section-continuous-title.docx": {
-      "line_agreement": 0.9853,
-      "page_break_agreement": 0.5,
-      "ssim_mean": 0.9932,
-      "ssim_min": 0.9888,
-      "text_score": 0.9937
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.9947,
+      "ssim_min": 0.9931,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-section-next-column.docx": {
       "line_agreement": 1.0,

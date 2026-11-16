@@ -431,6 +431,7 @@ fn paginate_with<S: PageSink>(
             sink: sink(),
             taken: 0,
             taken_by_section: vec![0; document.sections().len()],
+            flow_sections: flow.iter().map(|flowed| flowed.section).collect(),
             keep_from: usize::MAX,
             most_held: 0,
             layouts_held: 0,
@@ -505,9 +506,11 @@ struct Totals {
 impl Totals {
     /// The counts of a document of `pages` pages, `by_section` of them in each section of
     /// `document`: all of them, but one less when the first section has a title page and
-    /// numbers its pages from 0 (MS-OI29500 2.1.489 a). A section counts the blank page of
-    /// its odd or even start, and not the page it starts on when it is continuous:
-    /// hypotheses until Word shows them (#298, `E-section-continuous-headers.docx`).
+    /// numbers its pages from 0 (MS-OI29500 2.1.489 a). A section counts the page it starts
+    /// on when it is continuous, as the section before does (Word's render of
+    /// `E-section-continuous-title.docx`; that a section whose first text goes on to the
+    /// next page starts there is a hypothesis, see `add_page`), and the blank page of its
+    /// odd or even start, a hypothesis until Word shows it (#298).
     fn of(pages: usize, by_section: &[u32], document: &Document) -> Self {
         let count = |section: usize| by_section.get(section).copied().unwrap_or(0);
         let all = u32::try_from(pages).unwrap_or(u32::MAX);
@@ -929,6 +932,8 @@ struct Pager<'d, 'f, 'b, S> {
     /// How many pages went to the sink, of each section.
     taken: usize,
     taken_by_section: Vec<u32>,
+    /// The section of each paragraph and table of the flow, by its place in it.
+    flow_sections: Vec<usize>,
     /// The first page that going back to a checkpoint could still change: where a chain
     /// of paragraphs kept with the next one starts while the chain can still move (it
     /// does not start at the top of a page), where the last piece of the paragraph before
@@ -1389,7 +1394,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// section of the same page setup, unless a page break (`after_break`) ended the
     /// paragraph before. Returns whether it started a new page. The current page keeps
     /// the section it started in: a continuous section's headers and footers apply from
-    /// its next page (hypothesis, `E-section-continuous-headers.docx`).
+    /// its next page, as Word's renders of `E-section-continuous-headers.docx` and
+    /// `E-section-continuous-title.docx` show.
     fn start_section(
         &mut self,
         index: usize,
@@ -2176,18 +2182,23 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let mut items = Vec::new();
         let mut floats = Vec::new();
         if let Some(ir) = self.document.sections().get(section).filter(|_| !blank) {
-            // The section's first page is the first of its own: a continuous section starts
-            // on a page that keeps the section before, so its title-page header is on its
-            // second. Hypothesis until a Word render (`E-section-continuous-headers.docx`).
-            // The sink takes no page before a later one is made, so the last page is held:
-            // a page that is not blank, or a blank one that an odd or even section start put
-            // before that section's first page, after a page of another section.
+            // The section's first page is the one it starts on, also when it is continuous
+            // and starts on a page that keeps the header of the section before: Word's
+            // render of `E-section-continuous-title.docx` gives the page after that one the
+            // section's default header, not its title page's. A continuous section starts on
+            // the page that holds its first text, so that one whose first text goes on to the
+            // next page (a keep chain that moves, widow control, a page break before its
+            // first paragraph) starts there: a hypothesis until a Word render, which might
+            // count the page that holds the section break instead. The sink takes no page before
+            // a later one is made, so the last page is held: a page that is not blank, or a
+            // blank one that an odd or even section start put before that section's first
+            // page, after a page of another section.
             let first = self
                 .pages
                 .iter()
                 .rev()
                 .find(|page| !page.blank)
-                .is_none_or(|page| page.section != section);
+                .is_none_or(|page| self.last_section(page) < section);
             let kind = if ir.title_page() && first {
                 Kind::First
             } else if self.document.settings().even_and_odd_headers() && number % 2 == 0 {
@@ -2301,6 +2312,15 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         self.taken + self.pages.len()
     }
 
+    /// The last section whose body is on `page`: its own, or a continuous one whose first
+    /// text is on it (see `add_page` for the hypothesis this takes).
+    fn last_section(&self, page: &Page) -> usize {
+        page.fragments
+            .last()
+            .and_then(|fragment| self.flow_sections.get(fragment.paragraph))
+            .map_or(page.section, |&section| section.max(page.section))
+    }
+
     /// Page `index` of those made, unless it went to the sink.
     fn page_at(&self, index: usize) -> Option<&Page> {
         index
@@ -2319,7 +2339,15 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             .collect();
         let mut notes = notes.into_iter();
         for mut page in pages {
-            if let Some(taken) = self.taken_by_section.get_mut(page.section) {
+            // A page counts for its own section, and for every continuous one that starts
+            // on it: Word's render of `E-section-continuous-title.docx` counts the page a
+            // continuous section starts on in that section's SECTIONPAGES as well.
+            let last = self.last_section(&page);
+            for taken in self
+                .taken_by_section
+                .get_mut(page.section..=last)
+                .unwrap_or_default()
+            {
                 *taken = taken.saturating_add(1);
             }
             self.taken += 1;
@@ -7767,6 +7795,65 @@ mod tests {
         // Section 1 numbers its pages in capital Roman numerals; section 2 continues the
         // numbers, and its field writes them as letters.
         assert_eq!(footers, ["I 5 2", "II 5 2", "c 5 3", "d 5 3", "e 5 3"]);
+    }
+
+    #[test]
+    fn a_continuous_section_s_first_page_is_the_one_it_starts_on() {
+        use crate::ir::{Field, FieldKind};
+        // E-section-continuous-title.docx: a continuous section with a title page starts
+        // on page 1, below the section before, and goes on to pages 2 and 3. Page 1 keeps
+        // the header and footer of the section before; Word gives page 2 the section's
+        // default ones, not its title page's, and counts page 1 in its SECTIONPAGES too.
+        let document = document(|style| {
+            let text = |text: &str| text_paragraph(style, text, spacing(0.0, 0.0));
+            let counted = |text: &str| -> Vec<Block> {
+                vec![
+                    Paragraph::new(style)
+                        .with_props(spacing(0.0, 0.0))
+                        .with_inlines([
+                            Inline::text(text, style),
+                            Inline::Field(Field::new(FieldKind::SectionPages, style)),
+                        ])
+                        .into(),
+                ]
+            };
+            let next_page = || lines(style, 1, spacing(0.0, 0.0).with_page_break_before(true));
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(vec![text("HA")]))
+                    .with_footers(HeaderFooterSet::default().with_primary(counted("FA ")))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+                Section::new(close_frames())
+                    .with_start(SectionStart::Continuous)
+                    .with_title_page(true)
+                    .with_headers(
+                        HeaderFooterSet::default()
+                            .with_first(vec![text("HF")])
+                            .with_primary(vec![text("HB")]),
+                    )
+                    .with_footers(
+                        HeaderFooterSet::default()
+                            .with_first(counted("FF "))
+                            .with_primary(counted("FB ")),
+                    )
+                    .with_blocks(vec![
+                        lines(style, 1, spacing(0.0, 0.0)),
+                        next_page(),
+                        next_page(),
+                    ]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let frames: Vec<Vec<String>> = laid
+            .expect("pages")
+            .pages
+            .iter()
+            .map(|page| texts(page).into_iter().take(2).collect())
+            .collect();
+        assert_eq!(
+            frames,
+            [["HA", "FA 1"], ["HB", "FB 3"], ["HB", "FB 3"]].map(|frames| frames.map(String::from))
+        );
     }
 
     #[test]
