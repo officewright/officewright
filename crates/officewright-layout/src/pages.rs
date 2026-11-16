@@ -508,8 +508,9 @@ impl Totals {
     /// `document`: all of them, but one less when the first section has a title page and
     /// numbers its pages from 0 (MS-OI29500 2.1.489 a). A section counts the page it starts
     /// on when it is continuous, as the section before does (Word's render of
-    /// `E-section-continuous-title.docx`), and the blank page of its odd or even start, a
-    /// hypothesis until Word shows it (#298).
+    /// `E-section-continuous-title.docx`; that a section whose first text goes on to the
+    /// next page starts there is a hypothesis, see `add_page`), and the blank page of its
+    /// odd or even start, a hypothesis until Word shows it (#298).
     fn of(pages: usize, by_section: &[u32], document: &Document) -> Self {
         let count = |section: usize| by_section.get(section).copied().unwrap_or(0);
         let all = u32::try_from(pages).unwrap_or(u32::MAX);
@@ -1393,7 +1394,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// section of the same page setup, unless a page break (`after_break`) ended the
     /// paragraph before. Returns whether it started a new page. The current page keeps
     /// the section it started in: a continuous section's headers and footers apply from
-    /// its next page (hypothesis, `E-section-continuous-headers.docx`).
+    /// its next page, as Word's renders of `E-section-continuous-headers.docx` and
+    /// `E-section-continuous-title.docx` show.
     fn start_section(
         &mut self,
         index: usize,
@@ -2183,7 +2185,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             // The section's first page is the one it starts on, also when it is continuous
             // and starts on a page that keeps the header of the section before: Word's
             // render of `E-section-continuous-title.docx` gives the page after that one the
-            // section's default header, not its title page's. The sink takes no page before
+            // section's default header, not its title page's. A continuous section starts on
+            // the page that holds its first text, so that one whose first text goes on to the
+            // next page (a keep chain that moves, widow control, a page break before its
+            // first paragraph) starts there: a hypothesis until a Word render, which might
+            // count the page that holds the section break instead. The sink takes no page before
             // a later one is made, so the last page is held: a page that is not blank, or a
             // blank one that an odd or even section start put before that section's first
             // page, after a page of another section.
@@ -2306,8 +2312,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         self.taken + self.pages.len()
     }
 
-    /// The last section whose body is on `page`: its own, or a continuous one that starts
-    /// on it.
+    /// The last section whose body is on `page`: its own, or a continuous one whose first
+    /// text is on it (see `add_page` for the hypothesis this takes).
     fn last_section(&self, page: &Page) -> usize {
         page.fragments
             .last()
