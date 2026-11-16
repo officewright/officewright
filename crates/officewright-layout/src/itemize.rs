@@ -310,10 +310,11 @@ fn right_to_left(ch: char) -> bool {
 }
 
 /// Characters that stay with the character before them, in its run and face: joiners,
-/// variation selectors, the soft hyphen, bidirectional controls, marks of the Inherited
-/// script and every mark with a canonical combining class (Hebrew points, Arabic
-/// harakat, viramas). Spacing marks of combining class 0, such as Devanagari vowel
-/// signs, take the font chosen for them.
+/// variation selectors, the soft hyphen (of the same run style only, see
+/// `Builder::character`), bidirectional controls, marks of the Inherited script and every
+/// mark with a canonical combining class (Hebrew points, Arabic harakat, viramas). Spacing
+/// marks of combining class 0, such as Devanagari vowel signs, take the font chosen for
+/// them.
 pub(crate) fn attaches(ch: char) -> bool {
     matches!(
         ch,
@@ -1408,6 +1409,26 @@ mod tests {
                 ("A", "A", 20.0)
             ]
         );
+    }
+
+    #[test]
+    fn a_soft_hyphen_of_the_same_run_style_stays_in_the_fallback_face_before_it() {
+        // Lite lacks Á, which Zzzz draws; the soft hyphen after it goes with it.
+        let mut setup = Setup::new(vec![
+            renamed(minimal(), "Officewright Zzzz"),
+            without_a_acute("Officewright Lite"),
+        ]);
+        let lite = setup.style(plain("Officewright Lite"));
+        let (itemized, _, families) = setup.run(&[
+            Inline::text("\u{C1}", lite),
+            Inline::soft_hyphen(lite),
+            Inline::text("A", lite),
+        ]);
+        assert_eq!(
+            runs(&itemized),
+            [("\u{C1}\u{AD}", "\u{C1}\u{AD}", 10.0), ("A", "A", 10.0)]
+        );
+        assert_eq!(families, ["Officewright Zzzz", "Officewright Lite"]);
     }
 
     #[test]

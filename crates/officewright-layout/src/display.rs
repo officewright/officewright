@@ -1287,8 +1287,9 @@ fn rise_at(style: &RunStyle, size: f64) -> f64 {
 /// source characters of its drawn characters, each source character with the cluster
 /// that draws the first character drawn for it (`ß` in capitals, `SS`, goes with the
 /// first `S`). A cluster's text runs to the next cluster's start in the text, whichever
-/// order the glyphs are in (right-to-left text has them backwards). `tables` are the run's
-/// when its characters correspond one to one.
+/// order the glyphs are in (right-to-left text has them backwards). Soft hyphens and
+/// zero-width spaces stand for no text, and a cluster of nothing else is left out. `tables`
+/// are the run's when its characters correspond one to one.
 fn clusters(
     itemized: &Itemized,
     run: &TextRun,

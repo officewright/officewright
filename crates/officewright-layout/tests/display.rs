@@ -811,6 +811,91 @@ fn the_hyphen_at_a_soft_hyphen_of_another_run_takes_its_font_and_size_but_not_it
 }
 
 #[test]
+fn a_soft_hyphen_of_another_size_makes_its_line_no_taller_but_text_of_that_size_does() -> TestResult
+{
+    // The soft hyphen in Noto Sans 20 pt, then a word in the same, after a word in
+    // Liberation Sans 11 pt: the run of the soft hyphen goes on after it.
+    let book = book()?;
+    let mut document = Document::default();
+    let text = document.add_run_style(base());
+    let big = styled(&mut document, |style| {
+        style
+            .with_fonts(RunFonts::new("Noto Sans"))
+            .with_size(Pt(20.0))
+    });
+    let painted = |first: &str, soft: RunStyleId, second: &str, width: f64| {
+        let paragraph = Paragraph::new(text).with_inlines([
+            Inline::text(first, text),
+            Inline::soft_hyphen(soft),
+            Inline::text(second, big),
+        ]);
+        fuzzing::paint(&book, &document, &[paragraph], width)
+    };
+    let y = |painted: &Painted, quoted: &str| {
+        items(painted, "glyphs")
+            .into_iter()
+            .find(|run| run.contains(&format!(" \"{quoted}\" ")))
+            .map(|run| at(run).1)
+            .ok_or_else(|| format!("no {quoted}:\n{}", painted.text()))
+    };
+    // A line that ends at the soft hyphen keeps its letters' height, and the line of
+    // the 20 pt word after it is where it is with the soft hyphen in the letters' size.
+    let (own, same) = (
+        painted("Extraordinarily", big, "longwordsplit", 200.0),
+        painted("Extraordinarily", text, "longwordsplit", 200.0),
+    );
+    assert_eq!(y(&own, "-")?, BASELINE, "{}", own.text());
+    assert_eq!(
+        y(&own, "longwordsplit")?,
+        y(&same, "longwordsplit")?,
+        "{}",
+        own.text()
+    );
+    // In the middle of a line, the 20 pt text after the soft hyphen makes the line as
+    // tall as it does without the soft hyphen in that size.
+    let (own, same) = (
+        painted("Extra", big, "ordinary", 400.0),
+        painted("Extra", text, "ordinary", 400.0),
+    );
+    assert!(y(&own, "ordinary")? > BASELINE, "{}", own.text());
+    assert_eq!(
+        y(&own, "ordinary")?,
+        y(&same, "ordinary")?,
+        "{}",
+        own.text()
+    );
+    assert_eq!(y(&own, "Extra")?, y(&same, "Extra")?, "{}", own.text());
+    Ok(())
+}
+
+#[test]
+fn a_zero_width_space_under_a_mark_leaves_the_mark_its_text() -> TestResult {
+    // A combining acute after a zero-width space: their cluster stands for the acute.
+    let book = book()?;
+    let mut document = Document::default();
+    let style = document.add_run_style(base());
+    let painted = paint(
+        &book,
+        &document,
+        &[one_paragraph(
+            style,
+            vec![Inline::text("ab\u{200B}\u{301}cd", style)],
+        )],
+    );
+    let text: String = items(&painted, "glyphs")
+        .into_iter()
+        .filter_map(|run| {
+            run.split_once('"')
+                .and_then(|(_, rest)| rest.rsplit_once('"'))
+                .map(|(quoted, _)| quoted.to_owned())
+        })
+        .collect();
+    // The dump writes characters past ASCII escaped.
+    assert_eq!(text, r"ab\u{301}cd", "{}", painted.text());
+    Ok(())
+}
+
+#[test]
 fn the_leaders_of_a_document_take_a_bounded_number_of_glyphs() -> TestResult {
     // 1 pt at 43 %, whose period stands on Word's smallest grid pitch of 0.12 pt, stops
     // every 11 pt with dot leaders: each of the 143 tabs a line holds stays under the

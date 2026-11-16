@@ -1434,12 +1434,13 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let mut breaks = Vec::new();
         for piece in &line.pieces {
             match &piece.kind {
-                // A soft hyphen in a run of its own makes the line no taller, nor does
-                // the hyphen drawn for it (E-soft-hyphen-font: Noto Sans 20 pt among
-                // Calibri 11 pt, lines 13.44 pt apart).
-                PieceKind::Text { item, .. } | PieceKind::Hyphen { item, .. }
-                    if self.soft_hyphens_only(*item) => {}
-                PieceKind::Text { item, .. } | PieceKind::Hyphen { item, .. } => {
+                // Soft hyphens of a run of another size make the line no taller, nor
+                // does the hyphen drawn for a soft hyphen (E-soft-hyphen-font: Noto Sans
+                // 20 pt among Calibri 11 pt, lines 13.44 pt apart). A soft hyphen of its
+                // letters' run draws its hyphen as tall as they are.
+                PieceKind::Hyphen { .. } => {}
+                PieceKind::Text { text: drawn, .. } if self.soft_hyphens_only(drawn) => {}
+                PieceKind::Text { item, .. } => {
                     text = true;
                     let metrics = self.text_metrics(*item);
                     extent.add(metrics, self.position(*item));
@@ -1534,14 +1535,11 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         spacing
     }
 
-    /// Whether text item `item` holds nothing but soft hyphens.
-    fn soft_hyphens_only(&self, item: usize) -> bool {
-        let Some(Item::Text(run)) = self.itemized.items.get(item) else {
-            return false;
-        };
+    /// Whether bytes `drawn` of the drawn text are nothing but soft hyphens.
+    fn soft_hyphens_only(&self, drawn: &Range<usize>) -> bool {
         self.itemized
             .text
-            .get(run.range.clone())
+            .get(drawn.clone())
             .is_some_and(|text| !text.is_empty() && text.chars().all(|ch| ch == '\u{00AD}'))
     }
 
