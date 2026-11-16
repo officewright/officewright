@@ -77,8 +77,8 @@ pub struct FileResult {
     /// With `--render`: why the rendered document's markup could not be read for them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_error: Option<String>,
-    /// With `--render`: the header and footer stories of Word's formatting export that no
-    /// page of the document shows, whose fonts row 11 does not check.
+    /// With `--render`: the header and footer stories of Word's formatting export of a kind
+    /// and type no section of the document shows, whose fonts row 11 does not check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stories_not_shown: Option<Vec<String>>,
 }

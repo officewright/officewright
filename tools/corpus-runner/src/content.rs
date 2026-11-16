@@ -3,12 +3,14 @@
 //! markup. Gate row 11 asks the layout's report of every rendered document to name each
 //! kind it holds, so that a user knows why our PDF differs from Word's.
 //!
-//! Only the stories Word shows are read: the body, the headers and footers its sections
-//! show (first-page ones with a title page in the document, even-page ones with
+//! Only the stories Word shows are read: the body, the headers and footers in effect for
+//! each section (a section's own of each kind and type, else the previous section's;
+//! first-page ones only for a section with a title page of its own, even-page ones with
 //! `w:evenAndOddHeaders`), the footnotes and the endnotes; not the styles, so content a style
 //! gives is not found. Deleted text, the formatting a revision replaced, the fallbacks of
-//! Markup Compatibility and what groups of shapes hold, which the translation leaves out
-//! whole, are skipped. Transitional and Strict names are read alike.
+//! Markup Compatibility, and what groups of shapes, canvases and objects shown by a drawing
+//! hold, which the translation leaves out whole, are skipped. Transitional and Strict names
+//! are read alike.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -111,7 +113,11 @@ pub struct Scanned {
     /// The kinds of content, in the order of [`KINDS`].
     pub kinds: Vec<String>,
     /// The header and footer stories of Word's formatting export (`first-page-header`,
-    /// `even-pages-footer`, ...) that no page of the document shows.
+    /// `even-pages-footer`, ...) of a kind and type no section shows. A story of a type that
+    /// some section shows is not listed even where a page shows only some of its headers:
+    /// a later section's own first-page header without a title page of its own, the default
+    /// header of a one-page section with a title page, the even-page header of a one-page
+    /// document.
     pub stories_not_shown: Vec<String>,
 }
 
@@ -1373,6 +1379,12 @@ mod tests {
             r#"<w:drawing><wp:inline><a:graphic><a:graphicData uri="x"><a:blip r:embed="rId1"/></a:graphicData></a:graphic></wp:inline></w:drawing>"#
         );
         assert_eq!(kinds(&object), ["embedded object"]);
+        // A drawing beside a preview picture still leaves the object out.
+        let both = pict("").replace(
+            "<w:pict></w:pict>",
+            r#"<w:object><v:shape><v:imagedata r:id="rId2"/></v:shape><w:drawing/></w:object>"#,
+        );
+        assert_eq!(kinds(&both), ["embedded object"]);
     }
 
     /// What a group of shapes holds is left out with it: only the group is found.
