@@ -524,7 +524,8 @@ impl Builder<'_, '_, '_> {
         // too is a hypothesis.
         let low = code & 0xFF;
         // What is drawn where the font has no glyph for the code: its missing-glyph shape,
-        // for the code as written in a font that is no symbol font.
+        // for the code as written in a font that is no symbol font, but for a control
+        // character, which would end the line or move to a tab instead.
         let mut missing = 0xF000 | low;
         if let (true, Some(face)) = (choice.installed, choice.face) {
             let symbol = self
@@ -534,7 +535,9 @@ impl Builder<'_, '_, '_> {
             let codes = if symbol {
                 [Some(0xF000 | low), Some(low)]
             } else {
-                missing = code;
+                if char::from_u32(code).is_some_and(|ch| !ch.is_control()) {
+                    missing = code;
+                }
                 [Some(code), None]
             };
             for ch in codes.into_iter().flatten().filter_map(char::from_u32) {
@@ -1825,6 +1828,23 @@ mod tests {
             setup.run(&[Inline::symbol("Officewright Rais", 0xF041, style)]);
         assert_eq!(runs(&itemized), [("\u{F041}", "\u{F041}", 10.0)]);
         assert!(report.is_empty(), "{report:?}");
+        // Its symbol 000D, a carriage return it has no glyph for, is drawn as U+F00D, so that
+        // no line ends at it.
+        let (itemized, report, _) = setup.run(&[
+            Inline::text("A", style),
+            Inline::symbol("Officewright Rais", 0x000D, style),
+            Inline::text("A", style),
+        ]);
+        assert_eq!(
+            runs(&itemized),
+            [("A", "A", 10.0), ("\u{F00D}", "\r", 10.0), ("A", "A", 10.0)]
+        );
+        let breaks = crate::breaks::BreakMap::new(&itemized.text, true);
+        assert_eq!(
+            breaks.all(),
+            [(itemized.text.len(), crate::breaks::Opportunity::Mandatory)]
+        );
+        assert_eq!(messages(&report).len(), 1, "{report:?}");
     }
 
     #[test]
