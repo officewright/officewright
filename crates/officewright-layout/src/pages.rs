@@ -5933,6 +5933,46 @@ mod tests {
         // 0.005 pt, its letters spaced by -5.995 pt: too small for a link on any page.
         assert_eq!(reported(30.0, 1, plain(), ("\u{200B}", 0.0)), None);
         assert_eq!(reported(30.0, 1, plain(), ("A", -5.995)), None);
+        // And one on a line of 0.0004 of a single line of 11.5 pt, too low for a link on
+        // any page, in a row of an exact 30 pt that cuts off the three lines of 20 pt of
+        // the paragraph after it.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let low = Paragraph::new(style)
+            .with_props(
+                ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Multiple(0.0004))),
+            )
+            .with_inlines([
+                Inline::link_start(LinkTarget::Uri("u".into())),
+                Inline::text("A", style),
+                Inline::link_end(),
+            ]);
+        let row = Row::default()
+            .with_height(RowHeight::Exact(Pt(30.0)))
+            .with_cells([
+                Cell::default().with_blocks([low.into(), lines(style, 3, spacing(0.0, 0.0))])
+            ]);
+        document.add_section(
+            Section::new(setup()).with_blocks(vec![table_with(vec![row], 0.0).into()]),
+        );
+        let (laid, report) = laid(&document, 10);
+        laid.expect("pages");
+        let messages = messages(&report);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("exact height")),
+            "{messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|message| message == CUT),
+            "{messages:?}"
+        );
     }
 
     #[test]
