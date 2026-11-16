@@ -324,6 +324,7 @@ enum Once {
     TextBoxDash = 1 << 47,
     TextBoxTransparency = 1 << 48,
     TextBoxLineInside = 1 << 49,
+    WrapLeftOut = 1 << 50,
 }
 
 impl<'a> Translator<'a> {

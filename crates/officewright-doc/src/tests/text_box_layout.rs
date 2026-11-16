@@ -706,6 +706,228 @@ fn leaves_out_vml_groups_hidden_boxes_and_boxes_without_a_size() {
 }
 
 #[test]
+fn lists_once_that_text_does_not_wrap_around_floating_drawings_left_out() {
+    use super::drawing::{anchored, with_images};
+    // The layout writes the same words where it draws a floating object; the corpus gate's
+    // row 11 looks for "wrap" in a feature-unsupported entry (#303, #584).
+    let entry = "text does not wrap around floating objects yet: where a shape or drawing that is left out floats with text wrapping around it, the text stands as if it were not there, here and wherever else the document has one";
+    // A floating drawing of a shape holding `shape`, with this wrapping element, and a
+    // size or none.
+    let floating_with = |wrap: &str, sized: bool, shape: &str| {
+        let extent = if sized {
+            r#"<wp:extent cx="1270000" cy="635000"/>"#
+        } else {
+            ""
+        };
+        format!(
+            r#"<w:r><w:drawing {NAMESPACES}><wp:anchor simplePos="0" relativeHeight="5" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>127000</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>254000</wp:posOffset></wp:positionV>{extent}{wrap}<wp:docPr id="2" name="Shape"/>{}</wp:anchor></w:drawing></w:r>"#,
+            graphic(shape)
+        )
+    };
+    // A shape that shows neither a picture nor a text box, and a text box.
+    let rect = "<wps:spPr/>";
+    let text = shape("", &p("x"), "");
+    let square = r#"<wp:wrapSquare wrapText="bothSides"/>"#;
+    let vml_rect = |position: &str, wrap: &str| {
+        pict(&format!(
+            r#"<v:rect style="{position}width:10pt;height:10pt">{wrap}</v:rect>"#
+        ))
+    };
+    // A floating VML picture that wraps, with a size or none.
+    let vml_floating_picture = |sized: bool| {
+        let height = if sized { "height:10pt;" } else { "" };
+        format!(
+            r#"<v:shape style="position:absolute;width:10pt;{height}"><v:imagedata r:id="rIdPng"/><w10:wrap type="square"/></v:shape>"#
+        )
+    };
+    let vml_group = format!(
+        r#"<v:group style="position:absolute;width:10pt;height:10pt" coordsize="100,100"><w10:wrap type="square"/><v:shape style="width:100;height:100"><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape></v:group>"#,
+        p("x")
+    );
+    let cases = [
+        // Left out, but no text wraps around them: floating over the text, in the line, or
+        // VML in the line, whatever its w10:wrap says.
+        (floating_with("<wp:wrapNone/>", true, rect), false),
+        (inline(rect), false),
+        (
+            vml_rect("position:absolute;", r#"<w10:wrap type="none"/>"#),
+            false,
+        ),
+        (vml_rect("", r#"<w10:wrap type="square"/>"#), false),
+        // Drawn: the layout lists wrapping where it places a floating object.
+        (floating_with(square, true, &text), false),
+        // Left out, with text wrapping around them.
+        (floating_with(square, true, rect), true),
+        (
+            floating_with("<wp:wrapTight wrapText=\"bothSides\"/>", true, rect),
+            true,
+        ),
+        (
+            floating_with("<wp:wrapThrough wrapText=\"bothSides\"/>", true, rect),
+            true,
+        ),
+        (floating_with("<wp:wrapTopAndBottom/>", false, &text), true),
+        (
+            anchored(
+                "rIdPng",
+                "",
+                r#"<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:wrapSquare wrapText="bothSides"/>"#,
+            ),
+            true,
+        ),
+        (
+            vml_rect("position:absolute;", r#"<w10:wrap type="topAndBottom"/>"#),
+            true,
+        ),
+        (pict(&vml_group), true),
+        // A VML picture without a size, also as the preview of an embedded object.
+        (pict(&vml_floating_picture(false)), true),
+        (
+            format!(
+                r#"<w:r><w:object {NAMESPACES}>{}<o:OLEObject Type="Embed" ProgID="Package"/></w:object></w:r>"#,
+                vml_floating_picture(false)
+            ),
+            true,
+        ),
+        // An embedded object shown by a floating drawing that wraps.
+        (
+            format!(
+                r#"<w:r><w:object {NAMESPACES}>{}</w:object></w:r>"#,
+                floating_with(square, true, rect)
+                    .trim_start_matches("<w:r>")
+                    .trim_end_matches("</w:r>")
+            ),
+            true,
+        ),
+        // A drawn picture or text box beside another shape that is left out: listed where
+        // the one left out wraps, not where only the drawn one does, which the layout lists.
+        (
+            pict(&format!(
+                "{}{}",
+                vml_floating_picture(true),
+                r#"<v:rect style="position:absolute;width:5pt;height:5pt"><w10:wrap type="square"/></v:rect>"#
+            )),
+            true,
+        ),
+        (
+            pict(&format!(
+                "{}{}",
+                vml_floating_picture(true),
+                r#"<v:rect style="position:absolute;width:5pt;height:5pt"><w10:wrap type="none"/></v:rect>"#
+            )),
+            false,
+        ),
+        (
+            pict(&format!(
+                r#"<v:shape style="position:absolute;width:10pt;height:10pt"><w10:wrap type="square"/><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape><v:rect style="position:absolute;width:5pt;height:5pt"><w10:wrap type="square"/></v:rect>"#,
+                p("x")
+            )),
+            true,
+        ),
+        (
+            pict(&format!(
+                r#"<v:shape style="position:absolute;width:10pt;height:10pt"><w10:wrap type="square"/><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape><v:rect style="position:absolute;width:5pt;height:5pt"/>"#,
+                p("x")
+            )),
+            false,
+        ),
+        (
+            pict(&format!(
+                r#"<v:shape style="position:absolute;width:10pt;height:10pt"><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape><v:rect style="position:absolute;width:5pt;height:5pt"><w10:wrap type="tight"/></v:rect>"#,
+                p("x")
+            )),
+            true,
+        ),
+        // A hidden picture is not drawn, nor counted: its neighbour that wraps is listed.
+        (
+            pict(&format!(
+                "{}{}",
+                vml_floating_picture(true)
+                    .replace("position:absolute;", "visibility:hidden;position:absolute;"),
+                r#"<v:rect style="position:absolute;width:5pt;height:5pt"><w10:wrap type="square"/></v:rect>"#
+            )),
+            true,
+        ),
+        // A hidden text box is not drawn, nor counted: its neighbour that wraps is listed.
+        (
+            pict(&format!(
+                r#"<v:shape style="visibility:hidden;position:absolute;width:10pt;height:10pt"><w10:wrap type="square"/><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape><v:rect style="position:absolute;width:5pt;height:5pt"><w10:wrap type="square"/></v:rect>"#,
+                p("x")
+            )),
+            true,
+        ),
+        // An embedded object shown by a drawing over the text, or in the line, which does
+        // not wrap whatever it holds.
+        (
+            format!(
+                r#"<w:r><w:object {NAMESPACES}>{}</w:object></w:r>"#,
+                floating_with("<wp:wrapNone/>", true, rect)
+                    .trim_start_matches("<w:r>")
+                    .trim_end_matches("</w:r>")
+            ),
+            false,
+        ),
+        (
+            format!(
+                r#"<w:r><w:object {NAMESPACES}>{}</w:object></w:r>"#,
+                inline(rect)
+                    .trim_start_matches("<w:r>")
+                    .trim_end_matches("</w:r>")
+                    .replace(
+                        "<wp:docPr ",
+                        r#"<wp:wrapSquare wrapText="bothSides"/><wp:docPr "#
+                    )
+            ),
+            false,
+        ),
+        // A hidden shape, which Word does not show.
+        (
+            vml_rect(
+                "visibility:hidden;position:absolute;",
+                r#"<w10:wrap type="square"/>"#,
+            ),
+            false,
+        ),
+    ];
+    for (run, listed) in &cases {
+        let translation = translate(&with_images(&format!("<w:p>{run}</w:p>")));
+        let wraps: Vec<String> = translation
+            .left_out()
+            .iter()
+            .filter(|entry| entry.message().contains("wrap"))
+            .map(|entry| format!("{}: {}", entry.location(), entry.message()))
+            .collect();
+        let expected: Vec<String> = if *listed {
+            vec![format!("sections[0].blocks[0].inlines: {entry}")]
+        } else {
+            vec![]
+        };
+        assert_eq!(wraps, expected, "{run}");
+    }
+
+    // Once per document, where it is first met: the second paragraph.
+    let body = format!(
+        "<w:p>{}</w:p><w:p>{}</w:p><w:p>{}</w:p>",
+        cases[0].0, cases[5].0, cases[10].0
+    );
+    let translation = translate(&with_images(&body));
+    let wraps: Vec<String> = translation
+        .left_out()
+        .iter()
+        .filter(|entry| entry.message().contains("wrap"))
+        .map(|entry| format!("{}: {}", entry.location(), entry.message()))
+        .collect();
+    assert_eq!(wraps, [format!("sections[0].blocks[1].inlines: {entry}")]);
+    assert!(
+        translation
+            .left_out()
+            .iter()
+            .filter(|entry| entry.message().contains("wrap"))
+            .all(|entry| entry.kind() == officewright_layout::ReportKind::FeatureUnsupported)
+    );
+}
+
+#[test]
 fn translates_no_text_box_inside_a_text_box() {
     // The document leaves out the content of a box in a box as it opens, so that the IR,
     // which refuses one, holds none.
