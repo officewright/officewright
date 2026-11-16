@@ -12183,7 +12183,11 @@ mod tests {
         // line. 11: a paragraph of four lines, the first referencing a note of four
         // lines: the row would fit whole with the note cut, but the note fits whole under
         // its line, so page 1 takes three lines and the note. 12: case 2 with the note of
-        // one line referenced by line 4, right under the line of the cut note.
+        // one line referenced by line 4, right under the line of the cut note. 13: a line,
+        // then a paragraph of eight lines with widow control, the first referencing a note
+        // of five lines, which fits whole under it: widow control keeps the paragraph from
+        // ending there, and it goes to the next page. 14: case 13 with a paragraph of three
+        // lines and a note of four.
         let lay = |mode: CompatMode, case: usize, cell: bool| {
             let document = with_notes_in(
                 mode,
@@ -12192,9 +12196,9 @@ mod tests {
                 Inline::separator,
                 |document, style, mark| {
                     let count = match case {
-                        3 => 5,
+                        3 | 13 => 5,
                         5 => 7,
-                        6 | 11 => 4,
+                        6 | 11 | 14 => 4,
                         10 => 2,
                         _ => 6,
                     };
@@ -12202,9 +12206,9 @@ mod tests {
                     let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
                     let line =
                         |notes: &[NoteId]| referencing(style, (0, 0), notes, spacing(0.0, 0.0));
-                    // One paragraph of `count` lines without widow control, `notes`
-                    // giving the line of each note it references.
-                    let lines_of = |count: usize, notes: &[(usize, NoteId)]| {
+                    // One paragraph of `count` lines, with widow control where `widow`
+                    // says so, `notes` giving the line of each note it references.
+                    let lines_with = |count: usize, notes: &[(usize, NoteId)], widow: bool| {
                         let mut inlines = Vec::new();
                         for at in 1..=count {
                             if at > 1 {
@@ -12219,10 +12223,12 @@ mod tests {
                             );
                         }
                         Paragraph::new(style)
-                            .with_props(spacing(0.0, 0.0).with_widow_control(false))
+                            .with_props(spacing(0.0, 0.0).with_widow_control(widow))
                             .with_inlines(inlines)
                             .into()
                     };
+                    let lines_of =
+                        |count, notes: &[(usize, NoteId)]| lines_with(count, notes, false);
                     // `count` paragraphs of one line, the notes of `notes` referenced by
                     // theirs, and a table of one line in place of paragraph `table`.
                     let paragraphs =
@@ -12251,6 +12257,8 @@ mod tests {
                         10 => paragraphs(8, &[(6, &[long]), (8, &[short])], None),
                         11 => vec![lines_of(4, &[(1, long)])],
                         12 => vec![lines_of(8, &[(3, long), (4, short)])],
+                        13 => vec![line(&[]), lines_with(8, &[(1, long)], true)],
+                        14 => vec![line(&[]), lines_with(3, &[(1, long)], true)],
                         _ => paragraphs(8, &[(3, &[long])], None),
                     };
                     if cell {
@@ -12272,7 +12280,7 @@ mod tests {
             noted_pages(&document).0
         };
         for mode in [CompatMode::Word2013, CompatMode::Word2010] {
-            for case in 1..=12 {
+            for case in 1..=14 {
                 let body = lay(mode, case, false);
                 let cell = lay(mode, case, true);
                 assert_eq!(cell, body, "{mode:?}, case {case}");
@@ -12301,6 +12309,10 @@ mod tests {
         assert_eq!(lines(CompatMode::Word2013, 11, 0), 3);
         assert_eq!(lines(CompatMode::Word2013, 12, 0), 3);
         assert_eq!(lines(CompatMode::Word2010, 12, 0), 5);
+        for mode in [CompatMode::Word2013, CompatMode::Word2010] {
+            assert_eq!(lines(mode, 13, 0), 1, "{mode:?}");
+            assert_eq!(lines(mode, 14, 0), 1, "{mode:?}");
+        }
     }
 
     #[test]
@@ -12336,6 +12348,90 @@ mod tests {
         };
         assert_eq!(count(&pages[0], 'A'), 2, "{pages:?}");
         assert_eq!(count(&pages[0], 'N'), 4, "{pages:?}");
+    }
+
+    #[test]
+    fn a_row_of_a_least_height_does_not_cut_a_note_that_fits_whole_under_its_line() {
+        use crate::ir::{NotePosition, RowHeight};
+        // A row of at least 100 pt holding three lines, the third referencing a note of
+        // four lines, at the top of the page (re-check of #577): the note fits whole under
+        // its line, so the row is filled only as far as the note leaves room, and the
+        // note goes on the page whole, not cut to fill the row.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 4, spacing(0.0, 0.0));
+                let row = Row::default()
+                    .with_height(RowHeight::AtLeast(Pt(100.0)))
+                    .with_cells([Cell::default().with_blocks([referencing(
+                        style,
+                        (2, 0),
+                        &[note],
+                        spacing(0.0, 0.0),
+                    )])]);
+                vec![table_with(vec![row], 0.0).into()]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let count = |page: &Separated, start: char| {
+            page.1
+                .iter()
+                .filter(|(text, _)| text.starts_with(start))
+                .count()
+        };
+        assert_eq!(count(&pages[0], 'A'), 3, "{pages:?}");
+        assert_eq!(count(&pages[0], 'N'), 4, "{pages:?}");
+    }
+
+    #[test]
+    fn the_room_under_a_note_s_line_takes_the_cell_s_margins_and_the_borders() {
+        use crate::ir::{CellMargins, NotePosition};
+        // A line, then a table with borders 6 pt thick and cells with top and bottom
+        // margins of 6 pt, of a paragraph of `count` lines without widow control, the
+        // first referencing a note of four lines (re-check of #577). Under that line, with
+        // the margins and the borders, 96 pt are left, under the note's 100 pt whole: the
+        // note is cut after two lines, under a piece of two lines of a row cut, or under a
+        // row of two lines whole. Without one margin or border, the note would fit whole
+        // there, and the row would end above it.
+        let lay = |count: usize| {
+            let document = with_notes(
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let note = footnote(document, (style, mark), 4, spacing(0.0, 0.0));
+                    let margins = CellMargins::default()
+                        .with_top(Pt(6.0))
+                        .with_bottom(Pt(6.0));
+                    let paragraph = referencing(
+                        style,
+                        (0, count - 1),
+                        &[note],
+                        spacing(0.0, 0.0).with_widow_control(false),
+                    );
+                    let row = Row::default().with_cells([Cell::default()
+                        .with_margins(Some(margins))
+                        .with_blocks([paragraph])]);
+                    vec![
+                        lines(style, 1, spacing(0.0, 0.0)),
+                        table_with(vec![row], 6.0).into(),
+                    ]
+                },
+            );
+            let (pages, _) = noted_pages(&document);
+            let texts = |start: char| {
+                pages[0]
+                    .1
+                    .iter()
+                    .filter(|(text, _)| text.starts_with(start))
+                    .count()
+            };
+            (texts('A'), texts('N'))
+        };
+        assert_eq!(lay(8), (3, 2));
+        assert_eq!(lay(2), (3, 2));
     }
 
     #[test]

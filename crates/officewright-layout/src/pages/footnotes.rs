@@ -987,17 +987,36 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         // their notes, which cannot start, going wholly to the next page; but nothing of
         // the cell of the first such line after its paragraph, as a page takes no later
         // paragraph after a note it sends wholly on.
-        let kept = |pager: &Self, room: f64| {
-            let Some(trial) = prepared.trial(laid, Some(room), flags) else {
-                return true;
-            };
+        let deferred = |pager: &Self, room: f64| {
+            let trial = prepared.trial(laid, Some(room), flags)?;
             let referenced = pager.lines_footnotes(&trial.lines);
-            let first = referenced
+            let index = referenced
                 .iter()
-                .find(|(note, _)| !best.notes.contains(note))
-                .and_then(|&(_, first)| trial.lines.get(first));
-            first.is_none_or(|line| trial.last.get(line.cell).copied().flatten() <= Some(line.part))
+                .position(|(note, _)| !best.notes.contains(note))?;
+            let line = *referenced
+                .get(index)
+                .and_then(|&(_, first)| trial.lines.get(first))?;
+            let earlier: Vec<NoteId> = referenced
+                .iter()
+                .take(index + 1)
+                .map(|&(note, _)| note)
+                .collect();
+            Some((line, trial.last.get(line.cell).copied().flatten(), earlier))
         };
+        let kept = |pager: &Self, room: f64| {
+            deferred(pager, room).is_none_or(|(line, last, _)| last <= Some(line.part))
+        };
+        // Only a line whose note cannot start even right under it stays: one the piece
+        // leaves out because no page may end under it (its widow control), while its note
+        // could start there, goes to the next page with its paragraph, as in the body.
+        let bottom = self.body()?.bottom.0 - top;
+        if let Some((line, _, earlier)) = deferred(self, room) {
+            if let Some(under) = line.room {
+                if self.notes_plan(earlier, bottom - under, section)?.is_some() {
+                    return Ok((best.room.unwrap_or(low), best.notes));
+                }
+            }
+        }
         let mut above = (room - (best.end - self.notes_end())).max(low);
         if !kept(self, above) {
             let mut high = above;
@@ -1018,18 +1037,16 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             }))
     }
 
-    /// How `notes`, footnotes of section `section` that the lines of `trial` reference,
-    /// a piece of a table whose top is at `top`, go on the page under it; `None` where
-    /// one of them cannot start there.
-    fn trial_plan(
+    /// How `notes`, footnotes of section `section` that no page holds yet, go on the page
+    /// under the page's notes in the room `left` above the bottom of the body; `None`
+    /// where one of them cannot start there.
+    fn notes_plan(
         &mut self,
-        trial: &tables::Trial<'_, 'd>,
         notes: Vec<NoteId>,
-        top: f64,
+        left: f64,
         section: usize,
     ) -> Result<Option<Plan<'d>>> {
         let waiting = self.waiting(notes, section)?;
-        let left = self.body()?.bottom.0 - top - trial.room();
         let tail = self.footnotes.last().and_then(PageNotes::tail);
         let rules = Rules {
             defer: false,
@@ -1085,7 +1102,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 cut: false,
             }));
         }
-        let Some(plan) = self.trial_plan(&trial, notes.clone(), top, section)? else {
+        let bottom = self.body()?.bottom.0 - top;
+        let Some(plan) = self.notes_plan(notes.clone(), bottom - trial.room(), section)? else {
             return Ok(None);
         };
         // The first note that does not end on the page is cut, and those after it go
@@ -1095,7 +1113,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         // their notes, as the cut note's line does.
         let modern = self.document.settings().compat_mode() >= CompatMode::Word2013;
         if let Some(cut) = plan.notes.iter().position(|placed| !placed.ends()) {
-            let Some(&(note, at)) = referenced.get(cut) else {
+            let Some(&(_, at)) = referenced.get(cut) else {
                 return Ok(None);
             };
             let Some(line) = trial.lines.get(at) else {
@@ -1117,21 +1135,13 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 return Ok(None);
             }
             // A note is cut only by its own line, where it does not fit whole under it,
-            // as in a paragraph: where the piece ending right under that line puts it
-            // whole, the piece takes no more.
-            if let Some(early) = line.room.filter(|early| *early < room - EPSILON) {
-                if let Some(smaller) = prepared.trial(laid, Some(early), flags) {
-                    if smaller.lines.len() < trial.lines.len() {
-                        let earlier = self.note_ids(&smaller.lines);
-                        let index = earlier.iter().position(|&other| other == note);
-                        if let Some(plan) = self.trial_plan(&smaller, earlier, top, section)? {
-                            let whole = index
-                                .and_then(|index| plan.notes.get(index))
-                                .is_some_and(|placed| placed.ends());
-                            if whole {
-                                return Ok(None);
-                            }
-                        }
+            // as in a paragraph: where it would end whole in the room under that line, the
+            // piece takes no more, wherever a page may end and whatever height the row has.
+            if let Some(under) = line.room {
+                let earlier = referenced.iter().take(cut + 1).map(|&(note, _)| note);
+                if let Some(plan) = self.notes_plan(earlier.collect(), bottom - under, section)? {
+                    if plan.notes.get(cut).is_some_and(|placed| placed.ends()) {
+                        return Ok(None);
                     }
                 }
             }

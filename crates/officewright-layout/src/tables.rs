@@ -1713,9 +1713,11 @@ pub(crate) struct TrialLine<'l, 'd> {
 }
 
 /// Where the content of a cell of a piece sits ([`Stacked::lines`]): the cell, counted
-/// through the piece's cells, the top of the first unit the piece takes, from the
-/// piece's top, and what a piece that ends under one of its units adds below it (its
-/// cell's bottom margin and the border below), `None` where no piece may end there.
+/// through the piece's cells, where the units the piece takes start, from the piece's
+/// top (the content's top, above the space before its first paragraph, for a piece that
+/// starts at the cell's first unit, and else the top of its first unit), and what a
+/// piece that ends under one of its units adds below it (its cell's bottom margin and
+/// the border below), `None` where no piece may end there.
 #[derive(Clone, Copy)]
 struct LineFrame {
     cell: usize,
