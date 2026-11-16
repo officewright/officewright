@@ -404,9 +404,10 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
   shows their colours and transparency, a PNG with every filter type renders the same decoded by officewright as
   unfiltered by poppler, the committed fuzz seeds equal images.py's output; the example synthetic's page: qpdf --check,
   pdftotext reads every line, pdftoppm shows synthetic italic slanted by a third and synthetic bold bolder; the example
-  links' file: qpdf --check, each page's link annotations and the name tree of the named destinations as qpdf --json
-  gives them, and every destination pdfinfo -dests lists, with its page and position; the example embed_report counts
-  a font the subsetter does not support apart from a damaged one (Linux, macOS)
+  links' file: qpdf --check, each page's link annotations, the one action the annotations of each target share, and
+  the name tree of the named destinations as qpdf --json gives them, and every destination pdfinfo -dests lists, with
+  its page and position; the example embed_report counts a font the subsetter does not support apart from a damaged
+  one (Linux, macOS)
 corpus-runner over tests/corpus (committed corpus), CORPUS_JOBS documents at a time if that variable is set, else one
   per core, every document rendered with the fonts of tests/fonts and, first, tests/fonts-word/noto-truetype (the
   TrueType Noto Sans, the build Word had for the references that use it) and tests/fonts-word/test-symbol (the symbol

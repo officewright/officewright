@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,7 +13,7 @@ use crate::embed::{Codes, EXTRA_OBJECTS, Prepared, show};
 use crate::font::{SYNTHETIC_BOLD_STROKE, SYNTHETIC_ITALIC_SKEW, Synthetic, check_font_size};
 use crate::glyphs::MAX_STRING_BYTES;
 use crate::image::draw_operators;
-use crate::link::{Destination, Destinations, Link, MAX_LINKS};
+use crate::link::{Destination, Destinations, Link, LinkTargets, MAX_LINKS, Target};
 use crate::path::check_range;
 use crate::stream::stream_object;
 use crate::{Compression, Error, Font, GlyphRun, GraphicsPath, Image, LinkTarget, Result, Stroke};
@@ -61,6 +62,9 @@ pub struct Document {
     /// The page handed out last, by `add_page` or `page_mut`: the only page whose text
     /// and glyph runs may not be encoded yet.
     open: Option<usize>,
+    /// The link targets checked so far, while no page is handed out; the page handed out
+    /// keeps them, so that the links of one target share it on every page.
+    link_targets: LinkTargets,
 }
 
 /// The identity of the next document made or cloned.
@@ -79,6 +83,7 @@ impl Default for Document {
             subset_budget: SUBSET_BUDGET,
             codes: FontCodes::default(),
             open: None,
+            link_targets: LinkTargets::default(),
         }
     }
 }
@@ -117,6 +122,8 @@ pub struct Page {
     encoded_by: Option<u64>,
     /// The page's links, each an annotation of the page.
     links: Vec<Link>,
+    /// The document's link targets checked so far, while it is the page handed out last.
+    link_targets: LinkTargets,
     /// The named destinations on the page.
     destinations: Vec<Destination>,
 }
@@ -161,6 +168,7 @@ impl Clone for Document {
             subset_budget: self.subset_budget,
             codes: self.codes.clone(),
             open: self.open,
+            link_targets: self.link_targets.clone(),
         }
     }
 }
@@ -194,6 +202,7 @@ impl Document {
             actual_text: false,
             encoded_by: None,
             links: Vec::new(),
+            link_targets: std::mem::take(&mut self.link_targets),
             destinations: Vec::new(),
         });
         self.open = Some(index);
@@ -214,7 +223,8 @@ impl Document {
         // for each thing it draws, as the C ABI does, encodes it once.
         if self.open != Some(index) {
             self.encode_open_page();
-            if index < self.pages.len() {
+            if let Some(page) = self.pages.get_mut(index) {
+                page.link_targets = std::mem::take(&mut self.link_targets);
                 self.open = Some(index);
             }
         }
@@ -225,6 +235,7 @@ impl Document {
     fn encode_open_page(&mut self) {
         if let Some(page) = self.open.take().and_then(|index| self.pages.get_mut(index)) {
             page.encode(&mut self.codes, self.id);
+            self.link_targets = std::mem::take(&mut page.link_targets);
         }
     }
 
@@ -423,6 +434,23 @@ impl Document {
             link_objects.push(next_object);
             next_object += page.links.len();
         }
+        // Then the action of each link target, once for all the links to it, in the order
+        // the links first go to it; `link_actions` has each link's.
+        let mut actions: Vec<&Target> = Vec::new();
+        let mut action_of: HashMap<&Target, usize> = HashMap::new();
+        let link_actions: Vec<usize> = self
+            .pages
+            .iter()
+            .flat_map(|page| &page.links)
+            .map(|link| {
+                *action_of.entry(link.target()).or_insert_with(|| {
+                    actions.push(link.target());
+                    actions.len() - 1
+                })
+            })
+            .collect();
+        let action_object = next_object;
+        next_object += actions.len();
         let tree_object = next_object;
         next_object += destinations.object_count();
 
@@ -539,9 +567,15 @@ impl Document {
                 id += 1;
             }
         }
-        for link in self.pages.iter().flat_map(|page| &page.links) {
+        let links = self.pages.iter().flat_map(|page| &page.links);
+        for (link, action) in links.zip(&link_actions) {
             offsets.push(out.written);
-            out.put_object(id, &link.dictionary())?;
+            out.put_object(id, &link.dictionary(action_object + action))?;
+            id += 1;
+        }
+        for action in &actions {
+            offsets.push(out.written);
+            out.put_object(id, &action.action())?;
             id += 1;
         }
         for object in destinations.objects(tree_object, page_object) {
@@ -886,7 +920,8 @@ impl Page {
     /// [`add_destination`](Self::add_destination), before or after the link. The link is
     /// an annotation without a border, so it shows only as what the page draws under it.
     /// Each call makes one link; a link that spans several lines of text takes one
-    /// rectangle for each.
+    /// rectangle for each. The links of one target, on any page of the document, keep it
+    /// once, and the file writes it once, as the action their annotations share.
     ///
     /// ```
     /// use officewright_pdf::{Document, LinkTarget, PageSize, Pt};
@@ -920,7 +955,7 @@ impl Page {
         height: Pt,
         target: &LinkTarget,
     ) -> Result<()> {
-        let link = Link::new(x, y, width, height, target)?;
+        let rect = Link::rect(x, y, width, height)?;
         if self.links.len() >= MAX_LINKS {
             return Err(Error::OutOfRange {
                 what: "number of links on the page",
@@ -929,6 +964,7 @@ impl Page {
                 max: MAX_LINKS as f64,
             });
         }
+        let link = Link::new(rect, target, &mut self.link_targets)?;
         self.links.push(link);
         Ok(())
     }
@@ -1942,11 +1978,11 @@ mod tests {
         insta::assert_snapshot!(readable(&pdf));
         assert_xref_is_right(&pdf);
         let pdf = String::from_utf8_lossy(&pdf);
-        // No fonts: pages and their contents are 3 to 8, the links 9 to 11 and the name
-        // tree 12.
+        // No fonts: pages and their contents are 3 to 8, the links 9 to 11, the actions of
+        // their three targets 12 to 14 and the name tree 15.
         assert_eq!(
             object(&pdf, 1),
-            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Names << /Dests 12 0 R >> >>\n"
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Names << /Dests 15 0 R >> >>\n"
         );
         assert!(object(&pdf, 3).ends_with("/Contents 4 0 R /Annots [9 0 R 10 0 R] >>\n"));
         assert!(object(&pdf, 5).ends_with("/Contents 6 0 R >>\n"));
@@ -1954,22 +1990,31 @@ mod tests {
         assert_eq!(
             object(&pdf, 9),
             "9 0 obj\n<< /Type /Annot /Subtype /Link /Rect [72 700 192 714.5] /Border [0 0 0] \
-             /A << /S /URI /URI (https://example.com/a%20b/\\(%D0%96\\)) >> >>\n"
+             /A 12 0 R >>\n"
         );
         assert_eq!(
             object(&pdf, 10),
             "10 0 obj\n<< /Type /Annot /Subtype /Link /Rect [72 680 152 694] /Border [0 0 0] \
-             /Dest (Appendix) >>\n"
+             /A 13 0 R >>\n"
         );
         assert_eq!(
             object(&pdf, 11),
             "11 0 obj\n<< /Type /Annot /Subtype /Link /Rect [-10 0 10 10] /Border [0 0 0] \
-             /Dest (%D0%93%D0%BB%D0%B0%D0%B2%D0%B0) >>\n"
+             /A 14 0 R >>\n"
+        );
+        assert_eq!(
+            object(&pdf, 12),
+            "12 0 obj\n<< /S /URI /URI (https://example.com/a%20b/\\(%D0%96\\)) >>\n"
+        );
+        assert_eq!(object(&pdf, 13), "13 0 obj\n<< /S /GoTo /D (Appendix) >>\n");
+        assert_eq!(
+            object(&pdf, 14),
+            "14 0 obj\n<< /S /GoTo /D (%D0%93%D0%BB%D0%B0%D0%B2%D0%B0) >>\n"
         );
         // Sorted by their bytes, and the root has no limits.
         assert_eq!(
-            object(&pdf, 12),
-            "12 0 obj\n<< /Names [\n(%D0%93%D0%BB%D0%B0%D0%B2%D0%B0) [7 0 R /XYZ 0 400 null]\n\
+            object(&pdf, 15),
+            "15 0 obj\n<< /Names [\n(%D0%93%D0%BB%D0%B0%D0%B2%D0%B0) [7 0 R /XYZ 0 400 null]\n\
              (Appendix) [7 0 R /XYZ 72 770.25 null]\n] >>\n"
         );
     }
@@ -1988,7 +2033,11 @@ mod tests {
             "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\n"
         );
         assert!(object(&pdf, 4).ends_with("/Contents 5 0 R /Annots [6 0 R] >>\n"));
-        assert!(object(&pdf, 6).contains("/URI (https://example.com/)"));
+        assert!(object(&pdf, 6).ends_with("/A 7 0 R >>\n"));
+        assert_eq!(
+            object(&pdf, 7),
+            "7 0 obj\n<< /S /URI /URI (https://example.com/) >>\n"
+        );
         assert!(!pdf.contains("/Names"));
     }
 
@@ -2035,15 +2084,15 @@ mod tests {
         assert_xref_is_right(&pdf);
         let pdf = String::from_utf8_lossy(&pdf);
         let key = |i: usize| format!("d{i:03}");
-        // Pages and contents are 3 to 6, the links 7 to 206, the tree 207 to 211: a root
-        // above four leaves of 64, 64, 64 and 8 names.
-        assert!(object(&pdf, 1).contains("/Names << /Dests 207 0 R >>"));
+        // Pages and contents are 3 to 6, the links 7 to 206, their actions 207 to 406, the
+        // tree 407 to 411: a root above four leaves of 64, 64, 64 and 8 names.
+        assert!(object(&pdf, 1).contains("/Names << /Dests 407 0 R >>"));
         assert_eq!(
-            object(&pdf, 207),
-            "207 0 obj\n<< /Kids [208 0 R 209 0 R 210 0 R 211 0 R] >>\n"
+            object(&pdf, 407),
+            "407 0 obj\n<< /Kids [408 0 R 409 0 R 410 0 R 411 0 R] >>\n"
         );
         for (leaf, names) in [0..64, 64..128, 128..192, 192..200].into_iter().enumerate() {
-            let node = object(&pdf, 208 + leaf);
+            let node = object(&pdf, 408 + leaf);
             let listed: Vec<&str> = node.lines().filter(|line| line.starts_with('(')).collect();
             assert_eq!(listed.len(), names.len());
             for (line, i) in listed.iter().zip(names.clone()) {
@@ -2084,7 +2133,8 @@ mod tests {
                 .unwrap();
         }
         let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
-        let keys: Vec<&str> = object(&pdf, 12)
+        // The links are 5 to 11, their actions 12 to 18 and the name tree 19.
+        let keys: Vec<&str> = object(&pdf, 19)
             .lines()
             .filter_map(|line| line.strip_prefix('(')?.split_once(") ["))
             .map(|(key, _)| key)
@@ -2101,9 +2151,11 @@ mod tests {
                 "_Toc123",
             ]
         );
-        // Each link names its destination by the same key.
-        for (link, key) in (5..12).zip(["Zeta", "R%C3%A9sum%C3%A9", "_Toc123", "%C3%89clair"]) {
-            assert!(object(&pdf, link).ends_with(&format!("/Dest ({key}) >>\n")));
+        // Each link's action names its destination by the same key.
+        let keys = ["Zeta", "R%C3%A9sum%C3%A9", "_Toc123", "%C3%89clair"];
+        for (link, key) in (5..12).zip(keys) {
+            assert!(object(&pdf, link).ends_with(&format!("/A {} 0 R >>\n", link + 7)));
+            assert!(object(&pdf, link + 7).ends_with(&format!("/D ({key}) >>\n")));
         }
     }
 
@@ -2122,14 +2174,121 @@ mod tests {
         let pdf = doc.to_bytes().unwrap();
         assert_xref_is_right(&pdf);
         let pdf = String::from_utf8_lossy(&pdf).into_owned();
+        // The links are 5 to 7, their actions 8 to 10 and the name tree 11.
         for (link, key) in (5..8).zip([r"a\)b", r"c\(d", r"e\\f"]) {
-            assert!(object(&pdf, link).ends_with(&format!("/Dest ({key}) >>\n")));
+            assert!(object(&pdf, link).ends_with(&format!("/A {} 0 R >>\n", link + 3)));
+            assert!(object(&pdf, link + 3).ends_with(&format!("/D ({key}) >>\n")));
         }
         assert_eq!(
-            object(&pdf, 8),
-            "8 0 obj\n<< /Names [\n(a\\)b) [3 0 R /XYZ 0 0 null]\n(c\\(d) [3 0 R /XYZ 0 0 null]\n\
+            object(&pdf, 11),
+            "11 0 obj\n<< /Names [\n(a\\)b) [3 0 R /XYZ 0 0 null]\n(c\\(d) [3 0 R /XYZ 0 0 null]\n\
              (e\\\\f) [3 0 R /XYZ 0 0 null]\n] >>\n"
         );
+    }
+
+    #[test]
+    fn links_of_one_target_share_one_action_on_every_page() {
+        // A link over three lines of two pages, another's between, and one more box of it
+        // added to the first page after the second was handed out.
+        let mut doc = Document::new();
+        doc.set_compression(Compression::None);
+        let site = LinkTarget::Uri("https://example.com/long".to_owned());
+        let top = LinkTarget::Destination("top".to_owned());
+        let first = doc.add_page(PageSize::A4).unwrap();
+        first.add_destination("top", Pt(0.0), Pt(800.0)).unwrap();
+        first
+            .add_link(Pt(0.0), Pt(100.0), Pt(10.0), Pt(10.0), &site)
+            .unwrap();
+        first
+            .add_link(Pt(0.0), Pt(80.0), Pt(10.0), Pt(10.0), &top)
+            .unwrap();
+        first
+            .add_link(Pt(0.0), Pt(60.0), Pt(10.0), Pt(10.0), &site)
+            .unwrap();
+        doc.add_page(PageSize::A4)
+            .unwrap()
+            .add_link(Pt(0.0), Pt(800.0), Pt(10.0), Pt(10.0), &site)
+            .unwrap();
+        doc.page_mut(0)
+            .unwrap()
+            .add_link(Pt(0.0), Pt(40.0), Pt(10.0), Pt(10.0), &site)
+            .unwrap();
+        // The links keep one target, each, on both pages.
+        let targets: Vec<*const Target> = doc
+            .pages
+            .iter()
+            .flat_map(|page| &page.links)
+            .map(|link| std::ptr::from_ref(link.target()))
+            .collect();
+        assert_eq!(targets.len(), 5);
+        let site_target = targets[0];
+        assert_eq!(
+            targets,
+            [
+                site_target,
+                targets[1],
+                site_target,
+                site_target,
+                site_target
+            ]
+        );
+        assert_ne!(targets[1], site_target);
+        // And the file writes each target once: pages and contents are 3 to 6, the links 7
+        // to 10 on the first page and 11 on the second, the two actions 12 and 13.
+        let pdf = doc.to_bytes().unwrap();
+        assert_xref_is_right(&pdf);
+        let pdf = String::from_utf8_lossy(&pdf);
+        for (link, action) in [(7, 12), (8, 13), (9, 12), (10, 12), (11, 12)] {
+            assert!(object(&pdf, link).ends_with(&format!("/A {action} 0 R >>\n")));
+        }
+        assert_eq!(
+            object(&pdf, 12),
+            "12 0 obj\n<< /S /URI /URI (https://example.com/long) >>\n"
+        );
+        assert_eq!(object(&pdf, 13), "13 0 obj\n<< /S /GoTo /D (top) >>\n");
+        assert_eq!(pdf.matches("example.com/long").count(), 1);
+    }
+
+    #[test]
+    fn a_page_put_into_another_document_keeps_the_targets_of_its_links() {
+        // The page handed out last keeps the document's checked targets; swapped into
+        // another document, each document still writes its own links' targets.
+        let site = LinkTarget::Uri("https://example.com/".to_owned());
+        let other = LinkTarget::Uri("https://example.org/".to_owned());
+        let mut first = Document::new();
+        first
+            .add_page(PageSize::A4)
+            .unwrap()
+            .add_link(Pt(0.0), Pt(0.0), Pt(10.0), Pt(10.0), &site)
+            .unwrap();
+        let mut second = Document::new();
+        second
+            .add_page(PageSize::A4)
+            .unwrap()
+            .add_link(Pt(0.0), Pt(0.0), Pt(10.0), Pt(10.0), &other)
+            .unwrap();
+        std::mem::swap(first.page_mut(0).unwrap(), second.page_mut(0).unwrap());
+        for (doc, target) in [(&mut first, &site), (&mut second, &other)] {
+            doc.page_mut(0)
+                .unwrap()
+                .add_link(Pt(0.0), Pt(20.0), Pt(10.0), Pt(10.0), target)
+                .unwrap();
+        }
+        let first = String::from_utf8_lossy(&first.to_bytes().unwrap()).into_owned();
+        let second = String::from_utf8_lossy(&second.to_bytes().unwrap()).into_owned();
+        // Each document now has a link of each target, and writes each target once.
+        for pdf in [&first, &second] {
+            assert_eq!(
+                pdf.matches("/URI (https://example.com/)").count(),
+                1,
+                "{pdf}"
+            );
+            assert_eq!(
+                pdf.matches("/URI (https://example.org/)").count(),
+                1,
+                "{pdf}"
+            );
+        }
     }
 
     #[test]
@@ -2284,6 +2443,8 @@ mod tests {
             "5 0 obj\n<< /Type /Annot /Subtype /Link /Rect [-32767 -32767 -32766.99 -32766.99]"
         ));
         assert!(object(&pdf, 6).contains("/Rect [0 0 32767 32767]"));
-        assert!(object(&pdf, 7).ends_with(" [3 0 R /XYZ 32767 -32767 null]\n] >>\n"));
+        assert!(object(&pdf, 7).starts_with("7 0 obj\n<< /S /URI /URI (%C3%A9%C3%A9"));
+        assert!(object(&pdf, 8).starts_with("8 0 obj\n<< /S /GoTo /D (aaaa"));
+        assert!(object(&pdf, 9).ends_with(" [3 0 R /XYZ 32767 -32767 null]\n] >>\n"));
     }
 }

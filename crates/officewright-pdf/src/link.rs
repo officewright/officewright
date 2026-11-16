@@ -1,8 +1,10 @@
 //! Links and the named destinations they go to: link annotations (ISO 32000-1, 12.5.6.5)
 //! and the `/Dests` name tree of the catalog (12.3.2.3).
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::ops::Range;
+use std::sync::Arc;
 
 use officewright_core::Pt;
 
@@ -47,11 +49,15 @@ pub enum LinkTarget {
 pub(crate) struct Link {
     /// The lower-left and upper-right corners.
     rect: [f64; 4],
-    target: Target,
+    /// Shared by the links of one target that [`LinkTargets`] gave out, so that a link over
+    /// many lines keeps its target once (#581).
+    target: Arc<Target>,
 }
 
-#[derive(Clone, Debug)]
-enum Target {
+/// Where a link goes, checked and in the form the file stores: the action that every
+/// link to it shares, written once.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Target {
     /// The URI, percent-encoded.
     Uri(Vec<u8>),
     /// The destination's name, and its key in the name tree.
@@ -68,55 +74,111 @@ pub(crate) struct Destination {
     y: f64,
 }
 
+/// The targets of links checked so far, each kept once: the links of one target share
+/// it. Only a cache, so that a link that spans many lines does not keep its URI once for
+/// each (#581): the file writes each target once whether or not the links share it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LinkTargets {
+    targets: HashMap<Arc<LinkTarget>, Arc<Target>>,
+    /// The target asked for last, which the boxes of one link ask for one after another:
+    /// found by comparing it, without hashing it again.
+    last: Option<(Arc<LinkTarget>, Arc<Target>)>,
+}
+
+impl LinkTargets {
+    /// `target` checked, the same as for every link to it before.
+    fn get(&mut self, target: &LinkTarget) -> Result<Arc<Target>> {
+        if let Some((asked, checked)) = &self.last {
+            if asked.as_ref() == target {
+                return Ok(Arc::clone(checked));
+            }
+        }
+        let (asked, checked) = match self.targets.get_key_value(target) {
+            Some((asked, checked)) => (Arc::clone(asked), Arc::clone(checked)),
+            None => {
+                let checked = Arc::new(match target {
+                    LinkTarget::Uri(uri) => {
+                        let encoded = uri_key(uri);
+                        check_length("URI length in bytes", encoded.len())?;
+                        Target::Uri(encoded)
+                    }
+                    LinkTarget::Destination(name) => Target::Destination {
+                        name: name.clone(),
+                        key: name_key(name)?,
+                    },
+                });
+                let asked = Arc::new(target.clone());
+                self.targets
+                    .insert(Arc::clone(&asked), Arc::clone(&checked));
+                (asked, checked)
+            }
+        };
+        self.last = Some((asked, Arc::clone(&checked)));
+        Ok(checked)
+    }
+}
+
 impl Link {
-    /// Checks a link of the rectangle with its lower-left corner at (`x`, `y`) and the
-    /// given width and height, to `target`.
-    pub(crate) fn new(x: Pt, y: Pt, width: Pt, height: Pt, target: &LinkTarget) -> Result<Self> {
+    /// Checks the rectangle of a link with its lower-left corner at (`x`, `y`) and the
+    /// given width and height: its corners.
+    pub(crate) fn rect(x: Pt, y: Pt, width: Pt, height: Pt) -> Result<[f64; 4]> {
         check_range("link width", width.0, MIN_LINK_SIDE, MAX_POSITION)?;
         check_range("link height", height.0, MIN_LINK_SIDE, MAX_POSITION)?;
         check_position(x, y)?;
         let (right, top) = (Pt(x.0 + width.0), Pt(y.0 + height.0));
         check_position(right, top)?;
-        let target = match target {
-            LinkTarget::Uri(uri) => {
-                let encoded = uri_key(uri);
-                check_length("URI length in bytes", encoded.len())?;
-                Target::Uri(encoded)
-            }
-            LinkTarget::Destination(name) => Target::Destination {
-                name: name.clone(),
-                key: name_key(name)?,
-            },
-        };
+        Ok([x.0, y.0, right.0, top.0])
+    }
+
+    /// A link of the corners `rect` ([`Self::rect`]) to `target`, checked by `targets`.
+    pub(crate) fn new(
+        rect: [f64; 4],
+        target: &LinkTarget,
+        targets: &mut LinkTargets,
+    ) -> Result<Self> {
         Ok(Self {
-            rect: [x.0, y.0, right.0, top.0],
-            target,
+            rect,
+            target: targets.get(target)?,
         })
+    }
+
+    /// Where the link goes.
+    pub(crate) fn target(&self) -> &Target {
+        &self.target
     }
 
     /// The name of the destination the link goes to, and its key; `None` for a URI.
     fn destination(&self) -> Option<(&str, &[u8])> {
-        match &self.target {
+        match self.target.as_ref() {
             Target::Destination { name, key } => Some((name, key)),
             Target::Uri(_) => None,
         }
     }
 
-    /// The annotation dictionary.
-    pub(crate) fn dictionary(&self) -> Vec<u8> {
+    /// The annotation dictionary, whose action is object `action` ([`Target::action`]).
+    pub(crate) fn dictionary(&self, action: usize) -> Vec<u8> {
         let [left, bottom, right, top] = self.rect.map(number);
-        let mut out = format!(
-            "<< /Type /Annot /Subtype /Link /Rect [{left} {bottom} {right} {top}] /Border [0 0 0] "
+        format!(
+            "<< /Type /Annot /Subtype /Link /Rect [{left} {bottom} {right} {top}] /Border [0 0 0] \
+             /A {action} 0 R >>"
         )
-        .into_bytes();
-        match &self.target {
-            Target::Uri(uri) => {
-                out.extend_from_slice(b"/A << /S /URI /URI ");
+        .into_bytes()
+    }
+}
+
+impl Target {
+    /// The action of every link to it (ISO 32000-1, 12.6.4.7 and 12.6.4.2): an indirect
+    /// object, which the links share (12.5.6.5), so that a link over many lines writes
+    /// its target once.
+    pub(crate) fn action(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        match self {
+            Self::Uri(uri) => {
+                out.extend_from_slice(b"<< /S /URI /URI ");
                 push_string(&mut out, uri);
-                out.extend_from_slice(b" >>");
             }
-            Target::Destination { key, .. } => {
-                out.extend_from_slice(b"/Dest ");
+            Self::Destination { key, .. } => {
+                out.extend_from_slice(b"<< /S /GoTo /D ");
                 push_string(&mut out, key);
             }
         }
