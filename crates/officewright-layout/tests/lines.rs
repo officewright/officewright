@@ -9,8 +9,8 @@ use officewright_core::Pt;
 use officewright_font::FontBook;
 use officewright_layout::fuzzing::{self, LaidOut};
 use officewright_layout::ir::{
-    Document, Indent, Inline, LineSpacing, Paragraph, ParagraphProps, RunFonts, RunStyle,
-    RunStyleId, Spacing, TabStop,
+    CompatMode, Document, DocumentSettings, Indent, Inline, LineSpacing, Paragraph, ParagraphProps,
+    RunFonts, RunStyle, RunStyleId, Spacing, TabStop,
 };
 
 mod common;
@@ -703,33 +703,148 @@ fn end_centre_and_decimal_tabs_align_the_text_after_them() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn a_tab_whose_stop_is_past_the_end_reaches_the_end_and_the_text_wraps() -> TestResult {
-    let book = book()?;
-    let (document, style) = liberation(11.0);
-    let props = ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(300.0))]);
-    let laid = fuzzing::lay_out(
-        &book,
-        &document,
-        &paragraph(
-            style,
-            props,
-            vec![
-                Inline::text("Name", style),
-                Inline::tab(style),
-                Inline::text("Value", style),
-            ],
-        ),
-        200.0,
+/// A document in compatibility mode `mode` whose text is in `family` at 11 pt, and that
+/// style.
+fn eleven_points_in(mode: CompatMode, family: &str) -> (Document, RunStyleId) {
+    let mut document = Document::new(DocumentSettings::default().with_compat_mode(mode));
+    let style = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new(family))
+            .with_size(Pt(11.0)),
     );
+    (document, style)
+}
+
+/// The text of each line of `laid`, and where its tabs start and end.
+fn texts_and_tabs(laid: &LaidOut) -> Vec<(String, Vec<(f64, f64)>)> {
+    laid.lines()
+        .iter()
+        .map(|line| (line.text().to_owned(), line.tabs().to_vec()))
+        .collect()
+}
+
+#[test]
+fn in_word_2013_a_tab_to_a_start_stop_past_the_end_starts_the_next_line() -> TestResult {
+    use officewright_layout::ir::TabKind;
+
+    // E-tab-margin and E-tab-margin-alone, in mode 15: "before", a tab to a stop past
+    // the margin, "after". Word ends the line before the tab, and the tab, alone on the
+    // next line, reaches the end; "after" goes on the line after it.
+    let book = book()?;
+    let (document, style) = eleven_points_in(CompatMode::Word2013, "Liberation Sans");
+    let props = ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(300.0))]);
+    let inlines = vec![
+        Inline::text("Name", style),
+        Inline::tab(style),
+        Inline::text("Value", style),
+    ];
+    let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 200.0);
+    assert_eq!(
+        texts_and_tabs(&laid),
+        [
+            ("Name".to_owned(), vec![]),
+            ("\t".to_owned(), vec![(0.0, 200.0)]),
+            ("Value".to_owned(), vec![])
+        ]
+    );
+    // E-tab-margin, cases 4 to 8, in Carlito, Calibri's metric twin: "(" and two tabs
+    // near the end of a line 451.3 pt long, to automatic stops. The line ends between
+    // the tabs where the first one's stop is in the line, and before the first, after
+    // "(", where it is not, so the text after them goes to the first or the second stop
+    // of the next line.
+    let (in_carlito, carlito) = eleven_points_in(CompatMode::Word2013, "Carlito");
+    for (count, at) in [(86, 36.0), (88, 36.0), (90, 72.0), (92, 72.0), (94, 72.0)] {
+        let inlines = vec![
+            Inline::text(format!("{}(", "x".repeat(count)), carlito),
+            Inline::tab(carlito),
+            Inline::tab(carlito),
+            Inline::text("end", carlito),
+        ];
+        let props = ParagraphProps::default();
+        let laid = fuzzing::lay_out(
+            &book,
+            &in_carlito,
+            &paragraph(carlito, props, inlines),
+            451.3,
+        );
+        let lines = laid.lines();
+        assert_eq!(lines.len(), 2, "{count} x");
+        let end = lines
+            .get(1)
+            .and_then(|line| line.words().last())
+            .ok_or("no end")?;
+        assert_eq!((end.text(), end.start()), ("end", at), "{count} x");
+    }
+    // E-tab-margin, case 3: an end stop past the end is taken at the end of the line.
+    let props = ParagraphProps::default().with_tabs([TabStop::default()
+        .with_position(Pt(220.0))
+        .with_kind(TabKind::End)]);
+    let inlines = vec![
+        Inline::text("before", style),
+        Inline::tab(style),
+        Inline::text("after", style),
+    ];
+    let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 200.0);
     let lines = laid.lines();
-    assert_eq!(lines.len(), 2);
-    let tab = lines
+    assert_eq!(lines.len(), 1);
+    let after = lines
         .first()
-        .and_then(|line| line.tabs().first())
-        .ok_or("no tab")?;
-    assert!((tab.1 - 200.0).abs() < 1e-6);
-    assert_eq!(lines.get(1).map(|line| line.text()), Some("Value"));
+        .and_then(|line| line.words().last())
+        .ok_or("no after")?;
+    assert!((after.end() - 200.0).abs() < 1e-6, "{after:?}");
+    Ok(())
+}
+
+#[test]
+fn before_word_2013_a_tab_goes_to_its_own_stop_past_the_end() -> TestResult {
+    // E-tab-margin-alone-12 and -14: a tab to a start stop 18 pt into the right margin
+    // and one past the edge of the page take the text after them there. The line ends at
+    // the next place it may end after that text, a hypothesis until a Word render.
+    let book = book()?;
+    for mode in [
+        CompatMode::Word2003,
+        CompatMode::Word2007,
+        CompatMode::Word2010,
+    ] {
+        let (document, style) = eleven_points_in(mode, "Liberation Sans");
+        let props =
+            ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(300.0))]);
+        let inlines = vec![
+            Inline::text("Name", style),
+            Inline::tab(style),
+            Inline::text("Value and more", style),
+        ];
+        let value_and_more = paragraph(style, props, inlines);
+        fuzzing::check_lines(&book, &document, &value_and_more, 200.0)?;
+        let laid = fuzzing::lay_out(&book, &document, &value_and_more, 200.0);
+        let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
+        assert_eq!(lines, ["Name\tValue ", "and more"], "{mode:?}");
+        let value = laid
+            .lines()
+            .first()
+            .and_then(|line| line.words().last())
+            .ok_or("no value")?;
+        assert_eq!((value.text(), value.start()), ("Value", 300.0), "{mode:?}");
+        // An automatic stop past the end is not taken: the tab reaches the end, and the
+        // text after it goes on the next line.
+        let inlines = vec![
+            Inline::text("Name", style),
+            Inline::tab(style),
+            Inline::tab(style),
+            Inline::text("Value", style),
+        ];
+        let props = ParagraphProps::default();
+        let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 50.0);
+        let name = width_of(&book, &document, style, "Name");
+        assert_eq!(
+            texts_and_tabs(&laid),
+            [
+                ("Name\t\t".to_owned(), vec![(name, 36.0), (36.0, 50.0)]),
+                ("Value".to_owned(), vec![])
+            ],
+            "{mode:?}"
+        );
+    }
     Ok(())
 }
 
