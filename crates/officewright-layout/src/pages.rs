@@ -1285,10 +1285,13 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             };
             // The last lines of a paragraph kept with the next one whose chain cannot move,
             // as many as widow control lets go on to another page while the rest of its
-            // last piece stays: one, or two with widow control (a hypothesis until a Word
-            // render). Not those of one kept together, nor of one that ends in a page
-            // break, nor of one with `PAGE` fields, which were laid out for the page it
-            // starts on.
+            // last piece stays: one, or two with widow control. Not those of one kept
+            // together, nor of one that ends in a page break, nor of one with `PAGE`
+            // fields, which were laid out for the page it starts on. Word's render shows a
+            // chain that cannot move for a page break in its paragraph, without widow
+            // control (`E-keepnext-break.docx`, case 02); widow control, and chains that
+            // cannot move as they start at the top of a page, at a section's start or
+            // where they were moved once, are hypotheses until a Word render.
             kept_lines = match (chain, self.last_piece.take()) {
                 (Some(start), Some((piece, from)))
                     if start.at_top && !ends_with_break && !props.keep_lines() && !page_field =>
@@ -4269,6 +4272,33 @@ mod tests {
     }
 
     #[test]
+    fn header_rows_too_tall_for_one_page_are_repeated_on_a_later_page_they_fit() {
+        // Even pages, under a header of three 20 pt lines, have a body of 110 pt, odd
+        // ones of 160 pt. A header row of six lines, 120 pt, is left off page 2 for its
+        // height but repeated on page 3, where the table ends: the line after the table
+        // follows it there.
+        let mut document =
+            Document::new(crate::ir::DocumentSettings::default().with_even_and_odd_headers(true));
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let mut rows = vec![row_of(style, &[6], false).with_header(true)];
+        rows.extend((0..8).map(|_| row_of(style, &[1], false)));
+        document.add_section(
+            Section::new(close_frames())
+                .with_headers(HeaderFooterSet::default().with_even(frame_of(style, 3)))
+                .with_blocks(vec![
+                    table_with(rows, 0.0).into(),
+                    lines(style, 1, spacing(0.0, 0.0)),
+                ]),
+        );
+        let counts = pages(&document).iter().map(Vec::len).collect::<Vec<_>>();
+        assert_eq!(counts, [3, 5, 3]);
+    }
+
+    #[test]
     fn a_table_takes_the_space_of_the_paragraphs_around_it() {
         // Design 8.6: a table has no spacing of its own. Below a paragraph with 30 pt after
         // it, the table starts 30 pt lower; the paragraph after it, with 10 pt before it,
@@ -5770,7 +5800,8 @@ mod tests {
         };
         // A section on the next page: it starts page 2, numbered 10; the chain that
         // starts there cannot move, so the last two lines of its first paragraph go on
-        // to page 3 with the three kept together.
+        // to page 3 with the three kept together (a hypothesis until a Word render, see
+        // `Pager::run`).
         assert_eq!(
             summary(SectionStart::NextPage, false, Some(10)),
             [
@@ -5936,6 +5967,51 @@ mod tests {
         assert_eq!(laid[1], [(5, 1..7, 20.0)], "{laid:?}");
         assert_eq!(laid[2], [(6, 0..8, 20.0)], "{laid:?}");
         assert!(split(&full));
+    }
+
+    #[test]
+    fn a_chain_at_the_top_of_a_page_leaves_its_paragraph_what_its_keep_rules_ask() {
+        // A chain that cannot move as it starts the document, a hypothesis until a Word
+        // render (see `Pager::run`): a paragraph kept with the next, with widow control,
+        // and lines kept together after it, more than the body's eight lines in all.
+        let case = |kept: usize, keep_lines: bool, together: usize| {
+            document(|style| {
+                let props = || spacing(0.0, 0.0).with_widow_control(true);
+                one_section(vec![
+                    lines(
+                        style,
+                        kept,
+                        props().with_keep_next(true).with_keep_lines(keep_lines),
+                    ),
+                    lines(style, together, props().with_keep_lines(true)),
+                ])
+            })
+        };
+        let split = |document: &Document| {
+            let (_, report) = laid(document, 100);
+            messages(&report)
+                .iter()
+                .any(|message| message.starts_with("paragraphs kept with the next one"))
+        };
+        // Four lines: the last two go on with the five kept together, and two stay.
+        let four = case(4, false, 5);
+        let laid = pages(&four);
+        assert_eq!(laid[0], [(0, 0..2, 20.0)], "{laid:?}");
+        assert_eq!(laid[1], [(0, 2..4, 20.0), (1, 0..5, 60.0)], "{laid:?}");
+        assert!(!split(&four));
+        // Three lines: the paragraph starts on the page, so two must stay, and two cannot
+        // go with them; all three stay, and the chain is reported split.
+        let three = case(3, false, 6);
+        let laid = pages(&three);
+        assert_eq!(laid[0], [(0, 0..3, 20.0)], "{laid:?}");
+        assert_eq!(laid[1], [(1, 0..6, 20.0)], "{laid:?}");
+        assert!(split(&three));
+        // Kept together, the paragraph stays whole, and the chain is reported split.
+        let whole = case(4, true, 5);
+        let laid = pages(&whole);
+        assert_eq!(laid[0], [(0, 0..4, 20.0)], "{laid:?}");
+        assert_eq!(laid[1], [(1, 0..5, 20.0)], "{laid:?}");
+        assert!(split(&whole));
     }
 
     #[test]
@@ -9914,6 +9990,41 @@ mod tests {
         assert_eq!(pages[0].1.len(), 6);
         assert_eq!(pages[1].1.first(), Some(&text("A", 36.0)));
         assert_eq!(pages[1].1.get(1), Some(&text("A1", 56.0)));
+    }
+
+    #[test]
+    fn a_line_whose_text_fits_the_body_is_not_reported_taller_for_its_spacing() {
+        use crate::ir::NotePosition;
+        // A line spaced at 15 lines, 172.5 pt for 11.5 pt of text, at the top of a body of
+        // 160 pt, referencing a note of one exact 150 pt line, which cannot start below it
+        // with its separator. Nothing moves the line further, and only the room its spacing
+        // adds below its text reaches past the body, so it is not reported taller than the
+        // body.
+        let exact = |height: f64| {
+            ParagraphProps::default()
+                .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(height))))
+        };
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 1, exact(150.0));
+                let spaced = ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Multiple(15.0)));
+                vec![referencing(style, (0, 0), &[note], spaced)]
+            },
+        );
+        let (laid, report) = laid(&document, 100);
+        let laid = laid.expect("pages");
+        assert_eq!(laid.pages.first().map(|page| page.fragments.len()), Some(1));
+        let messages = messages(&report);
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message == "a line is taller than the body of its page"),
+            "{messages:?}"
+        );
     }
 
     #[test]

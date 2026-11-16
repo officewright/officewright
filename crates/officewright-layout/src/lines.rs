@@ -1496,7 +1496,8 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             // The room multiple lines add goes below the text, and at the foot of a page
             // it may reach past the bottom of the body: Word keeps the last of the four
             // lines spaced 3 on page 1 of E-line-multiple, whose text fits, its shading
-            // reaching 3.8 pt below the bottom margin.
+            // reaching 3.8 pt below the bottom margin. That document is in compatibility
+            // mode 15; that older modes do the same is a hypothesis until a Word render.
             LineSpacing::Multiple(factor) if factor >= 1.0 => {
                 let height = natural * factor;
                 (height, top, height - natural)
