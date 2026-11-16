@@ -5057,19 +5057,18 @@ mod tests {
             (0, "AAAAAAAAAA", 56.0),
             (0, "Z", 76.0),
         ];
-        // The soft hyphen's own glyphs, then the hyphen drawn for it, which stands for no
-        // text.
+        // The soft hyphen itself is not drawn, as in Word's PDF, and the hyphen drawn for
+        // it stands for a hyphen-minus.
         const HYPHENATED: &[(usize, &str, f64)] = &[
             (0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 36.0),
-            (0, "\u{ad}", 36.0),
-            (0, "", 36.0),
+            (0, "-", 36.0),
             (0, "AAAAAAAAAA", 56.0),
             (0, "Z", 76.0),
         ];
         const AT_THE_SPACES: &[(usize, &str, f64)] = &[
             (0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 36.0),
             (0, "  ", 36.0),
-            (0, "AA\u{ad}", 56.0),
+            (0, "AA", 56.0),
             (0, "AAAAAAAAAA", 56.0),
             (0, "Z", 76.0),
         ];

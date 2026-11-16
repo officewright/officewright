@@ -1438,7 +1438,13 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let mut breaks = Vec::new();
         for piece in &line.pieces {
             match &piece.kind {
-                PieceKind::Text { item, .. } | PieceKind::Hyphen { item, .. } => {
+                // Soft hyphens of a run of another size make the line no taller, nor
+                // does the hyphen drawn for a soft hyphen (E-soft-hyphen-font: Noto Sans
+                // 20 pt among Calibri 11 pt, lines 13.44 pt apart). A soft hyphen of its
+                // letters' run draws its hyphen as tall as they are.
+                PieceKind::Hyphen { .. } => {}
+                PieceKind::Text { text: drawn, .. } if self.soft_hyphens_only(drawn) => {}
+                PieceKind::Text { item, .. } => {
                     text = true;
                     let metrics = self.text_metrics(*item);
                     extent.add(metrics, self.position(*item));
@@ -1540,6 +1546,14 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             return LineSpacing::Multiple(1.0);
         }
         spacing
+    }
+
+    /// Whether bytes `drawn` of the drawn text are nothing but soft hyphens.
+    fn soft_hyphens_only(&self, drawn: &Range<usize>) -> bool {
+        self.itemized
+            .text
+            .get(drawn.clone())
+            .is_some_and(|text| !text.is_empty() && text.chars().all(|ch| ch == '\u{00AD}'))
     }
 
     /// The vertical metrics of text item `item`: those of its face at the size its
