@@ -1187,18 +1187,46 @@ mod tests {
             1
         );
         assert_eq!(text.matches("<< /S /GoTo /D (Later) >>").count(), 1);
-        // Each link is on its page: two on the first, none on the second, one on the third.
-        let annotations: Vec<usize> = text
+        // Each link is on its page and goes where it goes: the URI and "Later" on the
+        // first, none on the second, "Later" on the third.
+        let object = |number: &str| {
+            let start = format!("\n{number} 0 obj\n");
+            let object = text.split(start.as_str()).nth(1).expect("the object");
+            object.split("endobj").next().unwrap_or("").to_owned()
+        };
+        let reference = |dictionary: &str, key: &str| -> Vec<String> {
+            dictionary
+                .split(key)
+                .nth(1)
+                .and_then(|rest| rest.split(']').next())
+                .unwrap_or("")
+                .split(" 0 R")
+                .map(|number| number.trim().to_owned())
+                .filter(|number| !number.is_empty())
+                .collect()
+        };
+        let links: Vec<Vec<String>> = text
             .split("<< /Type /Page ")
             .skip(1)
             .map(|page| {
                 let dictionary = page.split(">>\n").next().unwrap_or("");
-                dictionary.split("/Annots [").nth(1).map_or(0, |links| {
-                    links.split(']').next().unwrap_or("").matches(" R").count()
-                })
+                reference(dictionary, "/Annots [")
+                    .iter()
+                    .map(|annotation| {
+                        let link = object(annotation);
+                        let action = link
+                            .split("/A ")
+                            .nth(1)
+                            .and_then(|rest| rest.split(" 0 R").next())
+                            .expect("the action");
+                        object(action).trim().to_owned()
+                    })
+                    .collect()
             })
             .collect();
-        assert_eq!(annotations, [2, 0, 1]);
+        let uri = "<< /S /URI /URI (https://example.com/a%20b) >>".to_owned();
+        let later = "<< /S /GoTo /D (Later) >>".to_owned();
+        assert_eq!(links, [vec![uri, later.clone()], vec![], vec![later]]);
         assert!(!text.contains("Missing"));
         let names = text.split("/Names [").nth(1).expect("the name tree");
         assert!(
