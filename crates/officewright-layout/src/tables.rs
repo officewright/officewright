@@ -982,14 +982,17 @@ impl<'d, 'l> Prepared<'d, 'l> {
                     // A link of what the row cuts off goes with it: of text, which is not
                     // drawn, and of a picture, which is drawn whole while its link, the box
                     // of its line, is cut to the row like the line's text. The painter
-                    // leaves out a link the row leaves less of than a link may be.
+                    // leaves out a link the row leaves less of than a link may be; one
+                    // smaller than that in itself, which it leaves out wherever it is, the
+                    // row does not cut off.
                     let cut_off = rest.iter().any(|item| match item {
                         DisplayItem::Link {
                             at, width, height, ..
                         } => {
                             let across = (at.x.0 + width.0).min(right) - at.x.0.max(left);
                             let down = (at.y.0 + height.0).min(below) - at.y.0.max(clip_top);
-                            across.min(down) < crate::links::MIN_LINK
+                            width.0.min(height.0) >= crate::links::MIN_LINK
+                                && across.min(down) < crate::links::MIN_LINK
                         }
                         _ => false,
                     });

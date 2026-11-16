@@ -5864,40 +5864,46 @@ mod tests {
 
     #[test]
     fn links_that_a_row_of_exact_height_cuts_off_are_reported() {
-        use crate::ir::{Indent, LinkTarget, RowHeight};
+        use crate::ir::{Alignment, Indent, LinkTarget, RowHeight};
         const CUT: &str =
             "links of text and pictures that a table row of exact height cuts off are left out";
-        // A row of an exact `height` holding two 20 pt lines, the link on line `on`, its
-        // paragraph indented by `indent`: reported where the row leaves none of the link,
-        // below it or beside it, as an overflow; not where it is inside the row, nor where
-        // the row cuts it only in part.
-        let reported = |height: f64, on: usize, indent: f64| {
-            let document = document(|style| {
-                let link = [
-                    Inline::link_start(LinkTarget::Uri("u".into())),
-                    Inline::text("A", style),
-                    Inline::link_end(),
-                ];
-                let mut inlines = Vec::new();
-                for line in 1..=2 {
-                    if line > 1 {
-                        inlines.push(Inline::line_break(BreakClear::None, style));
-                    }
-                    if line == on {
-                        inlines.extend(link.clone());
-                    } else {
-                        inlines.push(Inline::text("A", style));
-                    }
+        // A row of an exact `height` holding two 20 pt lines, the link over `linked`, spaced
+        // by `letters`, between two `A` on line `on`, its paragraph with `props`: reported
+        // where the row leaves none of the link, below it or beside it, as an overflow; not
+        // where it is inside the row, nor where the row cuts it only in part, nor where the
+        // link is too small to be one anywhere.
+        let reported = |height: f64, on: usize, props: ParagraphProps, (linked, letters)| {
+            let mut document = Document::default();
+            let font = RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0));
+            let style = document.add_run_style(font.clone());
+            let spaced = document.add_run_style(font.with_letter_spacing(Pt(letters)));
+            let link = [
+                Inline::link_start(LinkTarget::Uri("u".into())),
+                Inline::text(linked, spaced),
+                Inline::link_end(),
+            ];
+            let mut inlines = Vec::new();
+            for line in 1..=2 {
+                if line > 1 {
+                    inlines.push(Inline::line_break(BreakClear::None, style));
                 }
-                let props = spacing(0.0, 0.0).with_indent(Indent::default().with_start(Pt(indent)));
-                let row = Row::default()
-                    .with_height(RowHeight::Exact(Pt(height)))
-                    .with_cells([Cell::default().with_blocks([Paragraph::new(style)
-                        .with_props(props)
-                        .with_inlines(inlines)
-                        .into()])]);
-                vec![Section::new(setup()).with_blocks(vec![table_with(vec![row], 0.0).into()])]
-            });
+                if line == on {
+                    inlines.push(Inline::text("A", style));
+                    inlines.extend(link.clone());
+                }
+                inlines.push(Inline::text("A", style));
+            }
+            let row = Row::default()
+                .with_height(RowHeight::Exact(Pt(height)))
+                .with_cells([Cell::default().with_blocks([Paragraph::new(style)
+                    .with_props(props)
+                    .with_inlines(inlines)
+                    .into()])]);
+            document.add_section(
+                Section::new(setup()).with_blocks(vec![table_with(vec![row], 0.0).into()]),
+            );
             let (laid, report) = laid(&document, 10);
             laid.expect("pages");
             report
@@ -5906,15 +5912,27 @@ mod tests {
                 .find(|entry| entry.message() == CUT)
                 .map(crate::report::ReportEntry::kind)
         };
-        assert_eq!(reported(20.0, 2, 0.0), Some(ReportKind::Overflow));
-        assert_eq!(reported(20.0, 1, 0.0), None);
+        let plain = || spacing(0.0, 0.0);
+        let a = ("A", 0.0);
+        assert_eq!(reported(20.0, 2, plain(), a), Some(ReportKind::Overflow));
+        assert_eq!(reported(20.0, 1, plain(), a), None);
         // Line 2, from 20 to 40, in a row of 30: cut in part, and kept as far as the row.
-        assert_eq!(reported(30.0, 2, 0.0), None);
-        // Line 1 inside a row of 30, but 60 pt left of the cell, which the row clips to.
-        assert_eq!(reported(30.0, 1, -60.0), Some(ReportKind::Overflow));
+        assert_eq!(reported(30.0, 2, plain(), a), None);
+        // Line 1 inside a row of 30, but 60 pt left of the cell, which the row clips to,
+        // or right of it.
+        let left = plain().with_indent(Indent::default().with_start(Pt(-60.0)));
+        assert_eq!(reported(30.0, 1, left, a), Some(ReportKind::Overflow));
+        let right = plain()
+            .with_alignment(Alignment::End)
+            .with_indent(Indent::default().with_end(Pt(-60.0)));
+        assert_eq!(reported(30.0, 1, right, a), Some(ReportKind::Overflow));
         // Line 2 in a row of 20.005 pt: 0.005 pt of it inside the row, less than a link may
         // be, so the painter leaves the link out.
-        assert_eq!(reported(20.005, 2, 0.0), Some(ReportKind::Overflow));
+        assert_eq!(reported(20.005, 2, plain(), a), Some(ReportKind::Overflow));
+        // Inside the row, a link over a character of no width, and one over an `A` of
+        // 0.005 pt, its letters spaced by -5.995 pt: too small for a link on any page.
+        assert_eq!(reported(30.0, 1, plain(), ("\u{200B}", 0.0)), None);
+        assert_eq!(reported(30.0, 1, plain(), ("A", -5.995)), None);
     }
 
     #[test]
