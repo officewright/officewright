@@ -312,6 +312,35 @@ mod tests {
     }
 
     #[test]
+    fn a_line_beside_an_object_with_two_sides_as_wide_goes_on_the_left() {
+        // A column from 72 to 524, an object from 248 to 348 with its distances: 176 pt on
+        // each side. Where the larger side is taken, or both sides allow text, the left
+        // goes first.
+        let edges = (72.0, 524.0);
+        let at = |side| {
+            room(
+                &[square(side, (248.0, 348.0), (0.0, 100.0))],
+                10.0,
+                12.0,
+                edges,
+            )
+        };
+        let left = Room {
+            above: 0.0,
+            span: Some((72.0, 248.0)),
+            sides: false,
+        };
+        assert_eq!(at(WrapSide::Largest), left);
+        assert_eq!(
+            at(WrapSide::BothSides),
+            Room {
+                sides: true,
+                ..left
+            }
+        );
+    }
+
+    #[test]
     fn a_line_with_no_room_beside_an_object_goes_below_it() {
         let edges = (72.0, 523.0);
         // Top and bottom: below the band, even with room beside it.
