@@ -909,17 +909,21 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     ///
     /// The piece takes the lines that fit above their notes, as a paragraph does: the row
     /// is cut where the notes of the lines it takes start on the page, and where one of
-    /// those notes is cut, it takes no line of a later paragraph of that note's cell, nor,
-    /// in Word 2013 and later, a line that references a note after it, which goes wholly
-    /// to the next page (`pages::footnotes`' rules for a paragraph's lines). Where that leaves out a line
+    /// those notes is cut, it takes nothing of that note's cell after its paragraph (a
+    /// later paragraph or a nested table), nor, in Word 2013 and later, a later line that
+    /// references a note after it, which goes wholly to the next page (`pages::footnotes`'
+    /// rules for a paragraph's lines); the line of the cut note keeps the notes it
+    /// references after it, which go wholly to the next page. Where that leaves out a line
     /// whose note cannot start even right under it, Word 2013 and later cut the row above
     /// it, and older modes keep it, and the lines after it as far as they fit above the
     /// notes before, and their notes go wholly to the next page. Word's render of
     /// `E-footnote-table.docx` (mode 15) shows a row cut three lines higher for a note of
     /// its third line. Hypotheses until a Word render: the older modes' rule in a table;
     /// that with notes in more cells of a row the cut comes as high as their notes need in
-    /// every cell, and that a note cut keeps none of the other cells' lines from the page;
-    /// and that a row's least height is filled only as far as the room its notes leave.
+    /// every cell; that a note cut keeps nothing of the other cells from the page but, in
+    /// Word 2013 and later, a line of any cell that references a later note, as a later
+    /// line of its own cell; and that a row's least height is filled only as far as the
+    /// room its notes leave.
     /// On a page that holds nothing else, where not even the least piece leaves its notes
     /// room to start, the least piece goes on and its notes wholly to the next page. The
     /// room found is the least that puts the piece found, so that a piece filled to a
@@ -1040,8 +1044,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             return Ok(None);
         };
         // The first note that does not end on the page is cut, and those after it go
-        // wholly to the next page: the piece takes no line of a later paragraph of the cut
-        // note's cell, nor, in Word 2013 and later, a line referencing a note after it.
+        // wholly to the next page: the piece takes nothing of the cut note's cell after
+        // its paragraph, nor, in Word 2013 and later, a later line referencing a note
+        // after it.
         let modern = self.document.settings().compat_mode() >= CompatMode::Word2013;
         if let Some(cut) = plan.notes.iter().position(|placed| !placed.ends()) {
             let Some(&(_, at)) = referenced.get(cut) else {
@@ -1050,10 +1055,17 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             let Some(line) = trial.lines.get(at) else {
                 return Ok(None);
             };
-            let later_paragraph = trial.lines.iter().skip(at + 1).any(|other| {
-                other.cell == line.cell && !std::ptr::eq(other.paragraph, line.paragraph)
-            });
-            if later_paragraph || (modern && referenced.len() > cut + 1) {
+            let after = trial
+                .last
+                .get(line.cell)
+                .copied()
+                .flatten()
+                .is_some_and(|part| part > line.part);
+            let later_note = referenced
+                .iter()
+                .skip(cut + 1)
+                .any(|&(_, first)| first > at);
+            if after || (modern && later_note) {
                 return Ok(None);
             }
         }

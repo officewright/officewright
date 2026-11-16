@@ -712,13 +712,15 @@ impl<'d, 'l> Prepared<'d, 'l> {
         match self.decide(laid, room, (fresh, split))? {
             Decision::Whole(heights) => {
                 let mut lines = Vec::new();
+                let mut last = Vec::new();
                 let mut top = 0.0;
                 let mut cell = 0;
                 for ((row, height), cells) in rows.clone().zip(&heights).zip(&laid.cells) {
                     top += self.thickness(row);
                     for laid_cell in cells.iter().flatten() {
                         let units = laid_cell.next..laid_cell.content.units.len();
-                        lines.extend(laid_cell.content.lines(units, cell));
+                        lines.extend(laid_cell.content.lines(units.clone(), cell));
+                        last.push(laid_cell.content.last_part(units));
                         cell += 1;
                     }
                     top += height;
@@ -727,11 +729,12 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 // where it does not, the next band's top border or the line that closes
                 // the page takes its room.
                 let border = self.thickness(rows.end);
-                let last = rows.end == self.rows.len();
+                let ends = rows.end == self.rows.len();
                 Some(Trial {
-                    height: top + if last { border } else { 0.0 },
-                    below: if last { 0.0 } else { border },
+                    height: top + if ends { border } else { 0.0 },
+                    below: if ends { 0.0 } else { border },
                     lines,
+                    last,
                 })
             }
             Decision::Cut(takes) => {
@@ -745,17 +748,14 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 };
                 let above = self.thickness(rows.start);
                 let height = above + self.cut_content(laid, &takes, room)? + below;
-                let lines = laid
-                    .cells
-                    .first()?
-                    .iter()
-                    .flatten()
-                    .zip(&takes)
-                    .enumerate()
-                    .flat_map(|(index, (cell, take))| {
-                        cell.content.lines(cell.next..cell.next + take, index)
-                    })
-                    .collect();
+                let mut lines = Vec::new();
+                let mut last = Vec::new();
+                let cells = laid.cells.first()?.iter().flatten().zip(&takes);
+                for (index, (cell, take)) in cells.enumerate() {
+                    let units = cell.next..cell.next + take;
+                    lines.extend(cell.content.lines(units.clone(), index));
+                    last.push(cell.content.last_part(units));
+                }
                 Some(Trial {
                     height,
                     below: if closed {
@@ -764,6 +764,7 @@ impl<'d, 'l> Prepared<'d, 'l> {
                         self.thickness(rows.end)
                     },
                     lines,
+                    last,
                 })
             }
         }
@@ -1636,11 +1637,14 @@ enum Decision {
 
 /// What a piece of a band would take ([`Prepared::trial`]): its height, the borders it
 /// draws included, the border below it that it does not draw, which the next band or the
-/// line closing its page takes, and the lines of paragraphs among the units it takes.
+/// line closing its page takes, the lines of paragraphs among the units it takes, and of
+/// each of its cells, counted through the piece's cells, the paragraph or nested table
+/// (its index among the cell's) of the last unit it takes, `None` where it takes none.
 pub(crate) struct Trial<'l, 'd> {
     pub(crate) height: f64,
     pub(crate) below: f64,
     pub(crate) lines: Vec<TrialLine<'l, 'd>>,
+    pub(crate) last: Vec<Option<usize>>,
 }
 
 impl Trial<'_, '_> {
@@ -1651,13 +1655,15 @@ impl Trial<'_, '_> {
 }
 
 /// A line of a paragraph that a piece takes: its paragraph, the paragraph's layout, its
-/// index there, and the cell it is in, counted through the piece's cells.
+/// index there, the cell it is in, counted through the piece's cells, and the paragraph's
+/// index among the cell's paragraphs and nested tables.
 #[derive(Clone, Copy)]
 pub(crate) struct TrialLine<'l, 'd> {
     pub(crate) paragraph: &'d Paragraph,
     pub(crate) layout: &'l ParagraphLayout,
     pub(crate) line: usize,
     pub(crate) cell: usize,
+    pub(crate) part: usize,
 }
 
 /// A piece of a band, put on a page.
@@ -1836,9 +1842,20 @@ impl<'d> Stacked<'d> {
                     layout,
                     line: unit.index,
                     cell,
+                    part: unit.part,
                 }),
                 Part::Table { .. } => None,
             })
+    }
+
+    /// The paragraph or nested table, by its index among the content's, of the last of
+    /// units `units`; `None` where there are none.
+    fn last_part(&self, units: Range<usize>) -> Option<usize> {
+        let last = units
+            .end
+            .checked_sub(1)
+            .filter(|last| *last >= units.start)?;
+        self.units.get(last).map(|unit| unit.part)
     }
 
     /// Paints units `units`: the paragraphs' lines and the nested tables' bands among
