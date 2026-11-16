@@ -66,10 +66,12 @@ rows repeated. It draws inline PNG and JPEG pictures and floating ones where the
 anchored, text boxes in the line and floating with their paragraphs, insets, fill and
 line, the numbers of references to footnotes and endnotes, footnotes under their
 separator at the bottom of the page of their reference, or beneath the page's text
-where the section places them so (a note that does not fit below its line is cut: what
-fits stays, followed by the continuation notice if the document has one, and the rest
-goes on at the top of the next page's notes under the continuation separator), and
-underlines, strikethrough, highlight and shading.
+where the section places them so (a note that does not fit below its line is cut where
+its widow control lets it: what fits stays, followed by the continuation notice if the
+document has one, and the rest goes on at the top of the next page's notes under the
+continuation separator; where not even the start of the note fits, the line moves to the
+next page with it, or, in documents in the compatibility mode of Word 2010 or older, the
+note goes there whole), and underlines, strikethrough, highlight and shading.
 Much of what it shows otherwise than Word would, such as a substituted font or something
 not laid out yet, it reports: the command line prints it as notes, and the C library and
 Rust return it as a report.
