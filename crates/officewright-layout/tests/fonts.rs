@@ -399,6 +399,43 @@ fn every_test_font_is_within_the_budget_of_its_layout_tables() -> TestResult {
 }
 
 #[test]
+fn a_symbol_of_a_font_that_is_not_installed_is_reported_whatever_stands_in() -> TestResult {
+    // Times New Roman is not installed; Liberation Serif stands in for it and has a glyph
+    // at U+F004 (#567). Its symbol F004 is drawn with that glyph, and reported all the same,
+    // since the font it names is not there.
+    let book = book()?;
+    let mut document = Document::default();
+    let id = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Calibri"))
+            .with_size(Pt(11.0)),
+    );
+    let paragraph = fuzzing::paragraph(
+        &book,
+        &document,
+        &[Inline::symbol("Times New Roman", 0xF004, id)],
+    );
+    let runs: Vec<(&str, Option<&str>)> = paragraph
+        .runs()
+        .iter()
+        .map(|run| (run.text(), run.face()))
+        .collect();
+    assert_eq!(runs, [("\u{F004}", Some("Liberation Serif"))]);
+    let messages: Vec<&str> = paragraph
+        .report()
+        .iter()
+        .map(|entry| entry.message())
+        .collect();
+    assert!(
+        messages.contains(
+            &"symbol F004 of \"Times New Roman\" cannot be drawn: the font is not installed"
+        ),
+        "{messages:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn a_symbol_that_is_a_soft_hyphen_stays_with_the_character_before_it() -> TestResult {
     // Symbol 00AD of Noto Sans, which is no symbol font, is its soft hyphen (issue #164).
     // Its symbol F0AD is U+F0AD, which it has no glyph for, in a run of its own, as Word
