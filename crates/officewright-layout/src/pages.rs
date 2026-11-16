@@ -477,6 +477,15 @@ fn paginate_with<S: PageSink>(
                     ),
                 );
             }
+            if notes.unplaced(&pager.noted) {
+                pager.fonts.report_once(
+                    ReportKind::FeatureUnsupported,
+                    &Location::default(),
+                    "notes that start their numbers again on each page but that no page lays \
+                     out are numbered through their section"
+                        .to_owned(),
+                );
+            }
             return Ok(Laid {
                 sink: pager.sink,
                 lines,
@@ -11324,6 +11333,111 @@ mod tests {
         assert_eq!(texts(&pages[1]), ["A1", "1", "N"]);
     }
 
+    /// A document of one section that numbers its footnotes, and its endnotes where
+    /// `endnotes` says so, again on each page, the blocks `make` gives.
+    fn numbered_on_each_page(
+        endnotes: bool,
+        make: impl FnOnce(&mut Document, RunStyleId, RunStyleId) -> Vec<Block>,
+    ) -> Document {
+        use crate::ir::{
+            NoteKind, NotePosition, NoteProps, NoteRestart, NoteSeparators, VerticalPosition,
+        };
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let mark = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0))
+                .with_vertical(VerticalPosition::Superscript),
+        );
+        document.set_note_separators(
+            NoteKind::Footnote,
+            NoteSeparators::default()
+                .with_separator([holding(style, vec![Inline::separator(style)])])
+                .with_continuation_separator([holding(
+                    style,
+                    vec![Inline::continuation_separator(style)],
+                )]),
+        );
+        let blocks = make(&mut document, style, mark);
+        let section = Section::new(setup()).with_footnotes(
+            NoteProps::footnotes()
+                .with_position(NotePosition::PageBottom)
+                .with_restart(NoteRestart::EachPage),
+        );
+        let section = if endnotes {
+            section.with_endnotes(NoteProps::endnotes().with_restart(NoteRestart::EachPage))
+        } else {
+            section
+        };
+        document.add_section(section.with_blocks(blocks));
+        document
+    }
+
+    #[test]
+    fn notes_numbered_again_on_each_page_that_no_page_lays_out_are_reported() {
+        use crate::ir::{Note, NoteKind};
+        const NUMBERED: &str = "notes that start their numbers again on each page but that no \
+                                page lays out are numbered through their section";
+        // A footnote of a table cell, which no page lays out yet, beside one of the body
+        // (review of #603): the cell's keeps its number through the section, and that is
+        // reported.
+        let document = numbered_on_each_page(false, |document, style, mark| {
+            let notes = [(); 2].map(|()| footnote(document, (style, mark), 1, spacing(0.0, 0.0)));
+            let row = Row::default().with_cells([Cell::default().with_blocks([referencing(
+                style,
+                (0, 0),
+                &[notes[0]],
+                spacing(0.0, 0.0),
+            )])]);
+            vec![
+                table_with(vec![row], 0.0).into(),
+                referencing(style, (0, 0), &[notes[1]], spacing(0.0, 0.0)),
+            ]
+        });
+        let (_, reported) = noted_pages(&document);
+        assert!(reported.iter().any(|m| m == NUMBERED), "{reported:?}");
+        // An endnote of a section that numbers its endnotes again on each page: the
+        // pages place footnotes only, so it is numbered through the section.
+        let document = numbered_on_each_page(true, |document, style, _| {
+            let note = document.add_note(Note::new(NoteKind::Endnote, []));
+            vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+        });
+        let (_, reported) = noted_pages(&document);
+        assert!(reported.iter().any(|m| m == NUMBERED), "{reported:?}");
+    }
+
+    #[test]
+    fn a_note_going_on_from_the_page_before_does_not_count_on_its_page() {
+        // A note of nine lines, cut at the bottom of page 1, goes on on page 2, where the
+        // paragraph after a page break references a note of one line (review of #603):
+        // that note is the first of page 2, and shows 1.
+        let document = numbered_on_each_page(false, |document, style, mark| {
+            let long = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+            let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+            vec![
+                referencing(style, (0, 0), &[long], spacing(0.0, 0.0)),
+                referencing(
+                    style,
+                    (0, 0),
+                    &[short],
+                    spacing(0.0, 0.0).with_page_break_before(true),
+                ),
+            ]
+        });
+        let (pages, _) = noted_pages(&document);
+        let texts = |page: &Separated| -> Vec<String> {
+            page.1.iter().map(|(text, _)| text.clone()).collect()
+        };
+        // Page 2: the reference, the rest of the long note under the continuation
+        // separator, then the short note.
+        assert_eq!(texts(&pages[1]), ["A1", "N", "N", "N", "1", "N"]);
+    }
+
     #[test]
     fn note_numbers_that_never_settle_on_their_pages_are_reported() {
         use crate::ir::{Note, NoteKind, NotePosition, NoteProps, NoteRestart, NoteSeparators};
@@ -11376,6 +11490,11 @@ mod tests {
             reported.iter().any(|m| m
                 == "the numbers of notes that start again on each page changed in each of 3 \
                     layouts; they show those of the one before the last"),
+            "{reported:?}"
+        );
+        // The document counts no pages: nothing is said of NUMPAGES.
+        assert!(
+            !reported.iter().any(|m| m.contains("NUMPAGES")),
             "{reported:?}"
         );
     }

@@ -22,10 +22,6 @@ pub(crate) struct NoteNumbers {
     /// How numbers are written otherwise than their formats say: in decimal, or in
     /// English for a language without words.
     pub(crate) departures: Departures,
-    /// Whether a note is numbered in a section that starts the numbers of its kind again
-    /// on each page, which a layout pass numbers as the pass before placed the notes on
-    /// their pages, the first through the section ([`by_page`](Self::by_page)).
-    pub(crate) each_page: bool,
 }
 
 /// How a note in a section that numbers its notes again on each page is numbered.
@@ -115,6 +111,14 @@ impl NoteNumbers {
             }
         }
         (numbers.numbers != self.numbers).then_some(numbers)
+    }
+
+    /// Whether a note numbered again on each page is on none of `pages`, the notes each
+    /// page holds, so that it keeps the number through its section: an endnote, or a
+    /// footnote no page lays out.
+    pub(crate) fn unplaced(&self, pages: &[Vec<NoteId>]) -> bool {
+        let placed: HashSet<NoteId> = pages.iter().flatten().copied().collect();
+        self.paged.keys().any(|note| !placed.contains(note))
     }
 
     /// The text of the number of `note`; `None` for a note no reference numbers.
@@ -251,7 +255,6 @@ impl Walk<'_, '_> {
             .run_style(style)
             .and_then(|style| style.language().latin());
         if props.restart() == NoteRestart::EachPage {
-            self.numbers.each_page = true;
             self.numbers.paged.insert(
                 note,
                 Paged {
@@ -384,7 +387,7 @@ mod tests {
             headed_in_box,
         ];
         assert!(!unframed.iter().any(|&id| numbers.framed(id)));
-        assert!(numbers.departures == Departures::default() && !numbers.each_page);
+        assert!(numbers.departures == Departures::default() && !numbers.unplaced(&[]));
     }
 
     #[test]
@@ -431,6 +434,58 @@ mod tests {
                 }
             )
         );
+    }
+
+    #[test]
+    fn footnotes_numbered_on_count_no_endnotes_before_them() {
+        // Section 0 references an endnote; section 1 numbers its footnotes on from 1: the
+        // first footnote of the document shows 1, the endnotes being counted apart.
+        let mut document = Document::default();
+        let style = document.add_run_style(RunStyle::default());
+        let endnote = document.add_note(Note::new(NoteKind::Endnote, []));
+        let footnote = document.add_note(Note::new(NoteKind::Footnote, []));
+        for note in [endnote, footnote] {
+            document.add_section(Section::new(PageSetup::default()).with_blocks([holding(
+                style,
+                vec![Inline::note_reference(note, false, style)],
+            )]));
+        }
+        let numbers = NoteNumbers::new(&document);
+        assert_eq!(numbers.text(endnote), Some("i"));
+        assert_eq!(numbers.text(footnote), Some("1"));
+    }
+
+    #[test]
+    fn notes_numbered_again_on_each_page_are_written_in_the_language_of_their_reference() {
+        use crate::ir::Language;
+        // A note in German, numbered again on each page in words: on its page it is the
+        // first again, "Eins".
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default().with_language(Language::default().with_latin(Some("de-DE".into()))),
+        );
+        let notes: Vec<NoteId> = (0..2)
+            .map(|_| document.add_note(Note::new(NoteKind::Footnote, [])))
+            .collect();
+        let paged = NoteProps::footnotes()
+            .with_format(NumberFormat::CardinalText)
+            .with_restart(NoteRestart::EachPage);
+        document.add_section(
+            Section::new(PageSetup::default())
+                .with_footnotes(paged)
+                .with_blocks([holding(
+                    style,
+                    notes
+                        .iter()
+                        .map(|&id| Inline::note_reference(id, false, style))
+                        .collect(),
+                )]),
+        );
+        let numbers = NoteNumbers::new(&document);
+        let by_page = numbers
+            .by_page(&[vec![notes[0]], vec![notes[1]]])
+            .expect("new numbers");
+        assert_eq!(by_page.text(notes[1]), Some("Eins"));
     }
 
     #[test]
@@ -560,9 +615,9 @@ mod tests {
                 Some("1")
             ]
         );
-        // Starting again on each page is numbered through the section, and noted when a
-        // note of a kind that starts again so is numbered: not for a note of the other
-        // kind, nor for none.
+        // Starting again on each page is numbered through the section until a pass puts
+        // the notes on their pages: a note of a kind that starts again so is on no page
+        // until then, not a note of the other kind, nor none.
         let each_page_with = |restarting: NoteKind, referenced: Option<NoteKind>| {
             let mut document = Document::default();
             let style = document.add_run_style(RunStyle::default());
@@ -581,7 +636,7 @@ mod tests {
                 _ => section.with_footnotes(each_page.clone()),
             };
             document.add_section(section.with_blocks([holding(style, inlines)]));
-            NoteNumbers::new(&document).each_page
+            NoteNumbers::new(&document).unplaced(&[])
         };
         let (footnote, endnote) = (NoteKind::Footnote, NoteKind::Endnote);
         assert!(each_page_with(footnote, Some(footnote)));

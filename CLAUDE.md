@@ -68,7 +68,8 @@ crates/
                         fill and outline), the numbers of the references of footnotes and
                         endnotes (references in headers and footers show no number; those of
                         a section that starts them again on each page by the pages a layout
-                        pass puts them on, laid out again until they settle), and
+                        pass puts them on, laid out again until they settle, but notes no
+                        page lays out, such as endnotes, numbered through the section), and
                         footnotes under their separator at the bottom of the page of their
                         reference or beneath its text, a note that does not fit below its line
                         cut where its widow control lets it, with the continuation notice, and
