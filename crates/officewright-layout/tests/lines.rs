@@ -725,7 +725,10 @@ fn texts_and_tabs(laid: &LaidOut) -> Vec<(String, Vec<(f64, f64)>)> {
 
 #[test]
 fn in_word_2013_a_tab_to_a_start_stop_past_the_end_starts_the_next_line() -> TestResult {
-    use officewright_layout::ir::TabKind;
+    use officewright_layout::ir::{
+        AnchoredObject, HorizontalAnchor, ImageData, ImageFormat, ObjectContent, Picture, Size,
+        TabKind, VerticalAnchor,
+    };
 
     // E-tab-margin and E-tab-margin-alone, in mode 15: "before", a tab to a stop past
     // the margin, "after". Word ends the line before the tab, and the tab, alone on the
@@ -792,6 +795,26 @@ fn in_word_2013_a_tab_to_a_start_stop_past_the_end_starts_the_next_line() -> Tes
         .and_then(|line| line.words().last())
         .ok_or("no after")?;
     assert!((after.end() - 200.0).abs() < 1e-6, "{after:?}");
+    // A floating object takes no room in the text (#476): before the tab it leaves the
+    // line nothing that shows, so the tab stays on that line.
+    let (mut document, style) = eleven_points_in(CompatMode::Word2013, "Liberation Sans");
+    let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+    let anchored = Inline::anchored(AnchoredObject::new(
+        ObjectContent::Picture(Picture::new(image)),
+        Size::new(Pt(10.0), Pt(10.0)),
+        HorizontalAnchor::default(),
+        VerticalAnchor::default(),
+    ));
+    let props = ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(300.0))]);
+    let inlines = vec![anchored, Inline::tab(style), Inline::text("Value", style)];
+    let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 200.0);
+    assert_eq!(
+        texts_and_tabs(&laid),
+        [
+            ("\t".to_owned(), vec![(0.0, 200.0)]),
+            ("Value".to_owned(), vec![])
+        ]
+    );
     Ok(())
 }
 
