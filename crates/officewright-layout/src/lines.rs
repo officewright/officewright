@@ -1961,8 +1961,10 @@ fn stretchable_spaces(itemized: &Itemized, text: &Range<usize>) -> usize {
 
 /// Whether justification widens `ch`: the space only. Word keeps a no-break space at its
 /// width and spreads the room over the line's spaces (business/contract-ec-data-processing-
-/// clauses-el, page 2, item ε: «(ΕΕ) 2016/679», joined by U+00A0, is one word in Word's
-/// PDF, 71 pt wide, while the line's other gaps are 20.3 pt).
+/// clauses-el, page 2, item ε: «(ΕΕ)» and «2016/679», joined by U+00A0, are 3.11 pt apart
+/// in Word's PDF, while the line's other gaps are 20.2 to 20.3 pt). The documents that
+/// show it are saved in compatibility mode 14; that mode 15 does the same is a hypothesis
+/// until a rule document shows it (#601).
 fn stretches(ch: char) -> bool {
     ch == ' '
 }
