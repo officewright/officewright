@@ -574,19 +574,21 @@ mod tests {
                 Inline::link_start(uri("logo")),
                 picture(),
                 Inline::link_end(),
+                picture(),
                 Inline::text("A", style),
                 Inline::tab(style),
             ]
         });
         assert_eq!(all_marks(&layout), []);
-        // The pictures are items 0, before the link, and 2, in it, between the runs of
-        // text; the tab after the link is item 4.
+        // The pictures are items 0, before the link, 2, in it, and 3, right after its end,
+        // between the runs of text; the tab after the link is item 5.
         assert_eq!(target_of(&layout.itemized, 0), None);
         assert_eq!(
             target_of(&layout.itemized, 2).as_deref(),
             Some(&uri("logo"))
         );
-        assert_eq!(target_of(&layout.itemized, 4), None);
+        assert_eq!(target_of(&layout.itemized, 3), None);
+        assert_eq!(target_of(&layout.itemized, 5), None);
     }
 
     #[test]

@@ -979,6 +979,13 @@ impl<'d, 'l> Prepared<'d, 'l> {
                         width: Pt(right - left),
                         height: Pt((below - clip_top).max(0.0)),
                     });
+                    // A link of what the row cuts off goes with it: of text, which is not
+                    // drawn, and of a picture, which is drawn whole while its link, the box
+                    // of its line, is cut to the row like the line's text.
+                    let cut_off = rest.iter().any(|item| {
+                        matches!(item, DisplayItem::Link { at, height, .. }
+                            if at.y.0 >= below - EPSILON || at.y.0 + height.0 <= clip_top + EPSILON)
+                    });
                     items.extend(rest);
                     items.push(DisplayItem::PopClip);
                     items.extend(pictures);
@@ -989,6 +996,15 @@ impl<'d, 'l> Prepared<'d, 'l> {
                          row's bottom, as Word cuts it, and pictures there are drawn whole"
                             .to_owned(),
                     );
+                    if cut_off {
+                        context.fonts.report_once(
+                            ReportKind::Overflow,
+                            &self.location,
+                            "links of text and pictures that a table row of exact height cuts \
+                             off are left out"
+                                .to_owned(),
+                        );
+                    }
                 } else {
                     items.extend(content);
                 }

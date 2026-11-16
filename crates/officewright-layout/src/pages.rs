@@ -5857,7 +5857,48 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(boxes, ["image 50 70 30 10", "link 50 70 30 10"]);
+        // The link first, before what the object draws, so that a text box's own links
+        // come after it, over it.
+        assert_eq!(boxes, ["link 50 70 30 10", "image 50 70 30 10"]);
+    }
+
+    #[test]
+    fn links_that_a_row_of_exact_height_cuts_off_are_reported() {
+        use crate::ir::{LinkTarget, RowHeight};
+        const CUT: &str =
+            "links of text and pictures that a table row of exact height cuts off are left out";
+        // A row of an exact 20 pt holding two lines: a link on the second, which the row
+        // cuts off, is reported; one on the first, inside the row, is not.
+        let reported = |second: bool| {
+            let document = document(|style| {
+                let mut inlines = vec![Inline::text("A", style)];
+                let link = [
+                    Inline::link_start(LinkTarget::Uri("u".into())),
+                    Inline::text("A", style),
+                    Inline::link_end(),
+                ];
+                if second {
+                    inlines.push(Inline::line_break(BreakClear::None, style));
+                    inlines.extend(link);
+                } else {
+                    inlines.extend(link);
+                    inlines.push(Inline::line_break(BreakClear::None, style));
+                    inlines.push(Inline::text("A", style));
+                }
+                let row = Row::default()
+                    .with_height(RowHeight::Exact(Pt(20.0)))
+                    .with_cells([Cell::default().with_blocks([Paragraph::new(style)
+                        .with_props(spacing(0.0, 0.0))
+                        .with_inlines(inlines)
+                        .into()])]);
+                vec![Section::new(setup()).with_blocks(vec![table_with(vec![row], 0.0).into()])]
+            });
+            let (laid, report) = laid(&document, 10);
+            laid.expect("pages");
+            messages(&report).iter().any(|m| m == CUT)
+        };
+        assert!(reported(true));
+        assert!(!reported(false));
     }
 
     #[test]

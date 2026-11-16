@@ -1150,8 +1150,8 @@ impl Painting<'_, '_, '_> {
         let (x, y) = float_position(object, &page, anchor);
         let mut items = Vec::new();
         let at = Point { x: Pt(x), y: Pt(y) };
-        self.content(item, object.content(), (at, object.size()), &mut items);
-        // An object in a link takes the link over its frame.
+        // An object in a link takes the link over its frame, before the links of a text
+        // box's own text, which viewers then find over it.
         if let Some(target) = crate::links::target_of(&self.layout.itemized, item) {
             items.push(DisplayItem::Link {
                 at,
@@ -1160,6 +1160,7 @@ impl Painting<'_, '_, '_> {
                 target,
             });
         }
+        self.content(item, object.content(), (at, object.size()), &mut items);
         self.floats.push(Float {
             behind: object.behind_text(),
             z_order: object.z_order(),

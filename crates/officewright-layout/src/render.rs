@@ -1248,6 +1248,11 @@ mod tests {
             "x".repeat(64)
         );
         assert!(messages.contains(&quoted.as_str()), "{messages:?}");
+        // As values beyond what a PDF holds.
+        assert!(report.entries().iter().all(|entry| {
+            !entry.message().starts_with("a link to the bookmark")
+                || entry.kind() == ReportKind::ValueClamped
+        }));
     }
 
     #[test]
