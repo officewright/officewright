@@ -22,9 +22,8 @@
 //! # }
 //! ```
 //!
-//! What the model does not represent yet (equations, bookmarks, and the properties not
-//! typed yet) is kept as it was read; such content shows as `Other` with an [`Opaque`]
-//! view. Drawings show as [`RunContent::Drawing`]: their frame and picture are read, and
+//! What the model does not represent yet (equations, and the properties not typed yet)
+//! is kept as it was read; such content shows as `Other` with an [`Opaque`] view. Drawings show as [`RunContent::Drawing`]: their frame and picture are read, and
 //! [`Drawing::to_xml`] gives a shape, chart or group as written; so do VML drawings
 //! (`w:pict`) as [`RunContent::VmlDrawing`], whose pictures are read, and embedded
 //! objects (`w:object`) as [`RunContent::Object`], whose preview pictures are read.
@@ -48,30 +47,31 @@ pub use error::{Error, Limit, Result};
 #[cfg(feature = "pdf")]
 pub use layout::Translation;
 pub use model::{
-    Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, ArtBorder, Block, Border, BorderStyle,
-    Break, BreakClear, BreakKind, CellBorders, CellMargins, CellMerge, ChapterSeparator,
-    CharacterFormat, Color, ColorScheme, ColorSchemeIndex, ColorSchemeMapping, ColorValue, Column,
-    Columns, CompatibilityMode, CompatibilityOption, CompatibilitySetting, CompoundLine,
-    ConditionalFormat, Conformance, ContentControl, Crop, Document, DocumentGrid, DocumentGridKind,
-    DocumentKind, Drawing, EmbeddedFontReference, EmbeddedFontStyle, EmbeddedObject, FieldCharKind,
-    FillKind, FontCollection, FontDeclaration, FontFamilies, FontFamily, FontHint, FontPitch,
-    FontScheme, FontSignature, Formats, HeaderFooter, HeaderFooterKind, HeaderFooterReference,
-    HeightRule, Highlight, HorizontalAlignment, HorizontalReference, Hyperlink, Image, Indentation,
-    Inline, Justification, Language, LegacyNumbering, LevelOverride, LevelSuffix, Ligatures,
-    LineAlignment, LineDash, LineNumberRestart, LineNumbering, LineSpacing, ListDefinition,
-    ListFormat, ListInstance, ListLevel, MultiLevelType, Note, NotePosition, NoteProperties,
-    NoteRestart, NoteType, NumberFormat, Numbering, NumberingReference, Offsets, Opaque,
-    Orientation, PageBorderDisplay, PageBorderOffset, PageBorderZOrder, PageBorders, PageMargins,
-    PageNumbering, Paragraph, ParagraphBorders, ParagraphFormat, ParagraphId, ParagraphProperties,
-    Picture, PositionAnchor, Revision, RevisionKind, RowHeight, Run, RunContent, RunFonts,
-    RunProperties, SchemeColor, Section, SectionProperties, SectionStart, Settings, Shading,
-    ShadingPattern, ShapeFill, ShapeOutline, SimpleField, Spacing, Style, StyleKind, Styles,
-    SystemColor, TabKind, TabLeader, TabStop, Table, TableBorders, TableCell, TableCellProperties,
-    TableId, TableJustification, TableLayout, TableLook, TableOverlap, TablePosition,
-    TableProperties, TableRow, TableRowProperties, TableStyleCondition, TableWidth, TextBox,
-    TextBoxAnchor, TextBoxDirection, TextDirection, Theme, ThemeColor, ThemeFont, Underline,
-    UnderlineStyle, VerticalAlignment, VerticalJustification, VerticalPosition, VerticalReference,
-    VmlDrawing, VmlPicture, WrapKind,
+    Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, ArtBorder, Block, BookmarkEnd,
+    BookmarkStart, Border, BorderStyle, Break, BreakClear, BreakKind, CellBorders, CellMargins,
+    CellMerge, ChapterSeparator, CharacterFormat, Color, ColorScheme, ColorSchemeIndex,
+    ColorSchemeMapping, ColorValue, Column, Columns, CompatibilityMode, CompatibilityOption,
+    CompatibilitySetting, CompoundLine, ConditionalFormat, Conformance, ContentControl, Crop,
+    Document, DocumentGrid, DocumentGridKind, DocumentKind, Drawing, EmbeddedFontReference,
+    EmbeddedFontStyle, EmbeddedObject, FieldCharKind, FieldInstruction, FieldToken, FillKind,
+    FontCollection, FontDeclaration, FontFamilies, FontFamily, FontHint, FontPitch, FontScheme,
+    FontSignature, Formats, HeaderFooter, HeaderFooterKind, HeaderFooterReference, HeightRule,
+    Highlight, HorizontalAlignment, HorizontalReference, Hyperlink, HyperlinkField, Image,
+    Indentation, Inline, Justification, Language, LegacyNumbering, LevelOverride, LevelSuffix,
+    Ligatures, LineAlignment, LineDash, LineNumberRestart, LineNumbering, LineSpacing,
+    ListDefinition, ListFormat, ListInstance, ListLevel, MultiLevelType, Note, NotePosition,
+    NoteProperties, NoteRestart, NoteType, NumberFormat, Numbering, NumberingReference, Offsets,
+    Opaque, Orientation, PageBorderDisplay, PageBorderOffset, PageBorderZOrder, PageBorders,
+    PageMargins, PageNumbering, Paragraph, ParagraphBorders, ParagraphFormat, ParagraphId,
+    ParagraphProperties, Picture, PositionAnchor, Revision, RevisionKind, RowContent, RowHeight,
+    Run, RunContent, RunFonts, RunProperties, SchemeColor, Section, SectionProperties,
+    SectionStart, Settings, Shading, ShadingPattern, ShapeFill, ShapeOutline, SimpleField, Spacing,
+    Style, StyleKind, Styles, SystemColor, TabKind, TabLeader, TabStop, Table, TableBorders,
+    TableCell, TableCellProperties, TableContent, TableId, TableJustification, TableLayout,
+    TableLook, TableOverlap, TablePosition, TableProperties, TableRow, TableRowProperties,
+    TableStyleCondition, TableWidth, TextBox, TextBoxAnchor, TextBoxDirection, TextDirection,
+    Theme, ThemeColor, ThemeFont, Underline, UnderlineStyle, VerticalAlignment,
+    VerticalJustification, VerticalPosition, VerticalReference, VmlDrawing, VmlPicture, WrapKind,
 };
 // What `Document::save_pdf` and the like report, the options they take, and how the
 // streams of the PDF are compressed (`RenderOptions::with_compression`).
