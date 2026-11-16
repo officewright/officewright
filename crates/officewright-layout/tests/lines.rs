@@ -796,7 +796,8 @@ fn in_word_2013_a_tab_to_a_start_stop_past_the_end_starts_the_next_line() -> Tes
         .ok_or("no after")?;
     assert!((after.end() - 200.0).abs() < 1e-6, "{after:?}");
     // A floating object takes no room in the text (#476): before the tab it leaves the
-    // line nothing that shows, so the tab stays on that line.
+    // line nothing that shows, so the tab stays on that line, a hypothesis until a Word
+    // render.
     let (mut document, style) = eleven_points_in(CompatMode::Word2013, "Liberation Sans");
     let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
     let anchored = Inline::anchored(AnchoredObject::new(
@@ -815,6 +816,84 @@ fn in_word_2013_a_tab_to_a_start_stop_past_the_end_starts_the_next_line() -> Tes
             ("Value".to_owned(), vec![])
         ]
     );
+    // A tab counts as what shows: after one to a stop in the line, the line ends before
+    // a tab to a stop past its end, a hypothesis until a Word render.
+    let props = ParagraphProps::default().with_tabs([
+        TabStop::default().with_position(Pt(100.0)),
+        TabStop::default().with_position(Pt(300.0)),
+    ]);
+    let inlines = vec![
+        Inline::tab(style),
+        Inline::tab(style),
+        Inline::text("Value", style),
+    ];
+    let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 200.0);
+    assert_eq!(
+        texts_and_tabs(&laid),
+        [
+            ("\t".to_owned(), vec![(0.0, 100.0)]),
+            ("\tValue".to_owned(), vec![(0.0, 100.0)])
+        ]
+    );
+    // Tabs to centre and decimal stops past the end reach the end, and the text after
+    // them wraps, as before, a hypothesis until a Word render.
+    for kind in [TabKind::Center, TabKind::Decimal] {
+        let props = ParagraphProps::default()
+            .with_tabs([TabStop::default().with_position(Pt(300.0)).with_kind(kind)]);
+        let inlines = vec![
+            Inline::text("Name", style),
+            Inline::tab(style),
+            Inline::text("1.5", style),
+        ];
+        let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 200.0);
+        let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
+        assert_eq!(lines, ["Name\t", "1.5"], "{kind:?}");
+        let tab = laid
+            .lines()
+            .first()
+            .and_then(|line| line.tabs().first())
+            .copied()
+            .ok_or("no tab")?;
+        assert_eq!(tab.1, 200.0, "{kind:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn in_word_2013_a_list_label_keeps_its_tab_past_the_end() -> TestResult {
+    use officewright_layout::ir::{
+        Level, LevelAlignment, LevelTextPart, ListDefinition, ListInstance, ListItem, Suffix,
+    };
+
+    // A label "1." and its tab, whose stop is past the end of a column 30 pt wide: no
+    // render shows it, so the label keeps its tab, which reaches the end, as before
+    // Word's renders of tabs past the margin were taken in (a hypothesis).
+    let book = book()?;
+    let (mut document, style) = eleven_points_in(CompatMode::Word2013, "Liberation Sans");
+    let level = Level::default()
+        .with_text([LevelTextPart::Literal("1.".into())])
+        .with_alignment(LevelAlignment::Start)
+        .with_suffix(Suffix::Tab);
+    let list = document.add_list(ListDefinition::default().with_levels([level]));
+    let instance = document.add_list_instance(ListInstance::new(list));
+    let item = |inlines: Vec<Inline>| {
+        Paragraph::new(style)
+            .with_list(Some(ListItem::new(instance, 0, style)))
+            .with_inlines(inlines)
+    };
+    let laid = fuzzing::lay_out(
+        &book,
+        &document,
+        &item(vec![Inline::text("Item text", style)]),
+        30.0,
+    );
+    let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
+    assert_eq!(lines.first(), Some(&"1.\t"), "{lines:?}");
+    // Nor does the label count as what shows before a tab of the item's own text.
+    let inlines = vec![Inline::tab(style), Inline::text("Item", style)];
+    let laid = fuzzing::lay_out(&book, &document, &item(inlines), 30.0);
+    let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
+    assert_eq!(lines.first(), Some(&"1.\t\t"), "{lines:?}");
     Ok(())
 }
 
@@ -848,6 +927,34 @@ fn before_word_2013_a_tab_goes_to_its_own_stop_past_the_end() -> TestResult {
             .and_then(|line| line.words().last())
             .ok_or("no value")?;
         assert_eq!((value.text(), value.start()), ("Value", 300.0), "{mode:?}");
+        // A tab after the text that follows such a tab does not end the line before them,
+        // where it could end, and the line ends after it. That the line keeps "Name Two"
+        // rather than ending at its space is a hypothesis until a Word render.
+        let props =
+            ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(300.0))]);
+        let inlines = vec![
+            Inline::text("Name Two", style),
+            Inline::tab(style),
+            Inline::text("Value", style),
+            Inline::tab(style),
+            Inline::text("X", style),
+        ];
+        let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 200.0);
+        let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
+        assert_eq!(lines, ["Name Two\tValue\t", "X"], "{mode:?}");
+        // A soft hyphen in the text after it is no place to end the line, a hypothesis
+        // until a Word render.
+        let props =
+            ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(300.0))]);
+        let inlines = vec![
+            Inline::text("Name", style),
+            Inline::tab(style),
+            Inline::text("Out\u{00AD}come and more", style),
+        ];
+        let laid = fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 200.0);
+        let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
+        assert_eq!(lines.len(), 2, "{mode:?}: {lines:?}");
+        assert_eq!(lines.get(1), Some(&"and more"), "{mode:?}");
         // An automatic stop past the end is not taken: the tab reaches the end, and the
         // text after it goes on the next line.
         let inlines = vec![
