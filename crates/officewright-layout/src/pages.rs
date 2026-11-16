@@ -845,15 +845,16 @@ struct Checkpoint {
 }
 
 /// A table's header rows as they are repeated on the pages it goes on to: whether they
-/// have a `PAGE` field, their layout, made once, and whether one of them was cut over
-/// pages, so that they take more than a page's body and are never repeated. Their height,
-/// the room they leave and what drawing them costs are checked before they are copied
-/// onto a page, so that header rows that are not repeated cost nothing more on the pages
-/// after.
+/// have a `PAGE` field, their layout, made once, whether one of them was cut over pages,
+/// so that they take more than a page's body and are never repeated, and whether they
+/// were left off the current page for taking more than its body. Their height, the room
+/// they leave and what drawing them costs are checked before they are copied onto a page,
+/// so that header rows that are not repeated cost nothing more on the pages after.
 struct Repeats {
     page_field: bool,
     laid: Option<LaidHeader>,
     cut: bool,
+    too_tall: bool,
 }
 
 /// Header rows laid out: each band, the height of all with the border below the last,
@@ -874,6 +875,7 @@ impl Repeats {
                 .any(|cell| field_kinds(cell.blocks(), 0).0),
             laid: None,
             cut: false,
+            too_tall: false,
         }
     }
 }
@@ -1005,10 +1007,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let mut index = 0;
         let mut section_started: Option<usize> = None;
         let mut broke_page = false;
-        // A page break that ended the paragraph before: the next one starts a new page,
-        // unless a section start makes one anyway. At the end of the document it makes
-        // none, as in Word 2013 and later, which keeps the paragraph mark on the page of
-        // the break.
+        // A page break that ended the paragraph before, or a table that ended its page
+        // (`place_table`): the next one starts a new page, unless a section start makes one
+        // anyway. At the end of the document it makes none, as in Word 2013 and later,
+        // which keeps the paragraph mark on the page of the break.
         let mut pending_break = false;
         while let Some(flowed) = flow.get(index) {
             // The sections from the last one started up to this paragraph's, those
@@ -1065,7 +1067,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         )
                     });
                     let decided = ends.map(|(_, movable, previous)| (movable, previous));
-                    let (first_page, pieces) = match (
+                    let (first_page, pieces, ends_page) = match (
                         self.place_table((flow, index), (table, labels), decided)?,
                         ends,
                     ) {
@@ -1086,7 +1088,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                             continue;
                         }
                         // A table moves only the chain it ends.
-                        (None, None) => (self.page_count().saturating_sub(1), 0),
+                        (None, None) => (self.page_count().saturating_sub(1), 0, false),
                     };
                     if let Some(count) = line_counts.get_mut(index) {
                         *count = pieces;
@@ -1110,6 +1112,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     }
                     dropped = dropped.max(index + 1);
                     broke_page = false;
+                    pending_break = ends_page;
                     index += 1;
                     continue;
                 }
@@ -1756,16 +1759,21 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// the table's own first header rows does not count so, and a row moves off it); the
     /// header rows start the table on a page together, else on the next. Hypothesis until
     /// a Word render: header rows that fit at the foot of a page where nothing of the row
-    /// after them does stay there, and are repeated at the top of the next. Returns the
-    /// page of its first piece and its number of pieces.
+    /// after them does stay there, and are repeated at the top of the next. A table that
+    /// ends on a page it went on to without its header rows, as they alone take more than
+    /// the page's body, ends that page: what follows it starts on the next (Word's render
+    /// of `E-table-header-repeat-tall.docx`, whose last paragraph Word puts on a page of
+    /// its own; a hypothesis until a Word render for header rows cut over pages). Returns
+    /// the page of its first piece, its number of pieces, and whether it ends its last
+    /// page so.
     fn place_table(
         &mut self,
         (flow, index): (&[Flowed<'d>], usize),
         (table, labels): (&'d Table, &[Option<Label>]),
         ends: Option<(bool, Option<usize>)>,
-    ) -> Result<Option<(usize, usize)>> {
+    ) -> Result<Option<(usize, usize, bool)>> {
         let Some(flowed) = flow.get(index) else {
-            return Ok(Some((self.page_count().saturating_sub(1), 0)));
+            return Ok(Some((self.page_count().saturating_sub(1), 0, false)));
         };
         let setup = self
             .document
@@ -1933,6 +1941,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         Ok(Some((
             first_page.unwrap_or_else(|| self.page_count().saturating_sub(1)),
             pieces,
+            repeats.too_tall,
         )))
     }
 
@@ -1984,9 +1993,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// not yet, as its pieces from `pieces` on; returns whether it did. They are laid out
     /// once, so that a `PAGE` field in them shows the number of the page they were laid
     /// out for (reported), and drawn on every page within what table rows may draw again.
-    /// They are not repeated on a page they alone take more than, nor on one where they
-    /// leave no room for the least of the band after them (reported): a hypothesis until a
-    /// Word render, as such a page would hold them and a row running off it.
+    /// They are not repeated on a page they alone take more than (`repeats.too_tall`), nor
+    /// on one where they leave no room for the least of the band after them (reported): a
+    /// hypothesis until a Word render, as such a page would hold them and a row running off
+    /// it.
     fn repeat_header(
         &mut self,
         index: usize,
@@ -1994,6 +2004,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         (repeats, laid): (&mut Repeats, &mut Option<tables::LaidBand<'d>>),
         pieces: &mut usize,
     ) -> Result<bool> {
+        // Header rows one of which was cut over pages take more than a page's body.
+        repeats.too_tall = header > 0 && band >= header && repeats.cut;
         if header == 0 || band < header || repeats.cut {
             return Ok(false);
         }
@@ -2005,6 +2017,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         }
         let height = repeats.laid.as_ref().map_or(0.0, |laid| laid.height);
         if height > room {
+            repeats.too_tall = true;
             return Ok(false);
         }
         let values = self.field_values(section);
@@ -4207,6 +4220,52 @@ mod tests {
         });
         let counts: Vec<usize> = pages(&tall).iter().map(Vec::len).collect();
         assert_eq!(counts, [1, 1, 4, 8]);
+    }
+
+    #[test]
+    fn a_table_that_ends_without_its_header_rows_too_tall_for_a_page_ends_the_page() {
+        // Word's render of `E-table-header-repeat-tall.docx`: the paragraph after a table
+        // that ends on a page it went on to without its header rows, which alone take more
+        // than a page, starts the next page, though the table leaves room. Each case: a
+        // line, a table of `header` and `rows` rows of a line, and a line after it, or
+        // none.
+        let counts = |header: &dyn Fn(RunStyleId) -> Vec<Row>, rows: usize, after: bool| {
+            let document = document(|style| {
+                let mut table = header(style);
+                table.extend((0..rows).map(|_| row_of(style, &[1], false)));
+                let mut blocks = vec![
+                    lines(style, 1, spacing(0.0, 0.0)),
+                    table_with(table, 0.0).into(),
+                ];
+                if after {
+                    blocks.push(lines(style, 1, spacing(0.0, 0.0)));
+                }
+                one_section(blocks)
+            });
+            pages(&document).iter().map(Vec::len).collect::<Vec<_>>()
+        };
+        let header = |lines: &'static [usize]| {
+            move |style: RunStyleId| {
+                lines
+                    .iter()
+                    .map(|&count| row_of(style, &[count], false).with_header(true))
+                    .collect()
+            }
+        };
+        // Two header rows of five lines: the first on page 2, the second and three rows on
+        // page 3, six rows on page 4, and the line after the table on page 5.
+        assert_eq!(counts(&header(&[5, 5]), 9, true), [1, 1, 4, 6, 1]);
+        // At the end of the document that makes no page.
+        assert_eq!(counts(&header(&[5, 5]), 9, false), [1, 1, 4, 6]);
+        // The table ending on the page of its last header row, or on one where its header
+        // row is repeated, is followed there (Word's renders of
+        // `E-table-header-repeat-single-tall.docx` and `E-table-header-repeat.docx`).
+        assert_eq!(counts(&header(&[5, 5]), 2, true), [1, 1, 4]);
+        assert_eq!(counts(&header(&[10]), 3, true), [1, 1, 5]);
+        assert_eq!(counts(&header(&[1]), 9, true), [8, 5]);
+        // A header row cut over pages, the table going on to a page past it: so too
+        // (hypothesis until a Word render).
+        assert_eq!(counts(&header(&[10]), 9, true), [1, 1, 7, 3, 1]);
     }
 
     #[test]
