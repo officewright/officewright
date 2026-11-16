@@ -483,7 +483,9 @@ fn has_content(cell: TableCell<'_>) -> bool {
 /// comes from the table: Word ignores `nil` there (MS-OI29500 §17.4.2(a), §17.4.10(a),
 /// §17.4.77(a), and the same note for the start), and its render of
 /// `word-rules/E-table-cell-margins` starts the text of cells whose margins are of type
-/// `pct` and `auto` where it starts that of a cell without margins of its own.
+/// `pct` and `auto` where it starts that of a cell without margins of its own. At the
+/// top and bottom such a side reaches here only when the table style gives none there:
+/// otherwise the cell's properties in effect have the style's.
 fn cell_margins(
     written: Option<&crate::model::CellMargins>,
     below: &ir::CellMargins,

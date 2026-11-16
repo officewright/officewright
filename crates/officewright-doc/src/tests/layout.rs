@@ -3134,6 +3134,94 @@ fn takes_cell_margins_that_are_no_length_as_word_s_renders_show() {
             .with_end(width("end"));
         assert_eq!(margins, expected, "{side}");
     }
+
+    // word-rules/E-table-cell-margins-style (#596): the table's margins 5 pt, its style's
+    // 15 pt in the whole table's w:tcPr or in the first column's. A cell's own top margin
+    // of type nil, pct or auto takes the style's 15 pt, as Word draws it; its start and
+    // end the table's 5 pt; its bottom, which the render cannot show, as its top.
+    let style_cells = |styles: &str, style: &str, cells: &str| {
+        let body = format!(
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="{style}"/><w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="0"/><w:tblCellMar>{}</w:tblCellMar></w:tblPr><w:tr>{cells}</w:tr></w:tbl><w:p/>"#,
+            margins("dxa", 100)
+        );
+        let document = with_parts(
+            &body,
+            &[(
+                "styles",
+                "styles.xml",
+                format!(r#"<w:styles xmlns:w="{W}">{styles}</w:styles>"#),
+            )],
+        );
+        let translation = translate(&document);
+        tables(&translation)[0].rows()[0]
+            .cells()
+            .iter()
+            .map(ir::Cell::margins)
+            .collect::<Vec<_>>()
+    };
+    let own = |kind: &str, width: u32| {
+        format!(
+            "<w:tc><w:tcPr><w:tcMar>{}</w:tcMar></w:tcPr><w:p/></w:tc>",
+            margins(kind, width)
+        )
+    };
+    let whole = format!(
+        r#"<w:style w:type="table" w:styleId="Margins15"><w:name w:val="Margins15"/><w:tcPr><w:tcMar>{}</w:tcMar></w:tcPr></w:style>"#,
+        margins("dxa", 300)
+    );
+    let fifteen = ir::CellMargins::default()
+        .with_top(Pt(15.0))
+        .with_start(Pt(15.0))
+        .with_bottom(Pt(15.0))
+        .with_end(Pt(15.0));
+    let above_and_below = ir::CellMargins::default()
+        .with_top(Pt(15.0))
+        .with_start(Pt(5.0))
+        .with_bottom(Pt(15.0))
+        .with_end(Pt(5.0));
+    let cells = [("nil", 0), ("pct", 500), ("auto", 200)]
+        .map(|(kind, width)| own(kind, width))
+        .concat()
+        + "<w:tc><w:p/></w:tc>";
+    assert_eq!(
+        style_cells(&whole, "Margins15", &cells),
+        [
+            Some(above_and_below),
+            Some(above_and_below),
+            Some(above_and_below),
+            Some(fifteen)
+        ]
+    );
+    // Case 05: the first column's margins reach the whole row (MS-OI29500 §17.7.6.8(a)).
+    let first_column = format!(
+        r#"<w:style w:type="table" w:styleId="FirstCol15"><w:name w:val="FirstCol15"/><w:tblStylePr w:type="firstCol"><w:tcPr><w:tcMar>{}</w:tcMar></w:tcPr></w:tblStylePr></w:style>"#,
+        margins("dxa", 300)
+    );
+    assert_eq!(
+        style_cells(
+            &first_column,
+            "FirstCol15",
+            &(own("nil", 0) + "<w:tc><w:p/></w:tc>")
+        ),
+        [Some(above_and_below), Some(fifteen)]
+    );
+    // A side the style gives no margin on, or no length, takes the table's.
+    let start_only = r#"<w:style w:type="table" w:styleId="Start15"><w:name w:val="Start15"/><w:tcPr><w:tcMar><w:start w:w="300" w:type="dxa"/><w:top w:w="0" w:type="nil"/></w:tcMar></w:tcPr></w:style>"#;
+    assert_eq!(
+        style_cells(start_only, "Start15", &own("nil", 0)),
+        [Some(five)]
+    );
+    // A length of the cell's own stays.
+    assert_eq!(
+        style_cells(&whole, "Margins15", &own("dxa", 40)),
+        [Some(
+            ir::CellMargins::default()
+                .with_top(Pt(2.0))
+                .with_start(Pt(2.0))
+                .with_bottom(Pt(2.0))
+                .with_end(Pt(2.0))
+        )]
+    );
 }
 
 #[test]
