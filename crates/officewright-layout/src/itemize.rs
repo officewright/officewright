@@ -310,11 +310,11 @@ fn right_to_left(ch: char) -> bool {
 }
 
 /// Characters that stay with the character before them, in its run and face: joiners,
-/// variation selectors, the soft hyphen (of the same run style only, see
-/// `Builder::character`), bidirectional controls, marks of the Inherited script and every
-/// mark with a canonical combining class (Hebrew points, Arabic harakat, viramas). Spacing
-/// marks of combining class 0, such as Devanagari vowel signs, take the font chosen for
-/// them.
+/// variation selectors, the soft hyphen (in text, of the same run style only, see
+/// `Builder::character`; as a symbol, of any), bidirectional controls, marks of the
+/// Inherited script and every mark with a canonical combining class (Hebrew points, Arabic
+/// harakat, viramas). Spacing marks of combining class 0, such as Devanagari vowel signs,
+/// take the font chosen for them.
 pub(crate) fn attaches(ch: char) -> bool {
     matches!(
         ch,
@@ -575,7 +575,8 @@ impl Builder<'_, '_, '_> {
             for ch in codes.into_iter().flatten().filter_map(char::from_u32) {
                 if self.fonts.has_glyph(face, ch) {
                     // A soft hyphen of a font that is not a symbol font stays with the
-                    // character before it, as in text.
+                    // character before it, whatever the symbol's run style: no reference
+                    // shows one of another size than the text before it.
                     if !self.attach(ch, &source) {
                         let size = drawn_size(&style, style.size(), false);
                         let look = self.look(id, &style, choice, size, style.size(), Slot::Ascii);
@@ -1935,7 +1936,7 @@ mod tests {
             Inline::symbol("Officewright Hyph", 0x00AD, other),
             Inline::text("A", style),
         ]);
-        // In the run, face and size of the A before it, as a soft hyphen of text is.
+        // In the run, face and size of the A before it, whatever the symbol's size.
         assert_eq!(runs(&itemized), [("A\u{AD}A", "A\u{AD}A", 10.0)]);
         assert_eq!(families, [TEST]);
         assert!(report.is_empty(), "{report:?}");
