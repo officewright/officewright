@@ -1754,6 +1754,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let page_box = page_box(&setup, page.number);
         let height = layout.lines.get(first).map_or(0.0, |line| line.height.0);
         let mut guessed = false;
+        // Past the most a page wraps around, the paragraph's own objects are left out.
+        let mut left_out = false;
         for line in layout.lines.iter().skip(first) {
             for piece in &line.pieces {
                 let PieceKind::Object { item, height: None } = piece.kind else {
@@ -1772,7 +1774,13 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     || object.vertical().relative_to() == VerticalReference::Line;
                 let anchor = (body.left.0, (top, top + height), top - space);
                 let at = display::float_position(object, &page_box, anchor);
-                exclusions.extend(Exclusion::of(object, at));
+                if let Some(exclusion) = Exclusion::of(object, at) {
+                    if exclusions.len() < MAX_EXCLUSIONS {
+                        exclusions.push(exclusion);
+                    } else {
+                        left_out = true;
+                    }
+                }
             }
         }
         // Whether the lines from `first` on, as they are, meet an object, or went around one
@@ -1791,8 +1799,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         if !meets && !stale {
             return;
         }
-        if exclusions.len() > MAX_EXCLUSIONS {
-            exclusions.truncate(MAX_EXCLUSIONS);
+        if left_out {
             self.report_exclusions_left_out(&flowed.location);
         }
         let cost = paragraph_cost(self.document, paragraph, true);
