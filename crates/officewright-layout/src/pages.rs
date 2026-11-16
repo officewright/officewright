@@ -12434,7 +12434,11 @@ mod tests {
         // then a paragraph of eight lines with widow control, the first referencing a note
         // of five lines, which fits whole under it: widow control keeps the paragraph from
         // ending there, and it goes to the next page. 14: case 13 with a paragraph of three
-        // lines and a note of four.
+        // lines and a note of four. 15: case 2 with line 1 referencing a note of two lines
+        // and line 2 one of five: the second does not fit whole under its line after the
+        // first, and is cut. 16: four lines, then a paragraph of four lines with widow
+        // control, the first referencing a note of four lines, two lines of which fit
+        // under it and none under the second line: the paragraph goes to the next page.
         let lay = |mode: CompatMode, case: usize, cell: bool| {
             let document = with_notes_in(
                 mode,
@@ -12443,14 +12447,15 @@ mod tests {
                 Inline::separator,
                 |document, style, mark| {
                     let count = match case {
-                        3 | 13 => 5,
+                        3 | 13 | 15 => 5,
                         5 => 7,
-                        6 | 11 | 14 => 4,
+                        6 | 11 | 14 | 16 => 4,
                         10 => 2,
                         _ => 6,
                     };
                     let long = footnote(document, (style, mark), count, spacing(0.0, 0.0));
                     let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                    let pair = footnote(document, (style, mark), 2, spacing(0.0, 0.0));
                     let line =
                         |notes: &[NoteId]| referencing(style, (0, 0), notes, spacing(0.0, 0.0));
                     // One paragraph of `count` lines, with widow control where `widow`
@@ -12506,6 +12511,12 @@ mod tests {
                         12 => vec![lines_of(8, &[(3, long), (4, short)])],
                         13 => vec![line(&[]), lines_with(8, &[(1, long)], true)],
                         14 => vec![line(&[]), lines_with(3, &[(1, long)], true)],
+                        15 => vec![lines_of(8, &[(1, pair), (2, long)])],
+                        16 => {
+                            let mut blocks = paragraphs(4, &[], None);
+                            blocks.push(lines_with(4, &[(1, long)], true));
+                            blocks
+                        }
                         _ => paragraphs(8, &[(3, &[long])], None),
                     };
                     if cell {
@@ -12527,7 +12538,7 @@ mod tests {
             noted_pages(&document).0
         };
         for mode in [CompatMode::Word2013, CompatMode::Word2010] {
-            for case in 1..=14 {
+            for case in 1..=16 {
                 let body = lay(mode, case, false);
                 let cell = lay(mode, case, true);
                 assert_eq!(cell, body, "{mode:?}, case {case}");
@@ -12679,6 +12690,166 @@ mod tests {
         };
         assert_eq!(lay(8), (3, 2));
         assert_eq!(lay(2), (3, 2));
+    }
+
+    /// The lines starting with `A` and with `N` on page `page` of `pages`: the text and
+    /// the notes' lines.
+    fn texts_and_notes(pages: &[Separated], page: usize) -> (usize, usize) {
+        let count = |start: char| {
+            pages.get(page).map_or(0, |page| {
+                page.1
+                    .iter()
+                    .filter(|(text, _)| text.starts_with(start))
+                    .count()
+            })
+        };
+        (count('A'), count('N'))
+    }
+
+    #[test]
+    fn a_note_of_another_cell_below_a_cut_line_takes_no_room_under_it() {
+        use crate::ir::NotePosition;
+        // A row of two cells of five lines without widow control, at the top of the page:
+        // line 2 of the first references a note of one line, line 1 of the second one of
+        // six (re-check of #577). Under line 1, the second note fits whole: the note of
+        // the first cell's line 2, below it, takes no room there. Page 1 takes the first
+        // line of each cell and the second note whole.
+        for mode in [CompatMode::Word2013, CompatMode::Word2010] {
+            let document = with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                    let long = footnote(document, (style, mark), 6, spacing(0.0, 0.0));
+                    let props = || spacing(0.0, 0.0).with_widow_control(false);
+                    let row = Row::default().with_cells([
+                        Cell::default().with_blocks([referencing(
+                            style,
+                            (1, 3),
+                            &[short],
+                            props(),
+                        )]),
+                        Cell::default().with_blocks([referencing(style, (0, 4), &[long], props())]),
+                    ]);
+                    vec![table_with(vec![row], 0.0).into()]
+                },
+            );
+            let (pages, _) = noted_pages(&document);
+            assert_eq!(texts_and_notes(&pages, 0), (2, 6), "{mode:?}: {pages:?}");
+        }
+    }
+
+    #[test]
+    fn a_band_no_page_cuts_goes_whole_with_its_note_cut() {
+        use crate::ir::{NotePosition, RowHeight, VerticalMerge};
+        // Bands no page cuts under a line, whose note is cut where it does not fit under
+        // the band (re-check of #577). A line, then a row of an exact 80 pt of four lines,
+        // the first referencing a note of five lines: page 1 takes the row whole and two
+        // lines of the note, page 2 the rest of the note. Before Word 2013, under three
+        // lines the note cannot start under the row: the row stays, its note goes wholly
+        // to page 2. And a line, then two rows tied by a merged cell, the first's other
+        // cell referencing a note of four lines, the second's holding two lines: page 1
+        // takes the band whole and two lines of the note.
+        let exact = |mode: CompatMode, above: usize| {
+            with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let note = footnote(document, (style, mark), 5, spacing(0.0, 0.0));
+                    let row = Row::default()
+                        .with_height(RowHeight::Exact(Pt(80.0)))
+                        .with_cells([Cell::default().with_blocks([referencing(
+                            style,
+                            (0, 3),
+                            &[note],
+                            spacing(0.0, 0.0),
+                        )])]);
+                    vec![
+                        lines(style, above, spacing(0.0, 0.0)),
+                        table_with(vec![row], 0.0).into(),
+                    ]
+                },
+            )
+        };
+        let (pages, _) = noted_pages(&exact(CompatMode::Word2013, 1));
+        assert_eq!(pages.len(), 2, "{pages:?}");
+        assert_eq!(texts_and_notes(&pages, 0), (5, 2), "{pages:?}");
+        let (pages, _) = noted_pages(&exact(CompatMode::Word2010, 3));
+        assert_eq!(pages.len(), 2, "{pages:?}");
+        assert_eq!(texts_and_notes(&pages, 0), (7, 0), "{pages:?}");
+        assert_eq!(texts_and_notes(&pages, 1), (0, 5), "{pages:?}");
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 4, spacing(0.0, 0.0));
+                let merged = |merge| {
+                    Cell::default()
+                        .with_vertical_merge(merge)
+                        .with_blocks([lines(style, 1, spacing(0.0, 0.0))])
+                };
+                let rows = vec![
+                    Row::default().with_cells([
+                        merged(VerticalMerge::Restart),
+                        Cell::default().with_blocks([referencing(
+                            style,
+                            (0, 0),
+                            &[note],
+                            spacing(0.0, 0.0),
+                        )]),
+                    ]),
+                    Row::default().with_cells([
+                        merged(VerticalMerge::Continue),
+                        Cell::default().with_blocks([lines(style, 2, spacing(0.0, 0.0))]),
+                    ]),
+                ];
+                vec![
+                    lines(style, 1, spacing(0.0, 0.0)),
+                    table_with(rows, 0.0).into(),
+                ]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(texts_and_notes(&pages, 0).1, 2, "{pages:?}");
+        assert!(pages[0].1.contains(&at("A1", 56.0)), "{pages:?}");
+    }
+
+    #[test]
+    fn before_word_2013_a_row_takes_nothing_of_a_deferred_note_s_cell_after_its_line() {
+        use crate::ir::NotePosition;
+        // A row of two cells: the first holds a line, the second eight paragraphs of one
+        // line, the seventh referencing a note of six lines, which cannot start under it
+        // (re-check of #577). In Word 2010 the line stays, its note going wholly to the
+        // next page, and the row takes nothing of that cell after it: page 1 takes the
+        // first cell's line and seven paragraphs of the second.
+        let document = with_notes_in(
+            CompatMode::Word2010,
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 6, spacing(0.0, 0.0));
+                let paragraphs: Vec<Block> = (1..=8)
+                    .map(|at| {
+                        let notes: &[crate::ir::NoteId] = if at == 7 { &[note] } else { &[] };
+                        referencing(style, (0, 0), notes, spacing(0.0, 0.0))
+                    })
+                    .collect();
+                let row = Row::default().with_cells([
+                    Cell::default().with_blocks([lines(style, 1, spacing(0.0, 0.0))]),
+                    Cell::default().with_blocks(paragraphs),
+                ]);
+                vec![table_with(vec![row], 0.0).into()]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(texts_and_notes(&pages, 0), (8, 0), "{pages:?}");
+        assert_eq!(texts_and_notes(&pages, 1), (1, 6), "{pages:?}");
     }
 
     #[test]

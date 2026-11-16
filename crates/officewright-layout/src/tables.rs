@@ -715,8 +715,9 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 let mut last = Vec::new();
                 let mut top = 0.0;
                 let mut cell = 0;
-                // A piece may end under a line only in a band of one row.
-                let alone = rows.len() == 1;
+                // A piece may end under a line only in a band a page may cut: of one row, of
+                // no exact height.
+                let alone = self.cuts(&rows);
                 for ((row, height), cells) in rows.clone().zip(&heights).zip(&laid.cells) {
                     top += self.thickness(row);
                     for laid_cell in cells.iter().flatten() {
@@ -1724,8 +1725,8 @@ impl Trial<'_, '_> {
 /// index there, the cell it is in, counted through the piece's cells, the paragraph's
 /// index among the cell's paragraphs and nested tables, its top and bottom from the
 /// piece's top, and the least room of a piece that ends right under it, its cell's
-/// margin and the border below included (`None` in a band of several rows, which no
-/// piece ends inside).
+/// margin and the border below included (`None` in a band no page cuts, of several rows
+/// or of a row of exact height).
 #[derive(Clone, Copy)]
 pub(crate) struct TrialLine<'l, 'd> {
     pub(crate) paragraph: &'d Paragraph,
