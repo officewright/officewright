@@ -114,7 +114,7 @@ pub struct Scanned {
     pub kinds: Vec<String>,
     /// The header and footer stories of Word's formatting export (`first-page-header`,
     /// `even-pages-footer`, ...) of a kind and type no section shows. A story of a type that
-    /// some section shows is not listed even where a page shows only some of its headers:
+    /// some section shows is not listed even where a page shows some or none of its headers:
     /// a later section's own first-page header without a title page of its own, the default
     /// header of a one-page section with a title page, the even-page header of a one-page
     /// document.
@@ -1335,10 +1335,10 @@ mod tests {
         }
     }
 
-    /// The stories of Word's formatting export no page shows: those of the kinds and types
-    /// no section shows, through the sections in order.
+    /// The stories of Word's formatting export of the kinds and types no section shows,
+    /// through the sections in order.
     #[test]
-    fn the_stories_no_page_shows_are_named() {
+    fn the_stories_of_types_no_section_shows_are_named() {
         let not_shown = |body: &str, settings: &str| {
             scan_bytes(package(body, ["", "", ""], settings, ""))
                 .unwrap()

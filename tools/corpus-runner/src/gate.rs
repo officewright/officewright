@@ -1856,7 +1856,7 @@ mod tests {
     }
 
     /// Each entry STORIES_LEFT_OUT names leaves its story's fonts unchecked, and the stories
-    /// the scan says no page shows are not checked either.
+    /// of types the scan says no section shows are not checked either.
     #[test]
     fn every_story_left_out_and_not_shown_goes_unchecked() {
         let found = |story: &str, entries: &[(&str, &str)], not_shown: Option<Vec<String>>| {
