@@ -439,6 +439,7 @@ fn paginate_with<S: PageSink>(
             headers_copied: 0,
             cursor: 0.0,
             above: None,
+            last_piece: None,
             next_number: 1,
             leaders: LeaderBudget::default(),
             frame_budget: max_frame_drawn,
@@ -881,6 +882,20 @@ struct Placed {
     last_page: usize,
 }
 
+/// The last lines of paragraph `index`, kept with the next one, that may go on to the
+/// page of the next one's first line: its lines from `from` were put last, from `piece`,
+/// placed with `keeps_space`; those from `cut` on start a page when they go. `back` once
+/// they went, to put them back if the next paragraph still does not start on their page.
+#[derive(Clone, Copy)]
+struct KeptLines {
+    index: usize,
+    piece: Checkpoint,
+    from: usize,
+    cut: usize,
+    keeps_space: bool,
+    back: bool,
+}
+
 struct Pager<'d, 'f, 'b, S> {
     document: &'d Document,
     fonts: &'f mut Fonts<'b>,
@@ -895,9 +910,10 @@ struct Pager<'d, 'f, 'b, S> {
     taken_by_section: Vec<u32>,
     /// The first page that going back to a checkpoint could still change: where a chain
     /// of paragraphs kept with the next one starts while the chain can still move (it
-    /// does not start at the top of a page), or where the paragraph being placed starts
-    /// when its `PAGE` fields may lay it out again or it may start such a chain. The pages
-    /// before it, and before the last, can go to the sink.
+    /// does not start at the top of a page), where the last piece of the paragraph before
+    /// starts while its last lines may still go on to the next page, or where the
+    /// paragraph being placed starts when its `PAGE` fields may lay it out again or it may
+    /// start such a chain. The pages before it, and before the last, can go to the sink.
     keep_from: usize,
     /// The most pages held at once.
     most_held: usize,
@@ -918,6 +934,9 @@ struct Pager<'d, 'f, 'b, S> {
     /// The paragraph of the flow above on this page, whose space below meets the space
     /// above the next one.
     above: Option<usize>,
+    /// Where the last piece of lines [`Pager::place`] put begins: what was laid out
+    /// before it, and its first line.
+    last_piece: Option<(Checkpoint, usize)>,
     /// The number of the next page.
     next_number: u32,
     /// The leader glyphs the run may still draw.
@@ -975,6 +994,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         // once, which are not moved again.
         let mut chain: Option<Checkpoint> = None;
         let mut moved: HashSet<usize> = HashSet::new();
+        // The last lines of the paragraph placed before, kept with the next one, that go
+        // on to the next one's page where its chain cannot move.
+        let mut kept_lines: Option<KeptLines> = None;
         // Whether the paragraph placed next starts after a page break of its own: a
         // section start, a page break, or a page break before it.
         let mut index = 0;
@@ -1050,6 +1072,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                             moved.insert(start.index);
                             self.restore(start);
                             chain = None;
+                            kept_lines = None;
                             let section = flow.get(start.index).map_or(0, |f| f.section);
                             let setup = sections
                                 .get(section)
@@ -1073,6 +1096,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         *slot = Some(here);
                     }
                     chain = None;
+                    kept_lines = None;
                     // Nothing goes back past the next item's start now.
                     self.keep_from = usize::MAX;
                     self.release()?;
@@ -1127,7 +1151,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             };
             let keeps_space = kept_top || index == 0;
             let (mut first_page, mut ends_with_break) =
-                self.place(flow, index, layout, keeps_space)?;
+                self.place(flow, index, layout, keeps_space, (0, None))?;
             // A `PAGE` field shows the number of the page its paragraph starts on: laid out
             // for the page it began on (or, kept from before a keep chain moved, the page it
             // was first placed on), a paragraph that lands on another page is laid out again
@@ -1148,7 +1172,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     &flowed.location,
                     Some(&values),
                 );
-                (first_page, ends_with_break) = self.place(flow, index, layout, keeps_space)?;
+                (first_page, ends_with_break) =
+                    self.place(flow, index, layout, keeps_space, (0, None))?;
                 if self.page_at(first_page).map(|page| page.number) != Some(landed) {
                     self.fonts.report_once(
                         ReportKind::FieldCached,
@@ -1171,8 +1196,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         .to_owned(),
                 );
             }
-            if let Some(count) = line_counts.get_mut(index) {
-                *count = layout.lines.len();
+            let count = layout.lines.len();
+            if let Some(slot) = line_counts.get_mut(index) {
+                *slot = count;
             }
             // A page or column break before its last line: its last lines start a page
             // whatever comes before them.
@@ -1204,6 +1230,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         // The whole chain to the next page, once.
                         self.restore(start);
                         chain = None;
+                        kept_lines = None;
                         let section = flow.get(start.index).map_or(0, |f| f.section);
                         let setup = sections
                             .get(section)
@@ -1211,6 +1238,28 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         self.new_page(section, &setup)?;
                         index = start.index;
                         broke_page = false;
+                        continue;
+                    }
+                    // A chain that cannot move gives this paragraph's page the last lines
+                    // of the paragraph before, and this paragraph is placed again after
+                    // them. Word's render of `E-keepnext-break.docx`: in case 02, the 56
+                    // lines after a page break in a paragraph kept with the next, and the
+                    // 3 lines kept together after it, do not fit on a page, and its last
+                    // line goes on to the page of the 3. Hypothesis until a Word render:
+                    // they go back when this paragraph still starts on a later page.
+                    let kept = kept_lines.take().filter(|kept| kept.index + 1 == index);
+                    if let Some((kept, Some(Some((before, _))))) =
+                        kept.map(|kept| (kept, layouts.get(kept.index)))
+                    {
+                        self.restore(kept.piece);
+                        let cut = (!kept.back).then_some(kept.cut);
+                        self.place(flow, kept.index, before, kept.keeps_space, (kept.from, cut))?;
+                        if let Some(Some(before)) = placed.get_mut(kept.index) {
+                            before.last_page = self.page_count().saturating_sub(1);
+                        }
+                        if !kept.back {
+                            kept_lines = Some(KeptLines { back: true, ..kept });
+                        }
                         continue;
                     }
                     self.report_split_chain(&flowed.location);
@@ -1228,13 +1277,52 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 Some(start) if !boundary => Some(start),
                 _ => Some(checkpoint),
             };
+            // The last lines of a paragraph kept with the next one whose chain cannot move,
+            // as many as widow control lets go on to another page while the rest of its
+            // last piece stays: one, or two with widow control (a hypothesis until a Word
+            // render). Not those of one kept together, nor of one that ends in a page
+            // break, nor of one with `PAGE` fields, which were laid out for the page it
+            // starts on.
+            kept_lines = match (chain, self.last_piece.take()) {
+                (Some(start), Some((piece, from)))
+                    if start.at_top && !ends_with_break && !props.keep_lines() && !page_field =>
+                {
+                    let (go, stay) = match (props.widow_control(), from) {
+                        (true, 0) => (2, 2),
+                        (true, _) => (2, 1),
+                        (false, _) => (1, 1),
+                    };
+                    count
+                        .checked_sub(go)
+                        .filter(|&cut| cut >= from + stay)
+                        .map(|cut| KeptLines {
+                            index,
+                            piece,
+                            from,
+                            cut,
+                            keeps_space,
+                            back: false,
+                        })
+                }
+                _ => None,
+            };
             // Only a chain that can still move goes back past the next paragraph's start:
             // one that does not start at the top of a page. A chain moved once starts again
-            // at the top of the page it moved to, so it cannot move twice.
+            // at the top of the page it moved to, so it cannot move twice. Last lines that
+            // may go on go back to the start of their piece, and keep their paragraph's
+            // layout.
             let movable = chain.filter(|start| !start.at_top);
-            self.keep_from = movable.map_or(usize::MAX, |start| start.pages.saturating_sub(1));
+            self.keep_from = match (movable, kept_lines) {
+                (Some(start), _) => start.pages.saturating_sub(1),
+                (None, Some(kept)) => kept.piece.pages.saturating_sub(1),
+                (None, None) => usize::MAX,
+            };
             self.release()?;
-            let placed_again = movable.map_or(index + 1, |start| start.index);
+            let placed_again = match (movable, kept_lines) {
+                (Some(start), _) => start.index,
+                (None, Some(kept)) => kept.index,
+                (None, None) => index + 1,
+            };
             for slot in layouts.iter_mut().take(placed_again).skip(dropped) {
                 if slot.take().is_some() {
                     self.layouts_held -= 1;
@@ -1377,16 +1465,18 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         }
     }
 
-    /// Places the lines of paragraph `index` of `flow`, laid out as `layout`, from the
-    /// cursor on; the space above it is kept at the top of a page when `keeps_space`.
-    /// Returns the page of its first line, and whether its last line ends in a page or
-    /// column break, after which the next paragraph starts on a new page.
+    /// Places the lines of paragraph `index` of `flow`, laid out as `layout`, from line
+    /// `from` on and from the cursor on, those from `cut` on starting a page; the space
+    /// above it is kept at the top of a page when `keeps_space`. Returns the page of the
+    /// first line it places, and whether its last line ends in a page or column break,
+    /// after which the next paragraph starts on a new page.
     fn place(
         &mut self,
         flow: &[Flowed<'_>],
         index: usize,
         layout: &ParagraphLayout,
         keeps_space: bool,
+        (from, cut): (usize, Option<usize>),
     ) -> Result<(usize, bool)> {
         let Some((flowed, paragraph)) = flow
             .get(index)
@@ -1404,9 +1494,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             .sections()
             .get(flowed.section)
             .map_or_else(PageSetup::default, |section| *section.page());
-        let mut first = 0;
+        let mut first = from;
         let mut first_page = None;
         loop {
+            self.last_piece = Some((self.checkpoint(index), first));
             let empty = self.page_is_empty();
             // Whether nothing moves the paragraph further: the page holds no text, nor
             // notes going on from the page before, which leave the next page more room (a
@@ -1453,8 +1544,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     .and_then(Flowed::paragraph)
                     .map(Paragraph::props),
             );
-            let (fit, breaks) =
+            let (mut fit, mut breaks) =
                 self.fitting_with_notes((flowed.section, paragraph), layout, first, top)?;
+            if let Some(cut) = cut.filter(|&cut| first < cut && first + fit > cut) {
+                (fit, breaks) = (cut - first, true);
+            }
             if fit == rest || (breaks && fit > 0) {
                 self.put(
                     index,
@@ -5605,14 +5699,15 @@ mod tests {
                 })
                 .collect::<Vec<(usize, u32, Vec<usize>)>>()
         };
-        // A section on the next page: it starts page 2, numbered 10; its chain moves its
-        // last paragraph's companion with it to page 3.
+        // A section on the next page: it starts page 2, numbered 10; the chain that
+        // starts there cannot move, so the last two lines of its first paragraph go on
+        // to page 3 with the three kept together.
         assert_eq!(
             summary(SectionStart::NextPage, false, Some(10)),
             [
                 (0, 1, vec![0, 1, 2, 3, 4, 5, 6]),
                 (1, 10, vec![7]),
-                (1, 11, vec![8])
+                (1, 11, vec![7, 8])
             ]
         );
         // On an odd page, numbered from 10: 10 is even, so the section starts page 2
@@ -5622,7 +5717,7 @@ mod tests {
             [
                 (0, 1, vec![0, 1, 2, 3, 4, 5, 6]),
                 (1, 11, vec![7]),
-                (1, 12, vec![8])
+                (1, 12, vec![7, 8])
             ]
         );
         // On an odd page, continuing the numbering: page 2 is blank, and the chain starts
@@ -5633,7 +5728,7 @@ mod tests {
                 (0, 1, vec![0, 1, 2, 3, 4, 5, 6]),
                 (1, 2, vec![]),
                 (1, 3, vec![7]),
-                (1, 4, vec![8])
+                (1, 4, vec![7, 8])
             ]
         );
         // A continuous section that numbers its pages from 10: its next page is 10.
@@ -5650,7 +5745,7 @@ mod tests {
         // P5, kept with the next, holds "A", a page break and six lines: its last lines
         // start page 2 whatever happens, so moving it would only push "A" onto a page of
         // its own. The three lines kept together that follow do not fit there and go to
-        // page 3, and the chain is reported split.
+        // page 3, and the last two of P5 with them.
         let with_break = |style, before: usize, after: usize| -> Block {
             let mut inlines = Vec::new();
             for _ in 0..before {
@@ -5675,17 +5770,10 @@ mod tests {
             blocks.push(lines(style, 3, spacing(0.0, 0.0).with_keep_lines(true)));
             one_section(blocks)
         });
-        let (laid, report) = laid(&inner, 100);
-        let laid = laid.expect("pages");
-        assert_eq!(laid.pages.len(), 3);
-        assert_eq!(laid.pages[0].fragments.last().map(|f| f.paragraph), Some(5));
-        assert!(
-            report
-                .entries()
-                .iter()
-                .any(|entry| entry.kind() == ReportKind::Overflow),
-            "{report:?}"
-        );
+        let laid = pages(&inner);
+        assert_eq!(laid.len(), 3);
+        assert_eq!(laid[0].last().map(|f| f.0), Some(5));
+        assert_eq!(laid[2], [(5, 5..7, 20.0), (6, 0..3, 60.0)], "{laid:?}");
         // A heading that starts with a page break, kept with ten lines kept together:
         // four pages, as without keeping with the next.
         let leading = document(|style| {
@@ -5724,6 +5812,61 @@ mod tests {
         let laid = pages(&column);
         assert_eq!(laid.len(), 3, "{laid:?}");
         assert_eq!(laid[0].last(), Some(&(5, 0..2, 120.0)));
+    }
+
+    #[test]
+    fn a_chain_that_cannot_move_takes_the_last_lines_of_its_paragraph_along() {
+        // Word's render of `E-keepnext-break.docx`, case 02, without widow control: a
+        // paragraph kept with the next holds "A", a page break and six lines, and the
+        // lines kept together after it do not fit on page 2 with the six. Its last line
+        // goes on to page 3 with them, and nothing is split.
+        let case = |widow_control: bool, together: usize| {
+            document(|style| {
+                let props = || spacing(0.0, 0.0).with_widow_control(widow_control);
+                let mut blocks: Vec<Block> = (0..5).map(|_| lines(style, 1, props())).collect();
+                let mut inlines = vec![Inline::text("A", style), Inline::page_break(style)];
+                for line in 0..6 {
+                    if line > 0 {
+                        inlines.push(Inline::line_break(BreakClear::None, style));
+                    }
+                    inlines.push(Inline::text("A", style));
+                }
+                blocks.push(
+                    Paragraph::new(style)
+                        .with_props(props().with_keep_next(true))
+                        .with_inlines(inlines)
+                        .into(),
+                );
+                blocks.push(lines(style, together, props().with_keep_lines(true)));
+                one_section(blocks)
+            })
+        };
+        let split = |document: &Document| {
+            let (_, report) = laid(document, 100);
+            messages(&report)
+                .iter()
+                .any(|message| message.starts_with("paragraphs kept with the next one"))
+        };
+        let word = case(false, 3);
+        let laid = pages(&word);
+        assert_eq!(laid.len(), 3, "{laid:?}");
+        assert_eq!(laid[1], [(5, 1..6, 20.0)], "{laid:?}");
+        assert_eq!(laid[2], [(5, 6..7, 20.0), (6, 0..3, 40.0)], "{laid:?}");
+        assert!(!split(&word));
+        // With widow control, the last two, so that none is alone at the top of page 3:
+        // a hypothesis until a Word render.
+        let widows = pages(&case(true, 3));
+        assert_eq!(widows[1], [(5, 1..5, 20.0)], "{widows:?}");
+        assert_eq!(widows[2], [(5, 5..7, 20.0), (6, 0..3, 60.0)], "{widows:?}");
+        // Eight lines kept together fill page 3 alone: below the last line they would go
+        // on to page 4 all the same, so the line stays on page 2, and the split is
+        // reported.
+        let full = case(false, 8);
+        let laid = pages(&full);
+        assert_eq!(laid.len(), 3, "{laid:?}");
+        assert_eq!(laid[1], [(5, 1..7, 20.0)], "{laid:?}");
+        assert_eq!(laid[2], [(6, 0..8, 20.0)], "{laid:?}");
+        assert!(split(&full));
     }
 
     #[test]
