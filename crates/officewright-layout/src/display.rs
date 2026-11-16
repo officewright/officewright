@@ -31,10 +31,6 @@ use crate::tables::border_line;
 /// reference shows it (`E-superscript.docx`).
 const SUPERSCRIPT_RISE: f64 = 1.0 / 3.0;
 
-/// How far the baseline of a subscript drops, as a fraction of the size its formatting
-/// gives. Hypothesis, like [`SUPERSCRIPT_RISE`].
-const SUBSCRIPT_DROP: f64 = 1.0 / 3.0;
-
 /// The width of the line a bar tab draws, as Word's reference of `E-bar-tab.docx` shows
 /// it (#309).
 const BAR_TAB_WIDTH: Pt = Pt(0.14);
@@ -711,7 +707,7 @@ impl Painting<'_, '_, '_> {
         if placed.is_empty() {
             return None;
         }
-        let rise = rise(run, style);
+        let rise = rise(run, style, self.fonts.face(face).as_deref());
         let origin = Point {
             x: Pt(x),
             y: Pt(baseline - rise),
@@ -765,7 +761,7 @@ impl Painting<'_, '_, '_> {
         let Some(face) = run.face.and_then(|id| self.fonts.face(id)) else {
             return;
         };
-        let baseline = baseline - rise(run, style);
+        let baseline = baseline - rise(run, style, Some(&face));
         // The piece's glyphs are placed from the column's start edge, `x` from the page's.
         let to_page = x - piece.x.0;
         let hyphen = matches!(piece.kind, PieceKind::Hyphen { .. });
@@ -895,7 +891,7 @@ impl Painting<'_, '_, '_> {
         let size = drawn_size(&style, formatted, false);
         let choice = self.fonts.choose(&family, bold, italic);
         let face = choice.face.and_then(|id| self.fonts.face(id));
-        let raised = baseline - rise_at(&style, formatted.0);
+        let raised = baseline - rise_at(&style, formatted, face.as_deref());
         let reach = self.reach(face.as_deref(), formatted, &style);
         let background = self.background_of(&style, behind, span, (baseline, reach), bounds);
         let color = text_color(style.color(), background);
@@ -1264,17 +1260,35 @@ impl Painting<'_, '_, '_> {
     }
 }
 
-/// How far the baseline of `run` in `style` is raised: superscripts up, subscripts down.
-fn rise(run: &TextRun, style: &RunStyle) -> f64 {
-    rise_at(style, run.formatted_size.0)
+/// How far the baseline of `run` in `style` and `face` is raised: superscripts up,
+/// subscripts down.
+fn rise(run: &TextRun, style: &RunStyle, face: Option<&ShapingFace>) -> f64 {
+    rise_at(style, run.formatted_size, face)
 }
 
-/// How far the baseline of text in `style` is raised, at `size`, the size its formatting
-/// gives.
-fn rise_at(style: &RunStyle, size: f64) -> f64 {
+/// How far the baseline of text in `style` and `face` is raised, at `size`, the size its
+/// formatting gives. A subscript drops by as much as the face's descent at that size
+/// exceeds its descent at the size the subscript is drawn at, so that its text ends
+/// where the text beside it does: 2.26 pt in Carlito (Calibri's metrics) at 24 pt.
+/// Word drops subscripts by whole half points, within half a point of that in Calibri
+/// and less in Liberation Sans, whose descent is shallower, at 8 to 48 pt: see
+/// `tests/corpus/word-rules/E-superscript.docx` (2.5 pt at 24 pt, 1 pt at 11 pt),
+/// `E-superscript-sizes.docx` and `E-superscript-steps.docx`. How Word comes to its
+/// half points is open.
+fn rise_at(style: &RunStyle, size: Pt, face: Option<&ShapingFace>) -> f64 {
     let vertical = match style.vertical() {
-        VerticalPosition::Superscript => size * SUPERSCRIPT_RISE,
-        VerticalPosition::Subscript => -size * SUBSCRIPT_DROP,
+        VerticalPosition::Superscript => size.0 * SUPERSCRIPT_RISE,
+        VerticalPosition::Subscript => {
+            let descent = |size| {
+                face.map_or_else(
+                    || no_font(size),
+                    |face| line_metrics(face.face(), size, TypoRule::default()),
+                )
+                .descent
+                .0
+            };
+            descent(drawn_size(style, size, false)) - descent(size)
+        }
         _ => 0.0,
     };
     style.position().0 + vertical
@@ -2315,8 +2329,9 @@ mod tests {
         let [plain, lowered, narrow] = runs.as_slice() else {
             panic!("{items:?}");
         };
-        // A subscript drops a third of its 10 pt.
-        assert!((lowered.origin.y.0 - plain.origin.y.0 - 10.0 / 3.0).abs() < 1e-9);
+        // A subscript drops by the test font's descent at 10 pt, 2.5, less its descent at
+        // the 6.5 pt it is drawn at, 1.625.
+        assert!((lowered.origin.y.0 - plain.origin.y.0 - 0.875).abs() < 1e-9);
         assert_eq!((plain.h_scale, narrow.h_scale), (1.0, 0.5));
         // The picture's frame, 8 by 5, inside the room its effects take: 3 to its left,
         // 2 above and 1 below, the room's bottom on the baseline.
