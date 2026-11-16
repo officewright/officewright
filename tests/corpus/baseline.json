@@ -1538,10 +1538,10 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-soft-hyphen-font.docx": {
-      "line_agreement": 0.6364,
-      "ssim_mean": 0.9791,
-      "ssim_min": 0.9791,
-      "text_score": 0.9874
+      "line_agreement": 0.7273,
+      "ssim_mean": 0.9913,
+      "ssim_min": 0.9913,
+      "text_score": 0.9899
     },
     "tests/corpus/word-rules/E-space-before-top.docx": {
       "line_agreement": 1.0,
