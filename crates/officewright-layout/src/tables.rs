@@ -711,23 +711,26 @@ impl<'d, 'l> Prepared<'d, 'l> {
         let rows = laid.rows.clone();
         match self.decide(laid, room, (fresh, split))? {
             Decision::Whole(heights) => {
-                let whole: f64 = rows
-                    .clone()
-                    .zip(&heights)
-                    .map(|(row, height)| self.thickness(row) + height)
-                    .sum();
-                let lines = laid
-                    .cells
-                    .iter()
-                    .flatten()
-                    .flatten()
-                    .flat_map(|cell| cell.content.lines(cell.next..cell.content.units.len()))
-                    .collect();
-                // As the band is drawn: the border below it only where it ends the table.
+                let mut lines = Vec::new();
+                let mut top = 0.0;
+                let mut cell = 0;
+                for ((row, height), cells) in rows.clone().zip(&heights).zip(&laid.cells) {
+                    top += self.thickness(row);
+                    for laid_cell in cells.iter().flatten() {
+                        let units = laid_cell.next..laid_cell.content.units.len();
+                        lines.extend(laid_cell.content.lines(units, cell));
+                        cell += 1;
+                    }
+                    top += height;
+                }
+                // As the band is drawn: the border below it only where it ends the table;
+                // where it does not, the next band's top border or the line that closes
+                // the page takes its room.
+                let border = self.thickness(rows.end);
                 let last = rows.end == self.rows.len();
-                let below = if last { self.thickness(rows.end) } else { 0.0 };
                 Some(Trial {
-                    height: whole + below,
+                    height: top + if last { border } else { 0.0 },
+                    below: if last { 0.0 } else { border },
                     lines,
                 })
             }
@@ -740,17 +743,28 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 } else {
                     0.0
                 };
-                let height =
-                    self.thickness(rows.start) + self.cut_content(laid, &takes, room)? + below;
+                let above = self.thickness(rows.start);
+                let height = above + self.cut_content(laid, &takes, room)? + below;
                 let lines = laid
                     .cells
                     .first()?
                     .iter()
                     .flatten()
                     .zip(&takes)
-                    .flat_map(|(cell, take)| cell.content.lines(cell.next..cell.next + take))
+                    .enumerate()
+                    .flat_map(|(index, (cell, take))| {
+                        cell.content.lines(cell.next..cell.next + take, index)
+                    })
                     .collect();
-                Some(Trial { height, lines })
+                Some(Trial {
+                    height,
+                    below: if closed {
+                        0.0
+                    } else {
+                        self.thickness(rows.end)
+                    },
+                    lines,
+                })
             }
         }
     }
@@ -865,6 +879,13 @@ impl<'d, 'l> Prepared<'d, 'l> {
             }
         }
         Some(height)
+    }
+
+    /// The thickness of the border below band `band`.
+    pub(crate) fn border_below(&self, band: usize) -> f64 {
+        self.bands
+            .get(band)
+            .map_or(0.0, |rows| self.thickness(rows.end))
     }
 
     /// The line below band `band`, which closes it where a page ends under it: its
@@ -1613,12 +1634,30 @@ enum Decision {
     Cut(Vec<usize>),
 }
 
-/// What a piece of a band would take ([`Prepared::trial`]): its height, the borders
-/// included, and the lines of paragraphs among the units it takes, each as its
-/// paragraph, the paragraph's layout and the line's index there.
+/// What a piece of a band would take ([`Prepared::trial`]): its height, the borders it
+/// draws included, the border below it that it does not draw, which the next band or the
+/// line closing its page takes, and the lines of paragraphs among the units it takes.
 pub(crate) struct Trial<'l, 'd> {
     pub(crate) height: f64,
-    pub(crate) lines: Vec<(&'d Paragraph, &'l ParagraphLayout, usize)>,
+    pub(crate) below: f64,
+    pub(crate) lines: Vec<TrialLine<'l, 'd>>,
+}
+
+impl Trial<'_, '_> {
+    /// The least room that puts the same piece: its height and the border below it.
+    pub(crate) fn room(&self) -> f64 {
+        self.height + self.below
+    }
+}
+
+/// A line of a paragraph that a piece takes: its paragraph, the paragraph's layout, its
+/// index there, and the cell it is in, counted through the piece's cells.
+#[derive(Clone, Copy)]
+pub(crate) struct TrialLine<'l, 'd> {
+    pub(crate) paragraph: &'d Paragraph,
+    pub(crate) layout: &'l ParagraphLayout,
+    pub(crate) line: usize,
+    pub(crate) cell: usize,
 }
 
 /// A piece of a band, put on a page.
@@ -1778,20 +1817,26 @@ impl<'d> Stacked<'d> {
         any - from
     }
 
-    /// The lines of paragraphs among units `units`, each as its paragraph, the paragraph's
-    /// layout and the line's index there; a nested table's bands are not among them.
+    /// The lines of paragraphs among units `units`, the content of cell `cell` of a piece;
+    /// a nested table's bands are not among them.
     fn lines(
         &self,
         units: Range<usize>,
-    ) -> impl Iterator<Item = (&'d Paragraph, &ParagraphLayout, usize)> + '_ {
+        cell: usize,
+    ) -> impl Iterator<Item = TrialLine<'_, 'd>> + '_ {
         self.units
             .get(units)
             .unwrap_or(&[])
             .iter()
-            .filter_map(|unit| match self.parts.get(unit.part)? {
+            .filter_map(move |unit| match self.parts.get(unit.part)? {
                 Part::Paragraph {
                     paragraph, layout, ..
-                } => Some((*paragraph, layout, unit.index)),
+                } => Some(TrialLine {
+                    paragraph,
+                    layout,
+                    line: unit.index,
+                    cell,
+                }),
                 Part::Table { .. } => None,
             })
     }
