@@ -10,7 +10,7 @@
 //! Markup Compatibility and what groups of shapes hold, which the translation leaves out
 //! whole, are skipped. Transitional and Strict names are read alike.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use officewright_opc::xml::{Event, Input, Name, NsId, Reader, StartTag};
 use officewright_opc::{Limits, Package, Part, PartName};
@@ -105,8 +105,18 @@ pub fn names(message: &str, words: &[&str]) -> bool {
     words.iter().any(|word| message.contains(word))
 }
 
-/// The kinds of content the Word document at `path` holds, in the order of [`KINDS`].
-pub fn scan(path: &std::path::Path) -> Result<Vec<String>, String> {
+/// What the scan of a document finds.
+#[derive(Debug, PartialEq)]
+pub struct Scanned {
+    /// The kinds of content, in the order of [`KINDS`].
+    pub kinds: Vec<String>,
+    /// The header and footer stories of Word's formatting export (`first-page-header`,
+    /// `even-pages-footer`, ...) that no page of the document shows.
+    pub stories_not_shown: Vec<String>,
+}
+
+/// What the Word document at `path` holds.
+pub fn scan(path: &std::path::Path) -> Result<Scanned, String> {
     let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
     scan_bytes(bytes)
 }
@@ -132,8 +142,18 @@ fn content_type<'p>(part: &Part<'p>) -> Option<&'p str> {
         .map(str::trim)
 }
 
-/// The kinds of content of a package's stories.
-pub fn scan_bytes(bytes: Vec<u8>) -> Result<Vec<String>, String> {
+/// The stories of Word's formatting export of each kind and type of header and footer.
+const STORY_NAMES: [(&str, &str, &str); 6] = [
+    ("header", "default", "primary-header"),
+    ("header", "first", "first-page-header"),
+    ("header", "even", "even-pages-header"),
+    ("footer", "default", "primary-footer"),
+    ("footer", "first", "first-page-footer"),
+    ("footer", "even", "even-pages-footer"),
+];
+
+/// What a package's stories hold.
+pub fn scan_bytes(bytes: Vec<u8>) -> Result<Scanned, String> {
     let limits = Limits::new();
     let package = Package::from_bytes(bytes, &limits).map_err(|error| error.to_string())?;
     let main = package
@@ -145,20 +165,34 @@ pub fn scan_bytes(bytes: Vec<u8>) -> Result<Vec<String>, String> {
     scan_part(&main, &limits, &mut found, Some(&mut sections))
         .map_err(|error| format!("{}: {error}", main.name()))?;
     let even = even_and_odd_headers(&main, &limits)?;
+    // Each section shows the headers and footers in effect for it: its own of each kind
+    // and type, else the previous section's; a first-page one only with a title page of
+    // its own, even-page ones only with w:evenAndOddHeaders.
+    let mut current: BTreeMap<(&str, &str), &str> = BTreeMap::new();
+    let mut shown_types: BTreeSet<(&str, &str)> = BTreeSet::new();
     let mut shown: Vec<PartName> = Vec::new();
-    for (kind, id) in &sections.references {
-        let shows = match kind.as_str() {
-            "first" => sections.title_page,
-            "even" => even,
-            _ => true,
-        };
-        let target = main
-            .relationships()
-            .get(id)
-            .and_then(|rel| rel.target_part());
-        if let Some(target) = target.filter(|_| shows) {
-            if !shown.contains(&target) {
-                shown.push(target);
+    for section in &sections.0 {
+        for (kind, which, id) in &section.references {
+            current.insert((kind.as_str(), which.as_str()), id.as_str());
+        }
+        for (&(kind, which), id) in &current {
+            let shows = match which {
+                "first" => section.title_page,
+                "even" => even,
+                _ => true,
+            };
+            if !shows {
+                continue;
+            }
+            shown_types.insert((kind, which));
+            let target = main
+                .relationships()
+                .get(id)
+                .and_then(|rel| rel.target_part());
+            if let Some(target) = target {
+                if !shown.contains(&target) {
+                    shown.push(target);
+                }
             }
         }
     }
@@ -173,18 +207,29 @@ pub fn scan_bytes(bytes: Vec<u8>) -> Result<Vec<String>, String> {
         scan_part(&part, &limits, &mut found, None)
             .map_err(|error| format!("{}: {error}", part.name()))?;
     }
-    Ok(KINDS
-        .iter()
-        .filter(|(name, _)| found.contains(name))
-        .map(|(name, _)| (*name).to_owned())
-        .collect())
+    Ok(Scanned {
+        kinds: KINDS
+            .iter()
+            .filter(|(name, _)| found.contains(name))
+            .map(|(name, _)| (*name).to_owned())
+            .collect(),
+        stories_not_shown: STORY_NAMES
+            .iter()
+            .filter(|(kind, which, _)| !shown_types.contains(&(*kind, *which)))
+            .map(|(_, _, story)| (*story).to_owned())
+            .collect(),
+    })
 }
 
-/// The headers and footers the body's sections name, as (`w:type`, relationship id), and
-/// whether a section has a title page.
+/// The body's sections in order.
 #[derive(Default)]
-struct Sections {
-    references: Vec<(String, String)>,
+struct Sections(Vec<SectionRefs>);
+
+/// The headers and footers a section names, as (`header` or `footer`, `w:type`,
+/// relationship id), and whether it has a title page.
+#[derive(Default)]
+struct SectionRefs {
+    references: Vec<(String, String, String)>,
     title_page: bool,
 }
 
@@ -492,17 +537,27 @@ fn start(
     if names.is_w(&name) {
         let parent_section = matches!(open.last(), Some(Open::Section));
         match local {
-            "sectPr" => return Step::Open(Open::Section),
+            "sectPr" => {
+                if let Some(sections) = sections {
+                    sections.0.push(SectionRefs::default());
+                }
+                return Step::Open(Open::Section);
+            }
             "headerReference" | "footerReference" if parent_section => {
                 let id = attribute(tag, &names.r, "id");
-                if let (Some(sections), Some(id)) = (sections, id) {
-                    let kind = w_value(tag, names, "type").unwrap_or("default");
-                    sections.references.push((kind.to_owned(), id.to_owned()));
+                let section = sections.and_then(|sections| sections.0.last_mut());
+                if let (Some(section), Some(id)) = (section, id) {
+                    let kind = local.trim_end_matches("Reference");
+                    let which = w_value(tag, names, "type").unwrap_or("default");
+                    section
+                        .references
+                        .push((kind.to_owned(), which.to_owned(), id.to_owned()));
                 }
             }
             "titlePg" if parent_section => {
-                if let Some(sections) = sections.filter(|_| on(w_value(tag, names, "val"))) {
-                    sections.title_page = true;
+                let section = sections.and_then(|sections| sections.0.last_mut());
+                if let Some(section) = section.filter(|_| on(w_value(tag, names, "val"))) {
+                    section.title_page = true;
                 }
             }
             "cols" if parent_section => {
@@ -582,7 +637,8 @@ fn start(
                     drawing: false,
                 });
             }
-            "drawing" => {
+            // The translation leaves an object shown by a drawing out whole.
+            "drawing" if in_object => {
                 if let Some(Open::Object { drawing, .. }) = open
                     .iter_mut()
                     .rev()
@@ -590,6 +646,7 @@ fn start(
                 {
                     *drawing = true;
                 }
+                return Step::Skip;
             }
             "txbxContent" => return Step::Open(Open::TextBox),
             "tbl" if in_text_box => {
@@ -845,6 +902,7 @@ mod tests {
         r#"xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" "#,
         r#"xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" "#,
         r#"xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" "#,
+        r#"xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" "#,
         r#"xmlns:v="urn:schemas-microsoft-com:vml" "#,
         r#"xmlns:w10="urn:schemas-microsoft-com:office:word" "#,
         r#"xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" "#,
@@ -858,6 +916,18 @@ mod tests {
     /// `styles` and pictures rId1 (EMF) and rId2 (PNG). The body's sections name the headers
     /// they show.
     fn package(body: &str, headers: [&str; 3], settings: &str, styles: &str) -> Vec<u8> {
+        let rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        package_with(body, headers, settings, styles, &format!("{rel}/settings"))
+    }
+
+    /// As [`package`], the settings part named by a relationship of type `settings_type`.
+    fn package_with(
+        body: &str,
+        headers: [&str; 3],
+        settings: &str,
+        styles: &str,
+        settings_type: &str,
+    ) -> Vec<u8> {
         let main = "application/vnd.openxmlformats-officedocument.wordprocessingml";
         let types = format!(
             r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -875,7 +945,7 @@ mod tests {
         let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
         let rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
         let document_rels = format!(
-            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{rel}/image" Target="media/image1.emf"/><Relationship Id="rId2" Type="{rel}/image" Target="media/image2.png"/><Relationship Id="rId3" Type="{rel}/header" Target="header1.xml"/><Relationship Id="rId4" Type="{rel}/header" Target="header2.xml"/><Relationship Id="rId5" Type="{rel}/header" Target="header3.xml"/><Relationship Id="rId6" Type="{rel}/settings" Target="settings.xml"/></Relationships>"#
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{rel}/image" Target="media/image1.emf"/><Relationship Id="rId2" Type="{rel}/image" Target="media/image2.png"/><Relationship Id="rId3" Type="{rel}/header" Target="header1.xml"/><Relationship Id="rId4" Type="{rel}/header" Target="header2.xml"/><Relationship Id="rId5" Type="{rel}/header" Target="header3.xml"/><Relationship Id="rId6" Type="{settings_type}" Target="settings.xml"/></Relationships>"#
         );
         let story = |root: &str, content: &str| {
             format!(
@@ -911,7 +981,7 @@ mod tests {
     }
 
     fn kinds(body: &str) -> Vec<String> {
-        scan_bytes(document(body, "", "")).unwrap()
+        scan_bytes(document(body, "", "")).unwrap().kinds
     }
 
     fn graphic(uri: &str, content: &str) -> String {
@@ -1122,13 +1192,14 @@ mod tests {
     fn headers_are_read_and_styles_are_not() {
         let chart = graphic("http://schemas.openxmlformats.org/drawingml/2006/chart", "");
         assert_eq!(
-            scan_bytes(document("<w:p/>", &chart, "")).unwrap(),
+            scan_bytes(document("<w:p/>", &chart, "")).unwrap().kinds,
             ["chart"]
         );
         let framed = r#"<w:style w:styleId="Frame"><w:pPr><w:framePr w:w="10"/></w:pPr></w:style>"#;
         assert!(
             scan_bytes(document("<w:p/>", "", framed))
                 .unwrap()
+                .kinds
                 .is_empty()
         );
         // Kinds come in the order of KINDS, each once.
@@ -1151,13 +1222,15 @@ mod tests {
             )
         };
         let scan = |title: bool, settings: &str| {
-            scan_bytes(package(&body(title), headers, settings, "")).unwrap()
+            scan_bytes(package(&body(title), headers, settings, ""))
+                .unwrap()
+                .kinds
         };
         assert_eq!(scan(false, ""), ["chart"]);
         assert_eq!(scan(true, ""), ["chart", "equation"]);
         let off = body(false).replace("</w:sectPr>", r#"<w:titlePg w:val="0"/></w:sectPr>"#);
         assert_eq!(
-            scan_bytes(package(&off, headers, "", "")).unwrap(),
+            scan_bytes(package(&off, headers, "", "")).unwrap().kinds,
             ["chart"],
             "a title page turned off"
         );
@@ -1174,13 +1247,43 @@ mod tests {
         // A title page of a later section shows the first-page header too.
         let two = r#"<w:p><w:pPr><w:sectPr><w:headerReference w:type="first" r:id="rId4"/></w:sectPr></w:pPr></w:p><w:p/><w:sectPr><w:titlePg/></w:sectPr>"#;
         assert_eq!(
-            scan_bytes(package(two, headers, "", "")).unwrap(),
+            scan_bytes(package(two, headers, "", "")).unwrap().kinds,
             ["equation"]
         );
+        // A title page is a section's own: section 2, without one, names a first-page
+        // header no page shows, while section 1's title page shows no first-page header.
+        let own = r#"<w:p><w:pPr><w:sectPr><w:titlePg/></w:sectPr></w:pPr></w:p><w:p/><w:sectPr><w:headerReference w:type="first" r:id="rId4"/></w:sectPr>"#;
+        let scanned = scan_bytes(package(own, headers, "", "")).unwrap();
+        assert!(scanned.kinds.is_empty(), "{scanned:?}");
+        assert!(
+            scanned
+                .stories_not_shown
+                .contains(&"first-page-header".to_owned())
+        );
+        // A section's own header of a type takes the place of the one before: both
+        // sections' headers are shown.
+        let replaced = r#"<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rId3"/></w:sectPr></w:pPr></w:p><w:p/><w:sectPr><w:headerReference w:type="default" r:id="rId4"/></w:sectPr>"#;
+        assert_eq!(
+            scan_bytes(package(replaced, headers, "", ""))
+                .unwrap()
+                .kinds,
+            ["chart", "equation"]
+        );
+        // The settings part may be named by Strict's relationship type.
+        let strict_settings = scan_bytes(package_with(
+            &body(false),
+            headers,
+            "<w:evenAndOddHeaders/>",
+            "",
+            "http://purl.oclc.org/ooxml/officeDocument/relationships/settings",
+        ))
+        .unwrap();
+        assert_eq!(strict_settings.kinds, ["chart", "ruby"]);
         // No section names a header: none is read.
         assert!(
             scan_bytes(package("<w:p/>", headers, "", ""))
                 .unwrap()
+                .kinds
                 .is_empty()
         );
     }
@@ -1208,6 +1311,10 @@ mod tests {
                 vec![],
             ),
             (
+                r#"<sw:tbl><sw:tr><sw:tc><sw:tcPr><sw:textDirection sw:val="tbV"/></sw:tcPr></sw:tc></sw:tr></sw:tbl>"#,
+                vec![],
+            ),
+            (
                 r#"<sw:tbl><sw:tr><sw:tc><sw:tcPr><sw:textDirection sw:val="rl"/></sw:tcPr></sw:tc></sw:tr></sw:tbl>"#,
                 vec!["vertical text"],
             ),
@@ -1220,6 +1327,52 @@ mod tests {
             let body = format!(r#"<w:p {strict}>{content}</w:p>"#);
             assert_eq!(kinds(&body), expected, "{content}");
         }
+    }
+
+    /// The stories of Word's formatting export no page shows: those of the kinds and types
+    /// no section shows, through the sections in order.
+    #[test]
+    fn the_stories_no_page_shows_are_named() {
+        let not_shown = |body: &str, settings: &str| {
+            scan_bytes(package(body, ["", "", ""], settings, ""))
+                .unwrap()
+                .stories_not_shown
+        };
+        let refs = r#"<w:headerReference w:type="default" r:id="rId3"/><w:headerReference w:type="first" r:id="rId4"/><w:footerReference w:type="even" r:id="rId5"/>"#;
+        assert_eq!(
+            not_shown(&format!("<w:p/><w:sectPr>{refs}</w:sectPr>"), ""),
+            [
+                "first-page-header",
+                "even-pages-header",
+                "primary-footer",
+                "first-page-footer",
+                "even-pages-footer"
+            ]
+        );
+        assert_eq!(
+            not_shown(
+                &format!("<w:p/><w:sectPr>{refs}<w:titlePg/></w:sectPr>"),
+                "<w:evenAndOddHeaders/>"
+            ),
+            ["even-pages-header", "primary-footer", "first-page-footer"]
+        );
+        assert_eq!(not_shown("<w:p/>", "").len(), 6);
+    }
+
+    /// What a group of shapes, a canvas or an object shown by a drawing holds is left out
+    /// with it.
+    #[test]
+    fn what_objects_left_out_whole_hold_is_not_read() {
+        let canvas = graphic(
+            "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas",
+            "<wpc:wpc><wps:wsp><wps:txbx><w:txbxContent><w:tbl/></w:txbxContent></wps:txbx></wps:wsp></wpc:wpc>",
+        );
+        assert_eq!(kinds(&canvas), ["shape"]);
+        let object = format!(
+            "<w:p><w:r><w:object>{}</w:object></w:r></w:p>",
+            r#"<w:drawing><wp:inline><a:graphic><a:graphicData uri="x"><a:blip r:embed="rId1"/></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+        );
+        assert_eq!(kinds(&object), ["embedded object"]);
     }
 
     /// What a group of shapes holds is left out with it: only the group is found.

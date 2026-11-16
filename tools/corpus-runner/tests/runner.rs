@@ -1141,6 +1141,18 @@ fn the_content_of_a_rendered_document_is_checked_against_its_report() -> io::Res
         report["files"][0]["content"],
         serde_json::json!(["text wrapping"])
     );
+    // The document names no header or footer: no page shows any of their stories.
+    assert_eq!(
+        report["files"][0]["stories_not_shown"],
+        serde_json::json!([
+            "primary-header",
+            "first-page-header",
+            "even-pages-header",
+            "primary-footer",
+            "first-page-footer",
+            "even-pages-footer"
+        ])
+    );
     // Without a report, a run that does not render reads no markup.
     let (code, output) = corpus.run(&["--report", "plain.json", "docs/wrapped.docx"], None)?;
     assert_eq!(code, 0, "{output}");

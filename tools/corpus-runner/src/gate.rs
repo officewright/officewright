@@ -835,9 +835,10 @@ pub fn silences(report: &Report) -> Silences {
                             })
                     })
             };
+            let not_shown = file.stories_not_shown.as_deref().unwrap_or_default();
             let shown: BTreeSet<&String> = word_fonts
                 .iter()
-                .filter(|(story, _)| !left_out(story))
+                .filter(|(story, _)| !left_out(story) && !not_shown.contains(story))
                 .flat_map(|(_, fonts)| fonts)
                 .collect();
             for font in shown {
@@ -1113,6 +1114,7 @@ mod tests {
             layout_report: None,
             content: None,
             content_error: None,
+            stories_not_shown: None,
         }
     }
 
@@ -1851,6 +1853,46 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    /// Each entry STORIES_LEFT_OUT names leaves its story's fonts unchecked, and the stories
+    /// the scan says no page shows are not checked either.
+    #[test]
+    fn every_story_left_out_and_not_shown_goes_unchecked() {
+        let found = |story: &str, entries: &[(&str, &str)], not_shown: Option<Vec<String>>| {
+            let mut file = rendered("c/a.docx", &[], &["Carlito-Regular"], &[], entries);
+            file.scores.as_mut().unwrap().word_text_fonts = Some(BTreeMap::from([
+                ("main".to_owned(), vec!["Carlito".to_owned()]),
+                (story.to_owned(), vec!["Cambria".to_owned()]),
+            ]));
+            file.stories_not_shown = not_shown;
+            silences(&Report::new(vec![file])).found.len()
+        };
+        for (story, words) in STORIES_LEFT_OUT {
+            for word in words {
+                assert_eq!(
+                    found(story, &[("feature-unsupported", word)], None),
+                    0,
+                    "{word}"
+                );
+            }
+            if !words.is_empty() {
+                assert_eq!(found(story, &[], None), 1, "{story}");
+            }
+        }
+        for story in ["first-page-header", "even-pages-footer"] {
+            assert_eq!(found(story, &[], None), 1, "{story}");
+            assert_eq!(
+                found(story, &[], Some(vec![story.to_owned()])),
+                0,
+                "{story}"
+            );
+            assert_eq!(
+                found(story, &[], Some(vec!["primary-header".to_owned()])),
+                1,
+                "{story}"
+            );
+        }
     }
 
     /// A finding counts as new only where main checked the same thing: fonts where main

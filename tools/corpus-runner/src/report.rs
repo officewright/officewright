@@ -77,6 +77,10 @@ pub struct FileResult {
     /// With `--render`: why the rendered document's markup could not be read for them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_error: Option<String>,
+    /// With `--render`: the header and footer stories of Word's formatting export that no
+    /// page of the document shows, whose fonts row 11 does not check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stories_not_shown: Option<Vec<String>>,
 }
 
 /// What a child process did: its exit, what it printed, and whether it was stopped.
@@ -113,6 +117,7 @@ pub fn classify(
         layout_report: None,
         content: None,
         content_error: None,
+        stories_not_shown: None,
     };
     let first_line = |text: &str| {
         text.lines()
@@ -552,6 +557,7 @@ mod tests {
             layout_report: None,
             content: None,
             content_error: None,
+            stories_not_shown: None,
         }
     }
 

@@ -433,7 +433,10 @@ fn run_all(
                 // Here, not in the child, so that the child's time and memory are the
                 // library's alone.
                 match content::scan(file) {
-                    Ok(kinds) => result.content = Some(kinds),
+                    Ok(scanned) => {
+                        result.content = Some(scanned.kinds);
+                        result.stories_not_shown = Some(scanned.stories_not_shown);
+                    }
                     Err(error) => result.content_error = Some(error),
                 }
             }
