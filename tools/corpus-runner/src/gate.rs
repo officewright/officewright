@@ -1,8 +1,10 @@
 //! `corpus-runner gate`: the release criteria of Milestone 4 over a run's report, printed as
 //! a markdown table with the target, the value on main and the value on the branch.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::content;
+use crate::features;
 use crate::metrics::Scores;
 use crate::report::{FileResult, Report, Status};
 
@@ -184,12 +186,13 @@ pub const CRITERIA: [(&str, &str, &str); 12] = [
     ),
     (
         "Report",
-        "every substitution and unsupported feature reported",
-        "every document",
+        "every font of Word's text drawn or its substitution reported; all content the \
+         layout does not lay out reported",
+        "fonts: reference documents; content: every rendered document",
     ),
     (
         "Required features",
-        "no degradation of a required feature",
+        "no entry degrading a required feature",
         "reference documents",
     ),
 ];
@@ -587,14 +590,322 @@ pub fn measure_against(report: &Report, main: Option<&Report>, same_fonts: bool)
         keys,
     });
 
-    // 11 and 12 need the layout report.
-    out.push(Measure::unmeasured(
-        "not measured yet: the layout report is in the run's report, the criterion to come (#239)",
-    ));
-    out.push(Measure::unmeasured(
-        "not measured yet: the layout report is in the run's report, the criterion to come (#239)",
-    ));
+    // 11. Report: what the PDF shows otherwise than Word does without an entry saying so.
+    let silent = silences(report);
+    if silent.fonts_checked + silent.content_checked == 0 {
+        out.push(Measure::unmeasured(
+            "no document checked: nothing rendered, or a report without the fonts and content",
+        ));
+    } else {
+        let (fonts, content): (Vec<&Silence>, Vec<&Silence>) = silent
+            .found
+            .iter()
+            .partition(|found| matches!(found.what, Unreported::Font(_)));
+        let mut text = format!(
+            "{} fonts unreported in {} documents, of {} checked; {} kinds of content \
+             unreported in {} documents, of {} checked",
+            fonts.len(),
+            documents(&fonts),
+            silent.fonts_checked,
+            content.len(),
+            documents(&content),
+            silent.content_checked
+        );
+        let mut keys = vec![Key::count(fonts.len()), Key::count(content.len())];
+        if let Some(main) = main {
+            let new = silent.new_against(&silences(main));
+            text.push_str(&format!("; {new} new against main"));
+            keys.push(Key::count(new));
+        } else {
+            keys.push(Key::count(0));
+        }
+        out.push(Measure {
+            text,
+            pass: Some(silent.found.is_empty()),
+            keys,
+        });
+    }
+
+    // 12. Required features: entries of reference documents that degrade one.
+    let degraded = degradations(report);
+    if degraded.checked == 0 {
+        out.push(Measure::unmeasured("no rendered reference document"));
+    } else {
+        let documents: BTreeSet<&str> = degraded
+            .found
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect();
+        let mut by_feature: BTreeMap<&str, usize> = BTreeMap::new();
+        for (_, feature) in &degraded.found {
+            let label = if feature.starts_with(UNCLASSIFIED) {
+                "unclassified"
+            } else {
+                feature.as_str()
+            };
+            *by_feature.entry(label).or_default() += 1;
+        }
+        let mut text = format!(
+            "{} of {} reference documents",
+            documents.len(),
+            degraded.checked
+        );
+        if !by_feature.is_empty() {
+            let counts: Vec<String> = by_feature
+                .iter()
+                .map(|(feature, count)| format!("{feature} {count}"))
+                .collect();
+            text.push_str(&format!(" ({})", counts.join(", ")));
+        }
+        let mut keys = vec![
+            Key::count(documents.len()),
+            Key::count(degraded.found.len()),
+        ];
+        if let Some(main) = main {
+            let before = degradations(main).found;
+            let new = degraded.found.difference(&before).count();
+            text.push_str(&format!("; {new} new against main"));
+            keys.push(Key::count(new));
+        } else {
+            keys.push(Key::count(0));
+        }
+        out.push(Measure {
+            text,
+            pass: Some(documents.is_empty()),
+            keys,
+        });
+    }
     out
+}
+
+/// What row 11 finds unreported in a document.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Unreported {
+    /// A font of Word's text that our PDF does not embed and no `font-substituted` entry
+    /// names.
+    Font(String),
+    /// A kind of content that no `feature-unsupported` entry names.
+    Content(String),
+    /// The document's markup could not be read for its content.
+    Unreadable(String),
+}
+
+impl std::fmt::Display for Unreported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unreported::Font(font) => write!(f, "font {font}"),
+            Unreported::Content(kind) => write!(f, "{kind}"),
+            Unreported::Unreadable(error) => write!(f, "markup not read: {error}"),
+        }
+    }
+}
+
+/// One thing row 11 finds, and the file it is in.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Silence {
+    pub path: String,
+    pub what: Unreported,
+}
+
+/// Row 11 over a report: what it finds, and how many documents it could check for fonts
+/// and for content.
+#[derive(Debug, Default)]
+pub struct Silences {
+    pub found: Vec<Silence>,
+    pub fonts_checked: usize,
+    pub content_checked: usize,
+    /// The files whose fonts, and whose content, were checked, for comparing with main.
+    fonts_of: BTreeSet<String>,
+    content_of: BTreeSet<String>,
+}
+
+impl Silences {
+    /// How many findings this report has that `main` does not, among the documents main
+    /// checked the same way: a report of an older runner, which did not check them, adds
+    /// none.
+    fn new_against(&self, main: &Silences) -> usize {
+        let before: BTreeSet<&Silence> = main.found.iter().collect();
+        self.found
+            .iter()
+            .filter(|found| {
+                let checked = match found.what {
+                    Unreported::Font(_) => &main.fonts_of,
+                    Unreported::Content(_) | Unreported::Unreadable(_) => &main.content_of,
+                };
+                checked.contains(&found.path) && !before.contains(found)
+            })
+            .count()
+    }
+}
+
+fn documents(found: &[&Silence]) -> usize {
+    found
+        .iter()
+        .map(|found| found.path.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+/// A font's name as `pdffonts` gives it, or a family's, in lower case without spaces and
+/// punctuation, for comparing the two.
+fn squeezed(name: &str) -> String {
+    name.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Whether our PDF embeds a font of `family`: one whose PostScript name, before its style
+/// (`LiberationSans-Bold`), is the family's name without spaces, or that with Microsoft's
+/// `PSMT` or `MT` after it (`TimesNewRomanPSMT`).
+fn embeds(pdf_fonts: &[String], family: &str) -> bool {
+    let family = squeezed(family);
+    !family.is_empty()
+        && pdf_fonts.iter().any(|font| {
+            let base = font.split('-').next().unwrap_or(font);
+            [squeezed(font), squeezed(base)].iter().any(|name| {
+                name == &family
+                    || name
+                        .strip_prefix(family.as_str())
+                        .is_some_and(|rest| matches!(rest, "psmt" | "mt"))
+            })
+        })
+}
+
+/// The family a `font-substituted` entry names first, in its quotes: the requested one of
+/// a substitution (`"Calibri" → "Carlito" (...)`), the font of a fallback for some
+/// characters, or a symbol font that is not installed.
+fn substituted(message: &str) -> Option<&str> {
+    let rest = message.strip_prefix('"')?;
+    rest.split_once('"').map(|(family, _)| family)
+}
+
+/// Row 11 over a report.
+pub fn silences(report: &Report) -> Silences {
+    let mut out = Silences::default();
+    for file in &report.files {
+        let Some(entries) = &file.layout_report else {
+            continue;
+        };
+        let fonts = file.scores.as_ref().and_then(|scores| {
+            Some((scores.word_text_fonts.as_ref()?, scores.pdf_fonts.as_ref()?))
+        });
+        if let Some((word_fonts, pdf_fonts)) = fonts {
+            out.fonts_checked += 1;
+            out.fonts_of.insert(file.path.clone());
+            let reported: BTreeSet<String> = entries
+                .iter()
+                .filter(|entry| entry.kind == "font-substituted")
+                .filter_map(|entry| substituted(&entry.message))
+                .map(str::to_lowercase)
+                .collect();
+            for font in word_fonts {
+                if !reported.contains(&font.to_lowercase()) && !embeds(pdf_fonts, font) {
+                    out.found.push(Silence {
+                        path: file.path.clone(),
+                        what: Unreported::Font(font.clone()),
+                    });
+                }
+            }
+        }
+        if let Some(error) = &file.content_error {
+            out.content_checked += 1;
+            out.content_of.insert(file.path.clone());
+            out.found.push(Silence {
+                path: file.path.clone(),
+                what: Unreported::Unreadable(error.clone()),
+            });
+        } else if let Some(kinds) = &file.content {
+            out.content_checked += 1;
+            out.content_of.insert(file.path.clone());
+            for kind in kinds {
+                let Some(words) = content::words(kind) else {
+                    continue;
+                };
+                let named = entries.iter().any(|entry| {
+                    entry.kind == "feature-unsupported" && content::names(&entry.message, words)
+                });
+                if !named {
+                    out.found.push(Silence {
+                        path: file.path.clone(),
+                        what: Unreported::Content(kind.clone()),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// How row 12 names an entry no line of `features::MESSAGES` classes: this, then its
+/// message.
+const UNCLASSIFIED: &str = "unclassified: ";
+
+/// Row 12 over a report: the reference documents it could check, and each document with
+/// a required feature an entry degrades (`unclassified: ` and the message for an entry
+/// that is not classed).
+pub struct Degradations {
+    pub checked: usize,
+    pub found: BTreeSet<(String, String)>,
+}
+
+pub fn degradations(report: &Report) -> Degradations {
+    let mut out = Degradations {
+        checked: 0,
+        found: BTreeSet::new(),
+    };
+    for file in report.files.iter().filter(|file| is_reference(file)) {
+        let Some(entries) = &file.layout_report else {
+            continue;
+        };
+        out.checked += 1;
+        for entry in entries {
+            let feature = match features::classify(&entry.kind, &entry.message) {
+                features::Class::Required(feature) => feature.to_owned(),
+                features::Class::Unclassified => format!("{UNCLASSIFIED}{}", entry.message),
+                features::Class::NotRequired => continue,
+            };
+            out.found.insert((file.path.clone(), feature));
+        }
+    }
+    out
+}
+
+/// The lines above the table that name what rows 11 and 12 find, by the paths of the
+/// report, so that a miss can be read without opening the report.
+pub fn findings(report: &Report) -> Vec<String> {
+    let mut lines = Vec::new();
+    let silent = silences(report);
+    if !silent.found.is_empty() {
+        let items: Vec<String> = silent
+            .found
+            .iter()
+            .map(|found| format!("{} ({})", found.path, found.what))
+            .collect();
+        lines.push(format!("Row 11, not reported: {}", listed(&items)));
+    }
+    let degraded = degradations(report);
+    let mut by_feature: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for (path, feature) in &degraded.found {
+        by_feature
+            .entry(feature.as_str())
+            .or_default()
+            .push(path.clone());
+    }
+    for (feature, files) in by_feature {
+        lines.push(format!("Row 12, {feature}: {}", listed(&files)));
+    }
+    lines
+}
+
+/// Up to twenty items, and how many more there are.
+fn listed(items: &[String]) -> String {
+    let shown: Vec<&str> = items.iter().take(20).map(String::as_str).collect();
+    let mut line = shown.join(", ");
+    if items.len() > shown.len() {
+        line.push_str(&format!(" and {} more", items.len() - shown.len()));
+    }
+    line
 }
 
 /// How the documents divide, and which scored ones the render criteria leave out, for the
@@ -736,6 +1047,9 @@ mod tests {
             fonts_not_embedded: Some(Vec::new()),
             word_fonts: Some(fonts.iter().map(|font| (*font).to_owned()).collect()),
             word_fonts_complete: Some(true),
+            word_text_fonts: Some(fonts.iter().map(|font| (*font).to_owned()).collect()),
+            // Every font of the text embedded, under its PostScript name.
+            pdf_fonts: Some(fonts.iter().map(|font| font.replace(' ', "")).collect()),
         }
     }
 
@@ -753,6 +1067,8 @@ mod tests {
             score_error: None,
             render_error: None,
             layout_report: None,
+            content: None,
+            content_error: None,
         }
     }
 
@@ -1355,5 +1671,285 @@ mod tests {
         for index in [2, 3, 4, 5, 6, 7, 8, 10, 11] {
             assert_eq!(measures[index].pass, None, "criterion {}", index + 1);
         }
+    }
+
+    fn entry(kind: &str, message: &str) -> crate::child::LayoutEntry {
+        crate::child::LayoutEntry {
+            kind: kind.to_owned(),
+            location: "document".to_owned(),
+            message: message.to_owned(),
+        }
+    }
+
+    const CALIBRI: &str = "\"Calibri\" → \"Carlito\" (metric-compatible substitute)";
+    const DRAWING: &str = "a drawing that shows no picture (a shape, chart or group) is left out";
+
+    /// A rendered reference document: Word's text in `fonts`, our PDF embedding
+    /// `pdf_fonts`, holding `content`, and its layout report `entries`.
+    fn rendered(
+        path: &str,
+        fonts: &[&str],
+        pdf_fonts: &[&str],
+        content: &[&str],
+        entries: &[(&str, &str)],
+    ) -> FileResult {
+        let mut scores = scores(2, 1.0, 10, 10, fonts);
+        scores.pdf_fonts = Some(pdf_fonts.iter().map(|font| (*font).to_owned()).collect());
+        let mut file = file(path, Status::Opened, Some(scores));
+        file.content = Some(content.iter().map(|kind| (*kind).to_owned()).collect());
+        file.layout_report = Some(
+            entries
+                .iter()
+                .map(|(kind, message)| entry(kind, message))
+                .collect(),
+        );
+        file
+    }
+
+    #[test]
+    fn fonts_of_word_s_text_are_drawn_or_reported() {
+        let row = |files: Vec<FileResult>| measure(&Report::new(files), false).swap_remove(10);
+        let letter = |entries: &[(&str, &str)]| {
+            rendered(
+                "c/letter.docx",
+                &["Calibri", "Carlito", "Times New Roman"],
+                &["Carlito-Bold", "TimesNewRomanPSMT"],
+                &[],
+                entries,
+            )
+        };
+        let reported = row(vec![letter(&[("font-substituted", CALIBRI)])]);
+        assert_eq!(reported.pass, Some(true), "{}", reported.text);
+        assert_eq!(
+            reported.text,
+            "0 fonts unreported in 0 documents, of 1 checked; 0 kinds of content unreported \
+             in 0 documents, of 1 checked"
+        );
+        // Calibri is neither in our PDF nor named by a substitution.
+        let silent = row(vec![letter(&[(
+            "font-substituted",
+            "\"Arial\" → \"Liberation Sans\" (metric-compatible substitute)",
+        )])]);
+        assert_eq!(silent.pass, Some(false));
+        assert!(
+            silent.text.starts_with("1 fonts unreported in 1 documents"),
+            "{}",
+            silent.text
+        );
+        // Only a substitution names a font: a feature entry that quotes it does not.
+        let other_kind = row(vec![letter(&[("feature-unsupported", CALIBRI)])]);
+        assert_eq!(other_kind.pass, Some(false));
+        // A family is told from another that starts like it.
+        let symbols = rendered(
+            "c/s.docx",
+            &["Noto Sans"],
+            &["NotoSansSymbols-Regular"],
+            &[],
+            &[],
+        );
+        assert_eq!(row(vec![symbols]).pass, Some(false));
+        // Without Word's fonts of the text or our PDF's, the fonts are not checked.
+        let mut old = letter(&[]);
+        old.scores.as_mut().unwrap().word_text_fonts = None;
+        let unchecked = row(vec![old]);
+        assert!(
+            unchecked.text.contains("of 0 checked; "),
+            "{}",
+            unchecked.text
+        );
+        assert_eq!(unchecked.pass, Some(true));
+    }
+
+    #[test]
+    fn a_pdf_font_is_matched_to_its_family() {
+        let fonts = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert!(embeds(&fonts(&["LiberationSans-Bold"]), "Liberation Sans"));
+        assert!(embeds(&fonts(&["LiberationSans"]), "liberation sans"));
+        assert!(embeds(&fonts(&["TimesNewRomanPSMT"]), "Times New Roman"));
+        assert!(embeds(&fonts(&["ArialMT"]), "Arial"));
+        assert!(embeds(&fonts(&["MS-Gothic"]), "MS Gothic"));
+        assert!(embeds(
+            &fonts(&["LibreBarcode128-Regular"]),
+            "Libre Barcode 128"
+        ));
+        assert!(!embeds(&fonts(&["NotoSansSymbols-Regular"]), "Noto Sans"));
+        assert!(!embeds(&fonts(&["ArialNarrow"]), "Arial"));
+        assert!(!embeds(&fonts(&["Carlito-Regular"]), "Calibri"));
+        assert!(!embeds(&fonts(&["Carlito"]), "(unresolved)"));
+        assert!(!embeds(&[], "Carlito"));
+        assert!(!embeds(&fonts(&["X"]), ""));
+    }
+
+    #[test]
+    fn a_substitution_names_its_first_quoted_family() {
+        assert_eq!(substituted(CALIBRI), Some("Calibri"));
+        assert_eq!(
+            substituted("\"Noto Sans\" has no glyph for some characters, such as U+25CF '●'"),
+            Some("Noto Sans")
+        );
+        assert_eq!(
+            substituted("cannot read \"X\"; its text is drawn in other fonts"),
+            None
+        );
+        assert_eq!(substituted("\"unterminated"), None);
+    }
+
+    #[test]
+    fn content_the_layout_does_not_lay_out_is_reported() {
+        let row = |files: Vec<FileResult>| measure(&Report::new(files), false).swap_remove(10);
+        let poster = |entries: &[(&str, &str)]| {
+            rendered(
+                "c/poster.docx",
+                &[],
+                &[],
+                &["chart", "text wrapping"],
+                entries,
+            )
+        };
+        let named = row(vec![poster(&[
+            ("feature-unsupported", DRAWING),
+            (
+                "feature-unsupported",
+                "text does not wrap around floating objects yet: it runs over or under them",
+            ),
+        ])]);
+        assert_eq!(named.pass, Some(true), "{}", named.text);
+        let one = row(vec![poster(&[("feature-unsupported", DRAWING)])]);
+        assert_eq!(one.pass, Some(false));
+        assert!(
+            one.text
+                .ends_with("1 kinds of content unreported in 1 documents, of 1 checked"),
+            "{}",
+            one.text
+        );
+        assert_eq!(
+            findings(&Report::new(vec![poster(&[(
+                "feature-unsupported",
+                DRAWING
+            )])])),
+            ["Row 11, not reported: c/poster.docx (text wrapping)"]
+        );
+        // Only an unsupported feature's entry names content.
+        let overflow = row(vec![poster(&[
+            ("feature-unsupported", DRAWING),
+            ("overflow", "text does not wrap around floating objects"),
+        ])]);
+        assert_eq!(overflow.pass, Some(false));
+        // A kind of another runner's version is not checked.
+        let unknown = row(vec![rendered("c/a.docx", &[], &[], &["hologram"], &[])]);
+        assert_eq!(unknown.pass, Some(true));
+        // Markup that could not be read fails the row.
+        let mut unread = rendered("c/a.docx", &[], &[], &[], &[]);
+        unread.content = None;
+        unread.content_error = Some("/word/document.xml: not well-formed".to_owned());
+        let unreadable = row(vec![unread.clone()]);
+        assert_eq!(unreadable.pass, Some(false));
+        assert_eq!(
+            findings(&Report::new(vec![unread])),
+            [
+                "Row 11, not reported: c/a.docx (markup not read: /word/document.xml: not well-formed)"
+            ]
+        );
+        // A document that was not rendered has no report to check.
+        let mut unrendered = poster(&[]);
+        unrendered.layout_report = None;
+        assert_eq!(row(vec![unrendered]).pass, None);
+    }
+
+    /// Row 11 counts what the branch leaves unreported that main reported, so that a new
+    /// silence shows even when another one goes; a main report of an older runner, which
+    /// did not check, adds none.
+    #[test]
+    fn row_11_compares_with_main() {
+        let doc = |content: &[&str]| rendered("c/a.docx", &["Carlito"], &["Carlito"], content, &[]);
+        let main_report = Report::new(vec![doc(&["chart"])]);
+        let main = measure(&main_report, false);
+        let branch_report = Report::new(vec![doc(&["columns"])]);
+        let branch = measure_against(&branch_report, Some(&main_report), false);
+        assert!(
+            branch[10].text.ends_with("; 1 new against main"),
+            "{}",
+            branch[10].text
+        );
+        assert!(branch[10].worse_than(&main[10]));
+        let same = measure_against(&main_report, Some(&main_report), false);
+        assert!(same[10].text.ends_with("; 0 new against main"));
+        assert!(!same[10].worse_than(&main[10]));
+        // Main without content: nothing new, and nothing measured there to be worse than.
+        let mut older = doc(&[]);
+        older.content = None;
+        older.scores.as_mut().unwrap().word_text_fonts = None;
+        let older_report = Report::new(vec![older]);
+        let before = measure(&older_report, false);
+        assert_eq!(before[10].pass, None);
+        let against_older = measure_against(&branch_report, Some(&older_report), false);
+        assert!(against_older[10].text.ends_with("; 0 new against main"));
+        assert!(!against_older[10].worse_than(&before[10]));
+    }
+
+    #[test]
+    fn entries_degrading_a_required_feature_fail_row_12() {
+        let borders = ("feature-unsupported", "paragraph borders are not drawn yet");
+        let wrap = (
+            "feature-unsupported",
+            "text does not wrap around floating objects yet: it runs over or under them",
+        );
+        let unknown = (
+            "feature-unsupported",
+            "a block-level w:altChunk is left out",
+        );
+        let row = |files: Vec<FileResult>| measure(&Report::new(files), false).swap_remove(11);
+        let clean = row(vec![rendered("c/a.docx", &[], &[], &[], &[wrap])]);
+        assert_eq!(clean.pass, Some(true));
+        assert_eq!(clean.text, "0 of 1 reference documents");
+        let files = vec![
+            rendered("c/a.docx", &[], &[], &[], &[borders, borders, wrap]),
+            rendered("c/b.docx", &[], &[], &[], &[unknown, borders]),
+            // Not a reference document: row 12 does not look at it.
+            {
+                let mut file = rendered("c/c.docx", &[], &[], &[], &[borders]);
+                file.scores = None;
+                file
+            },
+        ];
+        let report = Report::new(files);
+        let measures = measure(&report, false);
+        assert_eq!(measures[11].pass, Some(false));
+        assert_eq!(
+            measures[11].text,
+            "2 of 2 reference documents (paragraph borders 2, unclassified 1)"
+        );
+        assert_eq!(
+            findings(&report),
+            [
+                "Row 12, paragraph borders: c/a.docx, c/b.docx",
+                "Row 12, unclassified: a block-level w:altChunk is left out: c/b.docx",
+            ]
+        );
+        let none = Report::new(vec![file("c/a.docx", Status::Opened, None)]);
+        assert_eq!(measure(&none, false)[11].pass, None);
+    }
+
+    /// Row 12 marks the branch worse for a degradation main does not have, even when the
+    /// branch removes another.
+    #[test]
+    fn row_12_compares_with_main() {
+        let borders = ("feature-unsupported", "paragraph borders are not drawn yet");
+        let notes = ("feature-unsupported", "endnotes are not laid out yet");
+        let main_report = Report::new(vec![rendered("c/a.docx", &[], &[], &[], &[borders])]);
+        let main = measure(&main_report, false);
+        let traded = Report::new(vec![rendered("c/a.docx", &[], &[], &[], &[notes])]);
+        let branch = measure_against(&traded, Some(&main_report), false);
+        assert!(
+            branch[11].text.ends_with("; 1 new against main"),
+            "{}",
+            branch[11].text
+        );
+        assert!(branch[11].worse_than(&main[11]));
+        let fixed = Report::new(vec![rendered("c/a.docx", &[], &[], &[], &[])]);
+        let better = measure_against(&fixed, Some(&main_report), false);
+        assert!(better[11].text.ends_with("; 0 new against main"));
+        assert!(!better[11].worse_than(&main[11]));
+        assert_eq!(better[11].pass, Some(true));
     }
 }

@@ -70,6 +70,13 @@ pub struct FileResult {
     /// With `--render`: what the layout reported for the document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout_report: Option<Vec<LayoutEntry>>,
+    /// With `--render`: the kinds of content of the rendered document that the layout
+    /// does not lay out, which its report should name (`content::KINDS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<Vec<String>>,
+    /// With `--render`: why the rendered document's markup could not be read for them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_error: Option<String>,
 }
 
 /// What a child process did: its exit, what it printed, and whether it was stopped.
@@ -104,6 +111,8 @@ pub fn classify(
         score_error: None,
         render_error: None,
         layout_report: None,
+        content: None,
+        content_error: None,
     };
     let first_line = |text: &str| {
         text.lines()
@@ -541,6 +550,8 @@ mod tests {
             score_error: None,
             render_error: None,
             layout_report: None,
+            content: None,
+            content_error: None,
         }
     }
 
@@ -604,6 +615,8 @@ mod tests {
             fonts_not_embedded: None,
             word_fonts: None,
             word_fonts_complete: None,
+            word_text_fonts: None,
+            pdf_fonts: None,
         });
         result
     }

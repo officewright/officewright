@@ -719,6 +719,10 @@ fn documents_are_rendered_where_the_scoring_finds_them() -> io::Result<()> {
         "{entries:?}"
     );
     assert!(report["files"][1].get("layout_report").is_none());
+    // The rendered document's markup is read for the content its report should name: it
+    // has none.
+    assert_eq!(report["files"][0]["content"], serde_json::json!([]));
+    assert!(report["files"][1].get("content").is_none());
 
     // With references in docs/references (a group, then a folder per document), whose
     // documents are named from docs: rendered where the scoring looks, pdfs/good.pdf, and
@@ -1106,6 +1110,55 @@ fn memory_is_measured_after_the_rendering() -> io::Result<()> {
     assert!(
         rendered > opened + 1024,
         "{opened} KiB, then {rendered} KiB\n{output}"
+    );
+    Ok(())
+}
+
+/// A rendered document's content that the layout does not lay out goes into the report,
+/// and gate row 11 finds the layout's entry about it.
+#[test]
+fn the_content_of_a_rendered_document_is_checked_against_its_report() -> io::Result<()> {
+    let corpus = Corpus::new("content")?;
+    let wrapped = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/corpus/word-rules/E-wrap-square.docx");
+    std::fs::copy(wrapped, corpus.dir.join("docs/wrapped.docx"))?;
+    let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fonts");
+    let (code, output) = corpus.run(
+        &[
+            "--render",
+            "pdfs",
+            "--font-dir",
+            fonts.to_str().unwrap(),
+            "--report",
+            "report.json",
+            "docs/wrapped.docx",
+        ],
+        None,
+    )?;
+    assert_eq!(code, 0, "{output}");
+    let report: serde_json::Value = serde_json::from_str(&corpus.read("report.json")?).unwrap();
+    assert_eq!(
+        report["files"][0]["content"],
+        serde_json::json!(["text wrapping"])
+    );
+    // Without a report, a run that does not render reads no markup.
+    let (code, output) = corpus.run(&["--report", "plain.json", "docs/wrapped.docx"], None)?;
+    assert_eq!(code, 0, "{output}");
+    let plain: serde_json::Value = serde_json::from_str(&corpus.read("plain.json")?).unwrap();
+    assert!(plain["files"][0].get("content").is_none());
+    let gate = Command::new(env!("CARGO_BIN_EXE_corpus-runner"))
+        .current_dir(&corpus.dir)
+        .args(["gate", "report.json"])
+        .output()?;
+    let table = String::from_utf8_lossy(&gate.stdout);
+    let row = table
+        .lines()
+        .find(|line| line.starts_with("| 11 |"))
+        .unwrap_or_default();
+    assert!(
+        row.contains("0 kinds of content unreported in 0 documents, of 1 checked")
+            && row.ends_with("| yes |"),
+        "{table}"
     );
     Ok(())
 }
