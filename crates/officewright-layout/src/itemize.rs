@@ -523,9 +523,11 @@ impl Builder<'_, '_, '_> {
         // (`E-soft-hyphen-font`, cases 03 and 04; #509). That it draws its other codes so
         // too is a hypothesis.
         let low = code & 0xFF;
-        // What is drawn where the font has no glyph for the code: its missing-glyph shape,
-        // for the code as written in a font that is no symbol font, but for a control
-        // character, which would end the line or move to a tab instead.
+        // What is drawn where the font has no glyph for the code: the code as written in a
+        // font that is no symbol font, with its missing-glyph shape, but for a control
+        // character, a space and a character that attaches to the one before, whose part in
+        // the line (a break, a tab, a soft hyphen) it would take; else the code U+F000 above
+        // the low byte, which has none.
         let mut missing = 0xF000 | low;
         if let (true, Some(face)) = (choice.installed, choice.face) {
             let symbol = self
@@ -535,7 +537,8 @@ impl Builder<'_, '_, '_> {
             let codes = if symbol {
                 [Some(0xF000 | low), Some(low)]
             } else {
-                if char::from_u32(code).is_some_and(|ch| !ch.is_control()) {
+                let plain = |ch: char| !(ch.is_control() || ch.is_whitespace() || attaches(ch));
+                if char::from_u32(code).is_some_and(plain) {
                     missing = code;
                 }
                 [Some(code), None]
@@ -575,17 +578,25 @@ impl Builder<'_, '_, '_> {
                 self.push(ch, source, look);
             }
             None => {
-                let why = if choice.installed {
-                    "the font has no such symbol"
-                } else {
-                    "the font is not installed"
-                };
-                self.fonts.report_once(
-                    ReportKind::GlyphMissing,
-                    self.location,
-                    format!("symbol {code:04X} of \"{font}\" cannot be drawn: {why}"),
-                );
                 let ch = char::from_u32(missing).unwrap_or('\u{FFFD}');
+                // Reported unless the font has a glyph for what is drawn, as a font that is
+                // no symbol font may have for the code U+F000 above a control character's.
+                let drawn = choice.installed
+                    && choice
+                        .face
+                        .is_some_and(|face| self.fonts.has_glyph(face, ch));
+                if !drawn {
+                    let why = if choice.installed {
+                        "the font has no such symbol"
+                    } else {
+                        "the font is not installed"
+                    };
+                    self.fonts.report_once(
+                        ReportKind::GlyphMissing,
+                        self.location,
+                        format!("symbol {code:04X} of \"{font}\" cannot be drawn: {why}"),
+                    );
+                }
                 let size = drawn_size(&style, style.size(), false);
                 let look = self.look(id, &style, choice, size, style.size(), Slot::Ascii);
                 self.push(ch, source, look);
@@ -1802,6 +1813,12 @@ mod tests {
         assert_eq!(runs(&itemized), [("AA", "\u{F041}A", 10.0)]);
         assert_eq!(families, ["Officewright Symc"]);
         assert!(report.is_empty(), "{report:?}");
+        // A code neither has, 0042, is drawn U+F000 above, with the font's missing-glyph
+        // shape, and reported.
+        let (itemized, report, _) =
+            setup.run(&[Inline::symbol("Officewright Symc", 0x0042, style)]);
+        assert_eq!(runs(&itemized), [("\u{F042}", "B", 10.0)]);
+        assert_eq!(messages(&report).len(), 1, "{report:?}");
     }
 
     #[test]
@@ -1845,6 +1862,35 @@ mod tests {
             [(itemized.text.len(), crate::breaks::Opportunity::Mandatory)]
         );
         assert_eq!(messages(&report).len(), 1, "{report:?}");
+        // Its symbols 00AD, a soft hyphen, 0081 and 0085, control characters, and 00A0, a space,
+        // which it has no glyphs for either, are drawn U+F000 above, in a run of their own,
+        // so that they take no part in the line; each is reported.
+        for code in [0x00AD, 0x0081, 0x0085, 0x00A0] {
+            let (itemized, report, _) = setup.run(&[
+                Inline::text("A", style),
+                Inline::symbol("Officewright Rais", code, style),
+                Inline::text("A", style),
+            ]);
+            let drawn = char::from_u32(0xF000 | u32::from(code)).map(String::from);
+            let source = char::from_u32(u32::from(code)).map(String::from);
+            let middle = runs(&itemized)
+                .get(1)
+                .map(|run| (run.0.to_owned(), run.1.to_owned()));
+            assert_eq!(middle, drawn.zip(source), "{code:04X}");
+            let breaks = crate::breaks::BreakMap::new(&itemized.text, true);
+            assert_eq!(
+                breaks.all(),
+                [(itemized.text.len(), crate::breaks::Opportunity::Mandatory)],
+                "{code:04X}"
+            );
+            assert_eq!(messages(&report).len(), 1, "{code:04X}: {report:?}");
+        }
+        // Its symbol 0020, a space, is drawn U+F000 above too, where it has a glyph: drawn,
+        // so not reported.
+        let (itemized, report, _) =
+            setup.run(&[Inline::symbol("Officewright Rais", 0x0020, style)]);
+        assert_eq!(runs(&itemized), [("\u{F020}", " ", 10.0)]);
+        assert!(report.is_empty(), "{report:?}");
     }
 
     #[test]
