@@ -139,16 +139,29 @@ pub(crate) fn with_soft_hyphen(font: Vec<u8>) -> Vec<u8> {
     remapped(font, 2, 0xB4, 0xAD)
 }
 
-/// `font` (the test font) as a symbol font: both subtables of its `cmap` are Windows
-/// symbol ones (platform 3, encoding 0), and map each of its glyphs from the code U+F000
-/// above its character, as symbol fonts do.
-pub(crate) fn with_symbol_cmap(font: Vec<u8>) -> Vec<u8> {
-    let mut font = [0x20, 0x41, 0xB4, 0xC1]
+/// `font` (the test font) with each of its glyphs mapped from the code U+F000 above its
+/// character instead, in both subtables of its `cmap`, as [`with_period`] does: a font
+/// that is no symbol font and has its glyphs at private-use codes only.
+pub(crate) fn with_codes_raised(font: Vec<u8>) -> Vec<u8> {
+    [0x20, 0x41, 0xB4, 0xC1]
         .into_iter()
         .enumerate()
         .fold(font, |font, (index, ch)| {
             remapped(font, index, ch, 0xF000 | ch)
-        });
+        })
+}
+
+/// `font` (the test font) as a symbol font that maps its codes as symbol fonts do: both
+/// subtables of its `cmap` are Windows symbol ones (platform 3, encoding 0), and map each
+/// of its glyphs from the code U+F000 above its character.
+pub(crate) fn with_symbol_cmap(font: Vec<u8>) -> Vec<u8> {
+    with_low_symbol_cmap(with_codes_raised(font))
+}
+
+/// `font` (the test font) as a symbol font that maps its codes at U+0020 to U+00FF:
+/// both subtables of its `cmap` are Windows symbol ones (platform 3, encoding 0), and map
+/// each of its glyphs from its character.
+pub(crate) fn with_low_symbol_cmap(mut font: Vec<u8>) -> Vec<u8> {
     let cmap = table(&font, b"cmap");
     for record in 0..2 {
         let at = cmap + 4 + 8 * record;

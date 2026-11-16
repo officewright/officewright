@@ -516,28 +516,38 @@ impl Builder<'_, '_, '_> {
             self.out.source.push(ch);
         }
         let source = source_start..self.out.source.len();
-        // The font itself. A symbol font maps its codes at U+F020 to U+F0FF, and a code of
-        // U+0020 to U+00FF stands for the one U+F000 above it. Another font draws the code
-        // as it is written: Word draws symbol F0AD of Noto Sans with its missing-glyph shape,
-        // not as U+00AD, a soft hyphen, and breaks no line at it (`E-soft-hyphen-font`, cases
-        // 03 and 04; #509). That it draws its other codes so too is a hypothesis.
+        // The font itself. A symbol font maps its codes at U+F020 to U+F0FF, or at U+0020
+        // to U+00FF, and a code of either range stands for the same symbol. Another font
+        // draws the code as it is written: Word draws symbol F0AD of Noto Sans with its
+        // missing-glyph shape, not as U+00AD, a soft hyphen, and breaks no line at it
+        // (`E-soft-hyphen-font`, cases 03 and 04; #509). That it draws its other codes so
+        // too is a hypothesis.
         let low = code & 0xFF;
+        // What is drawn where the font has no glyph for the code: its missing-glyph shape,
+        // for the code as written in a font that is no symbol font.
+        let mut missing = 0xF000 | low;
         if let (true, Some(face)) = (choice.installed, choice.face) {
             let symbol = self
                 .fonts
                 .face(face)
                 .is_some_and(|shaping| shaping.face().is_symbol());
-            let drawn = char::from_u32(if symbol { 0xF000 | low } else { code })
-                .filter(|&ch| self.fonts.has_glyph(face, ch));
-            if let Some(ch) = drawn {
-                // A soft hyphen of a font that is not a symbol font stays with the
-                // character before it, as in text.
-                if !self.attach(ch, &source) {
-                    let size = drawn_size(&style, style.size(), false);
-                    let look = self.look(id, &style, choice, size, style.size(), Slot::Ascii);
-                    self.push(ch, source, look);
+            let codes = if symbol {
+                [Some(0xF000 | low), Some(low)]
+            } else {
+                missing = code;
+                [Some(code), None]
+            };
+            for ch in codes.into_iter().flatten().filter_map(char::from_u32) {
+                if self.fonts.has_glyph(face, ch) {
+                    // A soft hyphen of a font that is not a symbol font stays with the
+                    // character before it, as in text.
+                    if !self.attach(ch, &source) {
+                        let size = drawn_size(&style, style.size(), false);
+                        let look = self.look(id, &style, choice, size, style.size(), Slot::Ascii);
+                        self.push(ch, source, look);
+                    }
+                    return;
                 }
-                return;
             }
         }
         // A symbol font that is not installed: its code as the Unicode character it
@@ -572,7 +582,7 @@ impl Builder<'_, '_, '_> {
                     self.location,
                     format!("symbol {code:04X} of \"{font}\" cannot be drawn: {why}"),
                 );
-                let ch = char::from_u32(0xF000 | low).unwrap_or('\u{FFFD}');
+                let ch = char::from_u32(missing).unwrap_or('\u{FFFD}');
                 let size = drawn_size(&style, style.size(), false);
                 let look = self.look(id, &style, choice, size, style.size(), Slot::Ascii);
                 self.push(ch, source, look);
@@ -1765,7 +1775,7 @@ mod tests {
 
     #[test]
     fn a_symbol_font_draws_a_symbol_s_code_and_its_low_byte_alike() {
-        use crate::testing::with_symbol_cmap;
+        use crate::testing::{with_low_symbol_cmap, with_symbol_cmap};
         // Symb is a symbol font: its codes F041 and 0041 are both its glyph at U+F041.
         let sym = renamed(with_symbol_cmap(minimal()), "Officewright Symb");
         let mut setup = Setup::new(vec![minimal(), sym]);
@@ -1776,6 +1786,44 @@ mod tests {
         ]);
         assert_eq!(runs(&itemized), [("\u{F041}\u{F041}", "\u{F041}A", 10.0)]);
         assert_eq!(families, ["Officewright Symb"]);
+        assert!(report.is_empty(), "{report:?}");
+        // Symc is a symbol font that maps its codes at U+0020 to U+00FF: both codes are
+        // its glyph at U+0041.
+        let low = renamed(with_low_symbol_cmap(minimal()), "Officewright Symc");
+        let mut setup = Setup::new(vec![minimal(), low]);
+        let style = setup.style(plain(TEST));
+        let (itemized, report, families) = setup.run(&[
+            Inline::symbol("Officewright Symc", 0xF041, style),
+            Inline::symbol("Officewright Symc", 0x0041, style),
+        ]);
+        assert_eq!(runs(&itemized), [("AA", "\u{F041}A", 10.0)]);
+        assert_eq!(families, ["Officewright Symc"]);
+        assert!(report.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn a_symbol_a_font_cannot_draw_is_its_code_as_written() {
+        use crate::testing::with_codes_raised;
+        // Rais is no symbol font and has its glyph of `A` at U+F041 only: its symbol 0041
+        // is U+0041, which it has no glyph for, so its missing-glyph shape, reported.
+        let raised = renamed(with_codes_raised(minimal()), "Officewright Rais");
+        let mut setup = Setup::new(vec![minimal(), raised]);
+        let style = setup.style(plain(TEST));
+        let (itemized, report, _) =
+            setup.run(&[Inline::symbol("Officewright Rais", 0x0041, style)]);
+        assert_eq!(runs(&itemized), [("A", "A", 10.0)]);
+        assert_eq!(
+            messages(&report),
+            [(
+                ReportKind::GlyphMissing,
+                "symbol 0041 of \"Officewright Rais\" cannot be drawn: the font has no such \
+                 symbol"
+            )]
+        );
+        // Its symbol F041 is its glyph.
+        let (itemized, report, _) =
+            setup.run(&[Inline::symbol("Officewright Rais", 0xF041, style)]);
+        assert_eq!(runs(&itemized), [("\u{F041}", "\u{F041}", 10.0)]);
         assert!(report.is_empty(), "{report:?}");
     }
 
