@@ -344,13 +344,10 @@ fn read_end(end: BookmarkEnd<'_>, write_back: &mut WriteBack) {
     write_back.check(|| end.to_xml());
 }
 
-/// Reads a field instruction, which written back reads as the same instruction.
+/// Reads a field instruction, which is written back as read.
 fn read_instruction(text: &str) {
     let instruction = FieldInstruction::parse(text);
-    assert_eq!(
-        FieldInstruction::parse(&instruction.to_string()),
-        instruction
-    );
+    assert_eq!(instruction.to_string(), text);
     if let Some(link) = instruction.hyperlink() {
         let _ = (link.target(), link.bookmark(), link.tooltip());
     }

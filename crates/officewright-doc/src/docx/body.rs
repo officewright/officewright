@@ -426,6 +426,17 @@ impl Reading<'_, '_, '_> {
                     }
                     Ok(())
                 }
+                // Word allows bookmarks in a row-, cell- or inline-level control itself,
+                // outside its content (MS-OI29500 §17.5.2.30(a), §17.5.2.31(a),
+                // §17.5.2.32(a)), where they stand among what the content holds; it has no
+                // such note for a block-level control.
+                "bookmarkStart" | "bookmarkEnd" if level != Level::Block => self.bookmark(
+                    reader,
+                    mce,
+                    tag,
+                    Parent::Node(node),
+                    local == "bookmarkStart",
+                ),
                 _ => self.keep(reader, mce, tag),
             },
             Context::Container { parent, level } => self.child(reader, mce, tag, parent, level),

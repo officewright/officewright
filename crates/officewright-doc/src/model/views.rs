@@ -834,23 +834,26 @@ impl<'a> Hyperlink<'a> {
     /// The bookmark the hyperlink leads to inside the document, or, with a
     /// [`target`](Self::target), the place in the target: Word appends `#` and the
     /// anchor to the target (MS-OI29500 §17.16.22(b)), where the standard says the anchor
-    /// is ignored then.
+    /// is ignored then. Word allows at most 255 characters (§17.16.22(a)); a longer one is
+    /// given as written.
     pub fn anchor(self) -> Option<&'a str> {
         self.data.anchor.as_deref()
     }
 
-    /// A place in the target that is no bookmark (`w:docLocation`), as written.
+    /// A place in the target that is no bookmark (`w:docLocation`), as written; Word
+    /// allows at most 255 characters (MS-OI29500 §17.16.22(a)).
     pub fn doc_location(self) -> Option<&'a str> {
         self.data.doc_location.as_deref()
     }
 
     /// The frame or window the target opens in (`w:tgtFrame`), such as `_blank`, as
-    /// written.
+    /// written; Word allows at most 255 characters (MS-OI29500 §17.16.22(a)).
     pub fn target_frame(self) -> Option<&'a str> {
         self.data.target_frame.as_deref()
     }
 
-    /// The text shown over the hyperlink (`w:tooltip`), as written.
+    /// The text shown over the hyperlink (`w:tooltip`), as written; Word allows at most
+    /// 260 characters (MS-OI29500 §17.16.22(a)).
     pub fn tooltip(self) -> Option<&'a str> {
         self.data.tooltip.as_deref()
     }

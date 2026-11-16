@@ -8,35 +8,45 @@ use std::fmt;
 /// A field instruction as its syntax (ECMA-376 Part 1, §17.16.1) divides it: the
 /// field's name, then its arguments and switches in the order written.
 ///
-/// Reading never fails: whatever the text, it is divided as far as the syntax goes. An
-/// argument is a run of characters up to white space, or text in quotes, in which `\"`
-/// stands for a quote and `\\` for a backslash; a backslash before any other character in
-/// quotes is kept with it. A switch is a backslash and the character after it, such as
-/// `\l` or the formatting switch `\*`. Word requires white space after the field's name
-/// (MS-OI29500 §17.16.1(a)), which the name therefore ends at.
+/// Reading never fails: whatever the text, it is divided as far as the syntax goes.
+/// - An argument is text up to white space, or text in quotes, which may hold white
+///   space; in either, `\"` stands for a quote and `\\` for a backslash, and a backslash
+///   before any other character is kept with it.
+/// - A switch is a backslash and `!` or one or two Latin letters, such as `\l` or EQ's
+///   `\co`, or a formatting switch: `\*`, `\#` or `\@`. Its letters are read in any case
+///   (§17.16.1: `\b` and `\B` are the same switch). A backslash before anything else
+///   starts an argument.
+/// - Word requires white space after the field's name (MS-OI29500 §17.16.1(a)), which
+///   the name therefore ends at.
+/// - Word allows at most 10 formatting and 10 other switches in a field, and one picture
+///   switch (`\@` or `\#`), before the others (MS-OI29500 §17.16.1(b), (c)). What it does
+///   with an instruction past them is not known: it is read as written.
 ///
 /// Which switches take an argument depends on the field: [`switch`](Self::switch) gives
-/// the argument written after a switch, where there is one. Written back with `Display`,
-/// an instruction reads again as the same instruction.
+/// the argument written after a switch, where there is one. `Display` writes the
+/// instruction back as it was read, so that Word reads it as before, even where it uses
+/// syntax of its field that this division does not know, such as that of `EQ`.
 ///
 /// ```
 /// use officewright_doc::{FieldInstruction, FieldToken};
 ///
-/// let instruction = FieldInstruction::parse(r#"HYPERLINK "https://example.com/a b" \o "Say \"hi\"""#);
+/// let text = r#"HYPERLINK "https://example.com/a b" \O "Say \"hi\"""#;
+/// let instruction = FieldInstruction::parse(text);
 /// assert_eq!(instruction.name(), "HYPERLINK");
 /// assert_eq!(
 ///     instruction.tokens(),
 ///     [
 ///         FieldToken::Argument("https://example.com/a b".into()),
-///         FieldToken::Switch('o'),
+///         FieldToken::Switch("O".into()),
 ///         FieldToken::Argument(r#"Say "hi""#.into()),
 ///     ]
 /// );
-/// assert_eq!(instruction.switch('o'), Some(Some(r#"Say "hi""#)));
-/// assert_eq!(FieldInstruction::parse(&instruction.to_string()), instruction);
+/// assert_eq!(instruction.switch("o"), Some(Some(r#"Say "hi""#)));
+/// assert_eq!(instruction.to_string(), text);
 /// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FieldInstruction {
+    text: String,
     name: String,
     tokens: Vec<FieldToken>,
 }
@@ -47,8 +57,9 @@ pub struct FieldInstruction {
 pub enum FieldToken {
     /// An argument: a word, or text in quotes without them, its escapes read.
     Argument(String),
-    /// A switch: the character after its backslash, such as `l` for `\l` or `*` for `\*`.
-    Switch(char),
+    /// A switch: what follows its backslash, as written, such as `l` for `\l`, `co` for
+    /// `\co` or `*` for `\*`.
+    Switch(String),
 }
 
 impl FieldInstruction {
@@ -58,6 +69,15 @@ impl FieldInstruction {
         let mut name = String::new();
         let mut tokens = Vec::new();
         let mut first = true;
+        // The escapes of text, quoted or not: `\"` and `\\` stand for the character after
+        // the backslash.
+        let escaped =
+            |chars: &mut std::iter::Peekable<std::str::Chars<'_>>, text: &mut String| match chars
+                .next_if(|c| matches!(c, '"' | '\\'))
+            {
+                Some(c) => text.push(c),
+                None => text.push('\\'),
+            };
         loop {
             while chars.next_if(|c| c.is_whitespace()).is_some() {}
             let Some(&c) = chars.peek() else {
@@ -69,40 +89,54 @@ impl FieldInstruction {
                 while let Some(c) = chars.next() {
                     match c {
                         '"' => break,
-                        '\\' => match chars.peek() {
-                            Some(&escaped @ ('"' | '\\')) => {
-                                chars.next();
-                                text.push(escaped);
-                            }
-                            _ => text.push('\\'),
-                        },
+                        '\\' => escaped(&mut chars, &mut text),
                         c => text.push(c),
                     }
                 }
                 tokens.push(FieldToken::Argument(text));
-            } else if c == '\\' {
-                chars.next();
-                // A backslash at the end has no switch character: it is an argument.
-                match chars.next() {
-                    Some(switch) if !switch.is_whitespace() => {
-                        tokens.push(FieldToken::Switch(switch));
+                first = false;
+                continue;
+            }
+            if c == '\\' {
+                let mut ahead = chars.clone();
+                ahead.next();
+                let mut switch = String::new();
+                match ahead.next() {
+                    Some(c @ ('!' | '*' | '#' | '@')) => switch.push(c),
+                    Some(c) if c.is_ascii_alphabetic() => {
+                        switch.push(c);
+                        if let Some(c) = ahead.next_if(char::is_ascii_alphabetic) {
+                            switch.push(c);
+                        }
                     }
-                    _ => tokens.push(FieldToken::Argument("\\".into())),
+                    _ => {}
                 }
+                if !switch.is_empty() {
+                    chars = ahead;
+                    tokens.push(FieldToken::Switch(switch));
+                    first = false;
+                    continue;
+                }
+            }
+            let mut word = String::new();
+            while let Some(c) = chars.next_if(|c| !c.is_whitespace()) {
+                match c {
+                    '\\' => escaped(&mut chars, &mut word),
+                    c => word.push(c),
+                }
+            }
+            if first {
+                name = word;
             } else {
-                let mut word = String::new();
-                while let Some(c) = chars.next_if(|c| !c.is_whitespace()) {
-                    word.push(c);
-                }
-                if first {
-                    name = word;
-                } else {
-                    tokens.push(FieldToken::Argument(word));
-                }
+                tokens.push(FieldToken::Argument(word));
             }
             first = false;
         }
-        Self { name, tokens }
+        Self {
+            text: instruction.to_owned(),
+            name,
+            tokens,
+        }
     }
 
     /// The field's name as written, such as `HYPERLINK` or `PAGE`; Word reads it in any
@@ -116,14 +150,14 @@ impl FieldInstruction {
         &self.tokens
     }
 
-    /// Whether the switch `switch` is written, and with which argument: `None` where it is
-    /// not, `Some(None)` where no argument follows it, and `Some(Some(argument))` for the
-    /// argument right after it. Of a switch written more than once, the first counts.
-    pub fn switch(&self, switch: char) -> Option<Option<&str>> {
-        let at = self
-            .tokens
-            .iter()
-            .position(|token| *token == FieldToken::Switch(switch))?;
+    /// Whether the switch `switch` (what follows its backslash, in any case) is written,
+    /// and with which argument: `None` where it is not, `Some(None)` where no argument
+    /// follows it, and `Some(Some(argument))` for the argument right after it. Of a switch
+    /// written more than once, the first counts.
+    pub fn switch(&self, switch: &str) -> Option<Option<&str>> {
+        let at = self.tokens.iter().position(|token| {
+            matches!(token, FieldToken::Switch(written) if written.eq_ignore_ascii_case(switch))
+        })?;
         Some(match self.tokens.get(at + 1) {
             Some(FieldToken::Argument(argument)) => Some(argument.as_str()),
             _ => None,
@@ -140,53 +174,19 @@ impl FieldInstruction {
 }
 
 impl fmt::Display for FieldInstruction {
-    /// The instruction written back: the name, then each argument and switch after a
-    /// space, an argument in quotes, with its quotes and backslashes escaped, unless it is
-    /// a word without quotes and backslashes, which reads back as itself.
+    /// The instruction as it was read.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut space = if self.name.is_empty() {
-            ""
-        } else {
-            f.write_str(&self.name)?;
-            " "
-        };
-        for token in &self.tokens {
-            // The first argument where there is no name, which as a word would read back
-            // as the name.
-            let leads = space.is_empty();
-            f.write_str(space)?;
-            space = " ";
-            match token {
-                FieldToken::Switch(switch) => write!(f, "\\{switch}")?,
-                FieldToken::Argument(argument) => {
-                    let word = !leads
-                        && !argument.is_empty()
-                        && !argument
-                            .contains(|c: char| c.is_whitespace() || matches!(c, '"' | '\\'));
-                    if word {
-                        f.write_str(argument)?;
-                    } else {
-                        f.write_str("\"")?;
-                        for c in argument.chars() {
-                            if matches!(c, '"' | '\\') {
-                                f.write_str("\\")?;
-                            }
-                            write!(f, "{c}")?;
-                        }
-                        f.write_str("\"")?;
-                    }
-                }
-            }
-        }
-        Ok(())
+        f.write_str(&self.text)
     }
 }
 
 /// The instruction of a `HYPERLINK` field (ECMA-376 Part 1, §17.16.5.25), read by its
 /// switches: what the hyperlink leads to, and how it opens.
 ///
-/// The switches that take an argument are `\l`, `\o`, `\t` and Word's `\s`, the others
-/// none; the first argument that no such switch takes is the target. Word reads `\s` as
+/// The switches are read in any case. `\l`, `\o`, `\t` and Word's `\s` take the argument
+/// after them, `\m`, `\n` and `\h` none, and the formatting switches (`\*` and the like)
+/// and any switch the field does not have take the argument after them too, which is then
+/// no target; the first argument that no switch takes is the target. Word reads `\s` as
 /// the `w:docLocation` of a hyperlink, and `\h` as a link that goes into no list of those
 /// followed (MS-OI29500 §17.16.5.25(a), (b)), switches the standard does not list.
 ///
@@ -224,24 +224,25 @@ impl HyperlinkField {
                     }
                 }
                 FieldToken::Switch(switch) => {
-                    let slot = match switch {
-                        'l' => &mut link.bookmark,
-                        's' => &mut link.doc_location,
-                        't' => &mut link.target_frame,
-                        'o' => &mut link.tooltip,
-                        'm' => {
+                    let slot = match switch.to_ascii_lowercase().as_str() {
+                        "l" => &mut link.bookmark,
+                        "s" => &mut link.doc_location,
+                        "t" => &mut link.target_frame,
+                        "o" => &mut link.tooltip,
+                        "m" => {
                             link.image_map = true;
                             continue;
                         }
-                        'n' => {
+                        "n" => {
                             link.new_window = true;
                             continue;
                         }
-                        'h' => {
+                        "h" => {
                             link.no_history = true;
                             continue;
                         }
-                        // A formatting switch, such as `\*`, takes its argument too.
+                        // A formatting switch, such as `\*`, and one the field does not
+                        // have take the argument after them.
                         _ => {
                             let mut rest = tokens.clone();
                             if matches!(rest.next(), Some(FieldToken::Argument(_))) {

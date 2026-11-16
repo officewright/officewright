@@ -272,3 +272,65 @@ fn reads_every_attribute_of_a_hyperlink() {
     assert_eq!(messages.len(), 1, "{messages:?}");
     assert!(messages[0].ends_with(r#"w:hyperlink w:history="maybe" is not valid; it is ignored"#));
 }
+
+#[test]
+fn reads_bookmarks_in_row_cell_and_inline_controls_outside_their_content() {
+    // Word allows them as children of the control itself (MS-OI29500 §17.5.2.30(a),
+    // §17.5.2.31(a), §17.5.2.32(a)); a table's and a row's content see through controls
+    // and w:customXml, as their rows and cells do.
+    let document = open(
+        r#"<w:tbl><w:sdt><w:sdtPr/><w:bookmarkStart w:id="1" w:name="RowControl"/><w:sdtContent><w:tr><w:sdt><w:sdtPr/><w:bookmarkStart w:id="2" w:name="CellControl"/><w:sdtContent><w:tc><w:p/></w:tc></w:sdtContent><w:bookmarkEnd w:id="2"/></w:sdt><w:customXml w:element="c"><w:bookmarkStart w:id="3" w:name="InCellXml"/><w:tc><w:p/></w:tc></w:customXml></w:tr></w:sdtContent><w:bookmarkEnd w:id="1"/></w:sdt><w:customXml w:element="r"><w:bookmarkStart w:id="4" w:name="InRowXml"/><w:tr><w:tc><w:p/></w:tc></w:tr></w:customXml></w:tbl><w:p><w:sdt><w:sdtPr/><w:bookmarkStart w:id="5" w:name="InlineControl"/><w:sdtContent><w:r><w:t>x</w:t></w:r></w:sdtContent><w:bookmarkEnd w:id="5"/></w:sdt></w:p><w:sdt><w:sdtPr/><w:bookmarkStart w:id="6" w:name="BlockControl"/><w:sdtContent><w:p/></w:sdtContent></w:sdt>"#,
+    );
+    assert_eq!(
+        walk(&document),
+        [
+            "table",
+            "start Some(1) Some(\"RowControl\") None None",
+            "row",
+            "start Some(2) Some(\"CellControl\") None None",
+            "cell",
+            "p",
+            "end Some(2)",
+            "start Some(3) Some(\"InCellXml\") None None",
+            "cell",
+            "p",
+            "end Some(1)",
+            "start Some(4) Some(\"InRowXml\") None None",
+            "row",
+            "cell",
+            "p",
+            "p",
+            "  sdt",
+            // Word has no such note for a block-level control: kept as read.
+            "other bookmarkStart",
+            "p",
+        ]
+    );
+    let Some(Inline::ContentControl(control)) = Some(inline(&document, 1, 0)) else {
+        panic!("a control");
+    };
+    let inlines: Vec<String> = control
+        .inlines()
+        .map(|inline| match inline {
+            Inline::BookmarkStart(b) => format!("start {:?}", b.name()),
+            Inline::BookmarkEnd(b) => format!("end {:?}", b.id()),
+            Inline::Run(run) => format!("run {:?}", run.text()),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        inlines,
+        ["start Some(\"InlineControl\")", "run \"x\"", "end Some(5)"]
+    );
+    // The rows and cells are what they were.
+    let Some(Block::Table(table)) = document.sections().next().unwrap().blocks().next() else {
+        panic!("the table");
+    };
+    assert_eq!(table.rows().count(), 2);
+    assert_eq!(table.rows().next().unwrap().cells().count(), 2);
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+}

@@ -6,17 +6,21 @@ fn argument(text: &str) -> FieldToken {
     FieldToken::Argument(text.into())
 }
 
+fn switch(text: &str) -> FieldToken {
+    FieldToken::Switch(text.into())
+}
+
 #[test]
 fn divides_an_instruction_into_its_name_arguments_and_switches() {
-    let cases: [(&str, &str, Vec<FieldToken>); 9] = [
+    let cases: [(&str, &str, Vec<FieldToken>); 16] = [
         ("PAGE", "PAGE", vec![]),
         (
             "  PAGE   \\*  roman \\* MERGEFORMAT ",
             "PAGE",
             vec![
-                FieldToken::Switch('*'),
+                switch("*"),
                 argument("roman"),
-                FieldToken::Switch('*'),
+                switch("*"),
                 argument("MERGEFORMAT"),
             ],
         ),
@@ -26,31 +30,74 @@ fn divides_an_instruction_into_its_name_arguments_and_switches() {
             "HYPERLINK",
             vec![
                 argument(r"C:\Docs\a b.docx"),
-                FieldToken::Switch('o'),
+                switch("o"),
                 argument(r#"say "hi" \n"#),
             ],
         ),
-        // A word may hold quotes and backslashes after its first character.
+        // The same escapes in a word without quotes (§17.16.1: the quotes are optional
+        // where the text holds no white space); quotes and other backslashes after its
+        // first character are its own.
         (
-            r#"INCLUDETEXT C:\a"b c"#,
+            r#"INCLUDETEXT C:\\Docs\\a.docx \"x\" C:\a"b"#,
             "INCLUDETEXT",
-            vec![argument(r#"C:\a"b"#), argument("c")],
+            vec![
+                argument(r"C:\Docs\a.docx"),
+                argument(r#""x""#),
+                argument(r#"C:\a"b"#),
+            ],
         ),
         // A quote right after a word starts text of its own.
         (
             r#"X "a""b"\l"#,
             "X",
-            vec![argument("a"), argument("b"), FieldToken::Switch('l')],
+            vec![argument("a"), argument("b"), switch("l")],
         ),
-        // Text in quotes that does not end runs to the end, as does a backslash at the end.
+        // A switch is ! or one or two Latin letters, as written, or a formatting switch.
+        (
+            r"EQ \co2 \S\Up 3 \! \#",
+            "EQ",
+            vec![
+                switch("co"),
+                argument("2"),
+                switch("S"),
+                switch("Up"),
+                argument("3"),
+                switch("!"),
+                switch("#"),
+            ],
+        ),
+        (
+            r#"DATE \@"d MMMM" \*Upper"#,
+            "DATE",
+            vec![
+                switch("@"),
+                argument("d MMMM"),
+                switch("*"),
+                argument("Upper"),
+            ],
+        ),
+        // A backslash before anything else starts a word.
+        (
+            r"EQ \o(\s\up 2(a),b) \1",
+            "EQ",
+            vec![
+                switch("o"),
+                argument(r"(\s\up"),
+                argument("2(a),b)"),
+                argument(r"\1"),
+            ],
+        ),
+        // Text in quotes that does not end runs to the end, as does a backslash at the end;
+        // a backslash before white space is an argument of its own.
         (r#"X "open \"#, "X", vec![argument(r"open \")]),
         ("X \\", "X", vec![argument("\\")]),
+        ("X \\ a", "X", vec![argument("\\"), argument("a")]),
+        ("X \\\ta", "X", vec![argument("\\"), argument("a")]),
         // No name: an instruction that starts with quotes or a switch.
-        (
-            r#""PAGE" \h"#,
-            "",
-            vec![argument("PAGE"), FieldToken::Switch('h')],
-        ),
+        (r#""PAGE" \h"#, "", vec![argument("PAGE"), switch("h")]),
+        (r"\l x", "", vec![switch("l"), argument("x")]),
+        // White space of any kind divides.
+        ("REF\u{a0}a\tb", "REF", vec![argument("a"), argument("b")]),
         ("", "", vec![]),
     ];
     for (text, name, tokens) in cases {
@@ -60,36 +107,38 @@ fn divides_an_instruction_into_its_name_arguments_and_switches() {
             (name, &tokens[..]),
             "{text:?}"
         );
-        // Written back, it reads as the same instruction.
-        let written = instruction.to_string();
-        assert_eq!(
-            FieldInstruction::parse(&written),
-            instruction,
-            "{written:?}"
-        );
     }
 }
 
 #[test]
-fn writes_an_instruction_back_quoting_only_what_needs_quotes() {
-    let written = |text: &str| FieldInstruction::parse(text).to_string();
-    assert_eq!(written("  PAGE  \\* roman "), r"PAGE \* roman");
-    assert_eq!(
-        written(r#"HYPERLINK "a b" \o "q\"\\" "x" C:\d"#),
-        r#"HYPERLINK "a b" \o "q\"\\" x "C:\\d""#
-    );
-    assert_eq!(written(r#"X "" \l"#), r#"X "" \l"#);
-    // Without a name, the first argument keeps its quotes, else it would read as one.
-    assert_eq!(written(r#""PAGE" next"#), r#""PAGE" next"#);
+fn writes_an_instruction_back_as_it_was_read() {
+    // Word reads what is written back as it read the instruction, also where the syntax
+    // of the field is its own, as EQ's is; instructions from LibreOffice's tests
+    // (tdf138779.docx, tdf164620.docx) and Word's.
+    for text in [
+        r#"EQ \* jc0 \* "Font:Kozuka Mincho Pro R" \* hps16 \o(\s\up 19(にがつ),二月)"#,
+        r"RD  c:\\temp\\rd",
+        r#" HYPERLINK  "https://example.com/a b" \o "q\"\\"  x "#,
+        r#"X "" \l"#,
+        r#""PAGE" next"#,
+        r"EQ \co2 \S\Up 3",
+        "",
+    ] {
+        assert_eq!(FieldInstruction::parse(text).to_string(), text);
+    }
 }
 
 #[test]
 fn gives_a_switch_s_argument_where_one_follows_it() {
-    let instruction = FieldInstruction::parse(r#"TOC \o "1-3" \h \z \o "4-5""#);
-    assert_eq!(instruction.switch('o'), Some(Some("1-3")));
-    assert_eq!(instruction.switch('h'), Some(None));
-    assert_eq!(instruction.switch('z'), Some(None));
-    assert_eq!(instruction.switch('u'), None);
+    let instruction = FieldInstruction::parse(r#"TOC \o "1-3" \H \z \o "4-5" \co 2"#);
+    assert_eq!(instruction.switch("o"), Some(Some("1-3")));
+    // In any case (§17.16.1).
+    assert_eq!(instruction.switch("O"), Some(Some("1-3")));
+    assert_eq!(instruction.switch("h"), Some(None));
+    assert_eq!(instruction.switch("z"), Some(None));
+    assert_eq!(instruction.switch("CO"), Some(Some("2")));
+    assert_eq!(instruction.switch("c"), None);
+    assert_eq!(instruction.switch("u"), None);
 }
 
 #[test]
@@ -122,9 +171,29 @@ fn reads_a_hyperlink_field_by_its_switches() {
         (bare.target(), bare.bookmark(), bare.tooltip()),
         (None, None, None)
     );
-    // A formatting switch takes its argument, which is no target.
+    // A formatting switch takes its argument, which is no target, and so does a switch
+    // the field does not have.
     let formatted = link(r#"HYPERLINK \* MERGEFORMAT "x""#).unwrap();
     assert_eq!(formatted.target(), Some("x"));
+    let unknown = link(r#"HYPERLINK \x "y" "https://example.com""#).unwrap();
+    assert_eq!(unknown.target(), Some("https://example.com"));
+    // Switches in any case (§17.16.1).
+    let upper =
+        link(r#"HYPERLINK "https://example.com" \L "Intro" \O "Tip" \S "1" \T "_top" \M \N \H"#)
+            .unwrap();
+    assert_eq!(
+        (
+            upper.bookmark(),
+            upper.tooltip(),
+            upper.doc_location(),
+            upper.target_frame()
+        ),
+        (Some("Intro"), Some("Tip"), Some("1"), Some("_top"))
+    );
+    assert!(upper.image_map() && upper.new_window() && upper.no_history());
+    // A target without quotes, its backslashes escaped.
+    let path = link(r"HYPERLINK C:\\Docs\\a.docx").unwrap();
+    assert_eq!(path.target(), Some(r"C:\Docs\a.docx"));
     // Another field is no hyperlink.
     assert!(link("PAGE").is_none());
     assert!(link("HYPERLINKS x").is_none());
