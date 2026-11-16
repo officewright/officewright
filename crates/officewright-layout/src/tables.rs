@@ -841,16 +841,29 @@ impl<'d, 'l> Prepared<'d, 'l> {
         let rows = laid.rows.clone();
         let mut heights: Vec<f64> = Vec::new();
         for (offset, row) in rows.clone().enumerate() {
-            let content = self
-                .rows
-                .get(row)
-                .into_iter()
-                .flatten()
-                .zip(laid.cells.get(offset).into_iter().flatten())
-                .filter(|(placed, _)| placed.merge == Merge::Single)
-                .filter_map(|(_, laid)| laid.as_ref())
-                .map(LaidCell::height)
-                .fold(0.0, f64::max);
+            let cells = || {
+                self.rows
+                    .get(row)
+                    .into_iter()
+                    .flatten()
+                    .zip(laid.cells.get(offset).into_iter().flatten())
+            };
+            let tallest = |merge: fn(Merge) -> bool| {
+                cells()
+                    .filter(|(placed, _)| merge(placed.merge))
+                    .filter_map(|(_, laid)| laid.as_ref())
+                    .map(LaidCell::height)
+                    .fold(0.0, f64::max)
+            };
+            // A row with no cell of its own is as tall as the merged cells that start in
+            // it (Word's render of generated/invoice-ru: a row of only merged cells is a
+            // line of their text high, the next row only as tall as its own text).
+            let own = cells().any(|(placed, _)| placed.merge == Merge::Single);
+            let content = if own {
+                tallest(|merge| merge == Merge::Single)
+            } else {
+                tallest(|merge| matches!(merge, Merge::Spans(_)))
+            };
             let height = match self.table.rows().get(row).map(Row::height) {
                 Some(RowHeight::AtLeast(least)) => content.max(least.0),
                 // The height runs from the top of the row's top border to the top of the
@@ -2875,6 +2888,45 @@ mod tests {
             .map(|(x0, _, x1, _, _)| (x0, x1))
             .collect();
         assert_eq!(between, [(grid[1], grid[2])]);
+    }
+
+    #[test]
+    fn a_row_of_merged_cells_only_is_as_tall_as_the_merges_that_start_in_it() {
+        // generated/invoice-ru: the second row holds the rest of a merge from the first
+        // row and the start of a merge over the next. Word gives it a line of that
+        // merge's text, and the next row only its own line.
+        let (document, style) = document(CompatMode::Word2013);
+        let merged = |merge, text| cell(vec![lines(style, 1, text)]).with_vertical_merge(merge);
+        let table = Table::default()
+            .with_grid([Pt(100.0), Pt(100.0)])
+            .with_rows(vec![
+                row(vec![
+                    merged(VerticalMerge::Restart, "A"),
+                    cell(vec![lines(style, 1, "B")]),
+                ]),
+                row(vec![
+                    merged(VerticalMerge::Continue, ""),
+                    merged(VerticalMerge::Restart, "C"),
+                ]),
+                row(vec![
+                    cell(vec![lines(style, 1, "D")]),
+                    merged(VerticalMerge::Continue, ""),
+                ]),
+            ]);
+        let (_, bands) = laid(&document, &table, (400.0, &[]));
+        // One band of three rows of 20 pt, the third row's text under the second's.
+        let heights: Vec<f64> = bands.iter().map(|band| band.height.0).collect();
+        assert_eq!(heights, [60.0]);
+        let y = |text: &str| {
+            glyphs(&bands[0])
+                .into_iter()
+                .find(|(_, _, drawn)| drawn == text)
+                .map(|(_, y, _)| y)
+        };
+        let (Some(second), Some(third)) = (y("C"), y("D")) else {
+            panic!("{:?}", glyphs(&bands[0]));
+        };
+        assert_eq!(third - second, 20.0);
     }
 
     #[test]
