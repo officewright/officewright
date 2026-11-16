@@ -2384,6 +2384,53 @@ mod tests {
     }
 
     #[test]
+    fn what_a_justified_line_may_narrow() {
+        let both = || ParagraphProps::default().with_alignment(Alignment::Both);
+        let word = |words: &'static str, width| {
+            lay_in_mode(minimal(), CompatMode::Word2013, text(words), both(), width).0
+        };
+        // The space before a word of one letter counts: "AA AA A" is 35 pt, and in 34 pt
+        // its two spaces make up the 1 pt.
+        assert_eq!(widths(&word("AA AA A", 34.0)), [34.0]);
+        // No more than a fifth: 41 pt in 39.99 pt needs 1.01 pt of 5 pt of spaces.
+        assert_eq!(widths(&word("AA AA AA", 39.99)), [39.99, 12.0]);
+        // A run of letters cut between two of them, with no place to end before: the
+        // cut may come after a letter that the space before it makes room for. "AA " and
+        // four letters end 0.2 pt past 38.3 pt, which the space's half point covers.
+        let cut = word("AA \u{2060}AAAAAAAAAA", 38.3);
+        assert_eq!(widths(&cut).first().copied(), Some(38.3));
+        assert_eq!(cut.lines.len(), 2);
+    }
+
+    #[test]
+    fn the_hyphen_of_a_soft_hyphen_may_need_the_spaces_narrowed() {
+        // The width of the hyphen drawn at a soft hyphen, from a line that ends there.
+        let alone = |style| {
+            vec![
+                Inline::text("AAAA", style),
+                Inline::soft_hyphen(style),
+                Inline::text("AAAA", style),
+            ]
+        };
+        let (layout, _) = lay(alone, ParagraphProps::default(), 40.0);
+        let hyphen = widths(&layout)[0] - 24.0;
+        assert!(hyphen > 0.0, "{:?}", widths(&layout));
+        // "AA AA AA" and the hyphen end 0.5 pt past the line: the spaces make room for
+        // the hyphen, and the line ends at the soft hyphen, not before the last "AA".
+        let both = ParagraphProps::default().with_alignment(Alignment::Both);
+        let hyphenated = |style| {
+            vec![
+                Inline::text("AA AA AA", style),
+                Inline::soft_hyphen(style),
+                Inline::text("AAAA", style),
+            ]
+        };
+        let width = 41.0 + hyphen - 0.5;
+        let (layout, _) = lay_in_mode(minimal(), CompatMode::Word2013, hyphenated, both, width);
+        assert_eq!(widths(&layout), [width, 24.0]);
+    }
+
+    #[test]
     fn fills_lines_first_fit_with_spaces_hanging() {
         // "AA " is 14.5 pt; three words are 41 pt.
         let (layout, report) = lay(text("AA AA AA"), ParagraphProps::default(), 30.0);
