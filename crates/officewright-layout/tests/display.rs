@@ -532,6 +532,58 @@ fn superscripts_are_raised_and_pictures_sit_on_the_baseline() -> TestResult {
 }
 
 #[test]
+fn a_subscript_drops_as_far_as_the_bottom_of_the_text_beside_it() -> TestResult {
+    // Word drops a subscript in Calibri at 24 pt by 2.5 pt
+    // (tests/corpus/word-rules/E-superscript.docx, case 04) and one in Liberation Sans at
+    // 11 pt by 1 pt (E-superscript-steps.docx, case 20).
+    let book = book()?;
+    let mut document = Document::default();
+    let carlito = RunStyle::default()
+        .with_fonts(RunFonts::new("Carlito"))
+        .with_size(Pt(24.0));
+    let large = document.add_run_style(carlito.clone());
+    let large_subscript =
+        document.add_run_style(carlito.with_vertical(VerticalPosition::Subscript));
+    let style = document.add_run_style(base());
+    let subscript = document.add_run_style(base().with_vertical(VerticalPosition::Subscript));
+    let painted = paint(
+        &book,
+        &document,
+        &[
+            one_paragraph(
+                large,
+                vec![
+                    Inline::text("Base", large),
+                    Inline::text("123", large_subscript),
+                ],
+            ),
+            one_paragraph(
+                style,
+                vec![Inline::text("Base", style), Inline::text("456", subscript)],
+            ),
+        ],
+    );
+    let runs = items(&painted, "glyphs");
+    let [large, large_subscript, plain, subscript] = runs.as_slice() else {
+        return Err(painted.text().into());
+    };
+    // Carlito's descent (usWinDescent 550 of 2048) at 24 pt less its descent at the
+    // 15.6 pt the subscript is drawn at: 2.26 pt, 45 twips.
+    assert_eq!(
+        at(large_subscript).1 - at(large).1,
+        45,
+        "{}",
+        painted.text()
+    );
+    assert!(large_subscript.contains(" 312 "), "{large_subscript}");
+    // Liberation Sans's (434 of 2048) at 11 pt less that at 7.15 pt: 0.82 pt, 16.3 twips
+    // between places that the dump rounds to twips.
+    let drop = at(subscript).1 - at(plain).1;
+    assert!((16..=17).contains(&drop), "{}", painted.text());
+    Ok(())
+}
+
+#[test]
 fn a_justified_paragraph_is_drawn_as_laid_out() -> TestResult {
     let book = book()?;
     let mut document = Document::default();
