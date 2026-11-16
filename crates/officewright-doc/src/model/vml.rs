@@ -265,8 +265,11 @@ impl<'a> EmbeddedObject<'a> {
             .element(self.element)
             .children_through_alternates(names.mc)
             .filter(|child| child.is(&names.w, "drawing"))
-            // A frame in the line (`wp:inline`) has no wrapping, so only `wp:anchor` wraps.
+            // Only a floating frame wraps: the wrapping of one in the line (`wp:inline`),
+            // which the schema does not allow, is not read, as `Drawing::anchor` does not
+            // read it.
             .filter_map(|drawing| super::drawing::frame(drawing, names))
+            .filter(|frame| frame.is(&names.wp, "anchor"))
             .any(|frame| {
                 super::drawing::anchor(frame, names, &mut |_, _, _| {})
                     .wrap()

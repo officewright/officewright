@@ -848,6 +848,38 @@ fn lists_once_that_text_does_not_wrap_around_floating_drawings_left_out() {
             )),
             true,
         ),
+        // A hidden text box is not drawn, nor counted: its neighbour that wraps is listed.
+        (
+            pict(&format!(
+                r#"<v:shape style="visibility:hidden;position:absolute;width:10pt;height:10pt"><w10:wrap type="square"/><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape><v:rect style="position:absolute;width:5pt;height:5pt"><w10:wrap type="square"/></v:rect>"#,
+                p("x")
+            )),
+            true,
+        ),
+        // An embedded object shown by a drawing over the text, or in the line, which does
+        // not wrap whatever it holds.
+        (
+            format!(
+                r#"<w:r><w:object {NAMESPACES}>{}</w:object></w:r>"#,
+                floating_with("<wp:wrapNone/>", true, rect)
+                    .trim_start_matches("<w:r>")
+                    .trim_end_matches("</w:r>")
+            ),
+            false,
+        ),
+        (
+            format!(
+                r#"<w:r><w:object {NAMESPACES}>{}</w:object></w:r>"#,
+                inline(rect)
+                    .trim_start_matches("<w:r>")
+                    .trim_end_matches("</w:r>")
+                    .replace(
+                        "<wp:docPr ",
+                        r#"<wp:wrapSquare wrapText="bothSides"/><wp:docPr "#
+                    )
+            ),
+            false,
+        ),
         // A hidden shape, which Word does not show.
         (
             vml_rect(
