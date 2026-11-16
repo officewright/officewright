@@ -66,7 +66,9 @@ crates/
                         front of the text, which does not wrap around them yet) and text boxes,
                         inline or floating, with their paragraphs (insets, anchoring down the box,
                         fill and outline), the numbers of the references of footnotes and
-                        endnotes (references in headers and footers show no number), and
+                        endnotes (references in headers and footers show no number; those of
+                        a section that starts them again on each page by the pages a layout
+                        pass puts them on, laid out again until they settle), and
                         footnotes under their separator at the bottom of the page of their
                         reference or beneath its text, a note that does not fit below its line
                         cut where its widow control lets it, with the continuation notice, and
