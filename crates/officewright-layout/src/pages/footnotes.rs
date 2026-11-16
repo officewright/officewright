@@ -619,8 +619,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 };
                 tail = plan.tail;
             } else {
+                // The room multiple line spacing adds below the text may reach past the
+                // bottom of the body (`Line::below_text`), over the notes too: a hypothesis
+                // until a Word render has both. The notes of the line itself go below all
+                // of it.
                 let end = tail.as_ref().map_or(0.0, |tail| tail.bottom);
-                if y + line.height.0 > bottom - end + EPSILON {
+                if y + line.height.0 - line.below_text.0 > bottom - end + EPSILON {
                     break;
                 }
                 if !closed && !notes.is_empty() {

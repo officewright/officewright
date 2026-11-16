@@ -886,7 +886,8 @@ fn piece_item(piece: &crate::lines::Piece) -> usize {
 /// order, all of it, each byte once; a line wider than its room is one the breaker
 /// marks as holding a piece too wide for any line, and the report says so; a line
 /// starts with a soft hyphen only where a line may end before it; heights and baselines
-/// are numbers, heights and widths not negative.
+/// are numbers, heights and widths not negative, and the room below a line's text that
+/// may reach past the bottom of the body is a part of its height.
 pub fn check_lines(
     book: &FontBook,
     document: &Document,
@@ -973,10 +974,12 @@ pub fn check_lines(
             line.ascent.0,
             line.descent.0,
             line.width.0,
+            line.below_text.0,
         ];
         if numbers.iter().any(|number| !number.is_finite())
             || line.height.0 < 0.0
             || line.width.0 < -1e-9
+            || !(0.0..=line.height.0).contains(&line.below_text.0)
         {
             return Err(format!("line {index}: {numbers:?}"));
         }
@@ -1371,7 +1374,8 @@ pub fn paginate(
 ///   a table's lines being the pieces it is put on pages in;
 /// - lines are inside the body of their page, but for a single line that nothing could
 ///   move further, at the top of its page or below its table's header rows repeated
-///   there, and lines on a page do not overlap;
+///   there, and for the room multiple line spacing adds below the text of the last line
+///   of a paragraph's lines on the page, and lines on a page do not overlap;
 /// - a table's header rows are repeated only at the top of a page, and only above more of
 ///   that table;
 /// - each paragraph is on a page with its section's setup, and the first paragraph of a
@@ -1550,7 +1554,8 @@ pub fn check_pages(book: &FontBook, document: &Document, max_pages: usize) -> Re
                         .iter()
                         .all(|f| f.repeated && f.paragraph == fragment.paragraph)
                 });
-            if top < page.body.top.0 - 1e-6 || (end > page.body.bottom.0 + 1e-6 && !forced) {
+            let text_end = end - fragment.below_text.0;
+            if top < page.body.top.0 - 1e-6 || (text_end > page.body.bottom.0 + 1e-6 && !forced) {
                 return Err(format!(
                     "page {number}: lines from {top} to {end} outside the body from {} to {}",
                     page.body.top.0, page.body.bottom.0

@@ -88,6 +88,9 @@ pub(crate) struct Fragment {
     pub(crate) top: Pt,
     /// The height of its lines.
     pub(crate) height: Pt,
+    /// The part of `height` that may reach past the bottom of the body: the room multiple
+    /// line spacing adds below the text of its last line, none for a piece of a table.
+    pub(crate) below_text: Pt,
     /// Whether it is a table's header rows repeated at the top of a page.
     pub(crate) repeated: bool,
 }
@@ -1727,6 +1730,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 lines: lines.clone(),
                 top: Pt(top),
                 height: Pt(height),
+                below_text: lines
+                    .end
+                    .checked_sub(1)
+                    .and_then(|last| layout.lines.get(last))
+                    .map_or(Pt(0.0), |line| line.below_text),
                 repeated: false,
             });
         }
@@ -2103,6 +2111,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             lines: piece..piece + 1,
             top: Pt(top),
             height: drawn.height,
+            below_text: Pt(0.0),
             repeated,
         });
         self.cursor = top + drawn.height.0;
@@ -2927,13 +2936,14 @@ pub(crate) fn body(setup: &PageSetup) -> Body {
     }
 }
 
-/// How many of `lines` from `first` on fit between `top` and `bottom`, and whether the
-/// last of those ends in a page or column break, which ends the page.
+/// How many of `lines` from `first` on fit between `top` and `bottom`, the room multiple
+/// line spacing adds below the text of the last allowed past it, and whether the last of
+/// those ends in a page or column break, which ends the page.
 fn fitting(lines: &[crate::lines::Line], first: usize, top: f64, bottom: f64) -> (usize, bool) {
     let mut y = top;
     let mut count = 0;
     for line in lines.iter().skip(first) {
-        if y + line.height.0 > bottom + EPSILON {
+        if y + line.height.0 - line.below_text.0 > bottom + EPSILON {
             break;
         }
         y += line.height.0;
