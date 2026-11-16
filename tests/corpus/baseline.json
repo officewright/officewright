@@ -2040,8 +2040,8 @@
     },
     "tests/corpus/word-rules/E-textbox-from-paragraph.docx": {
       "line_agreement": 0.9231,
-      "ssim_mean": 0.9766,
-      "ssim_min": 0.9766,
+      "ssim_mean": 0.9973,
+      "ssim_min": 0.9973,
       "text_score": 0.9571
     },
     "tests/corpus/word-rules/E-textbox-inline-floating.docx": {
@@ -2073,8 +2073,8 @@
     "tests/corpus/word-rules/E-textbox-vml.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9514,
-      "ssim_min": 0.9039,
+      "ssim_mean": 0.9846,
+      "ssim_min": 0.9702,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-theme-colors.docx": {
