@@ -12,6 +12,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import unicodedata
 import unittest
 import zipfile
 import zlib
@@ -5460,6 +5461,17 @@ class Packages(unittest.TestCase):
         sizes = {"A4": (rules.PAGE_W, rules.PAGE_H), "A5": rules.A5, "Letter": rules.LETTER,
                  "A3": rules.A3}
 
+        # Every section's body is one line: its label fits the section's width in Carlito,
+        # Calibri's twin, so that the body asks for the room of one line only.
+        for doc in self.docs:
+            if not doc.name.startswith("E-header-cut-"):
+                continue
+            parts, body, _ = self.batch_13(doc.name)
+            for label, sect, _ in self.b13_sections(parts, body):
+                mar = sect.find(f"{W}pgMar")
+                width = (size(sect)[0] - int(mar.get(f"{W}left")) - int(mar.get(f"{W}right"))) / 20
+                self.assertLess(carlito_width(label) + 12, width, f"{doc.name}: {label}")
+
         # Threshold: headers of 24 to 40 lines on A5, no footers, the room each label names.
         for name, body_line in (("E-header-cut-threshold", 12), ("E-header-cut-threshold-24", 24)):
             parts, body, _ = self.batch_13(name)
@@ -5471,9 +5483,7 @@ class Packages(unittest.TestCase):
                 self.assertEqual(self.b13_story_lines(stories["header"]), [(12, count)], label)
                 m = margins(sect)
                 room = (rules.A5[1] - m["bottom"] - m["header"]) / 20 - 12 * count
-                self.assertIn(f"a header of {count} lines of 12 pt on A5, which leaves the "
-                              f"body {room:.1f} pt; the body's lines exact {body_line} pt",
-                              label)
+                self.assertIn(f"header of {count} lines, {room:.1f} pt left", label)
             for p in body.findall(f"{W}p"):
                 line = p.find(f"{W}pPr/{W}spacing")
                 self.assertEqual((line.get(f"{W}line"), line.get(f"{W}lineRule")),
@@ -5494,8 +5504,8 @@ class Packages(unittest.TestCase):
                 lines = self.b13_story_lines(stories["header"])
                 self.assertEqual(tuple(lines), header, label)
                 (height, count), = lines
-                self.assertIn(f"a header of {count} lines" if "page-sizes" not in name
-                              else f"a header and a footer of {count} lines", label)
+                self.assertIn(f"header of {count} lines" if "page-sizes" not in name
+                              else f"header and footer of {count} lines each", label)
                 if name == "E-header-cut-line-heights":
                     self.assertIn(f"of exact {height:g} pt", label)
                 footer = self.b13_story_lines(stories["footer"])
@@ -5504,12 +5514,13 @@ class Packages(unittest.TestCase):
                 self.assertIn(f"{m['header'] / 20:g} pt from the edge" if "distance" in name
                               else "", label)
                 page = next(k for k, v in sizes.items() if v == size(sect))
-                self.assertTrue(label.endswith(f"on {page}"), label)
+                self.assertTrue(label.endswith(f"on {page}") if "page-sizes" in name
+                                else page == "A4", label)
                 header_end = m["header"] / 20 + height * count
                 footer_start = (size(sect)[1] - m["footer"]) / 20 - 12 * footer[0][1]
                 room = max(0.0, footer_start - header_end)
                 if name == "E-header-cut-distance":
-                    self.assertIn(f"which leave the body {room:.1f} pt", label)
+                    self.assertIn(f"{room:.1f} pt left", label)
                 else:
                     self.assertEqual(room, 0, label)
 
@@ -5525,22 +5536,22 @@ class Packages(unittest.TestCase):
                          {("240", "exact")})
         self.assertEqual(self.b13_story_lines(header)[0], (12, 10))
         self.assertEqual(self.b13_story_lines(stories["footer"]), [(12, 33)])
-        self.assertIn("a header of 10 lines of 12 pt, then a table of 30 rows of exact 12 pt",
-                      label)
+        self.assertIn("header of 10 lines and 30 table rows of 12 pt", label)
 
         # The first line: a line, then a table row, of exact 400 pt in header and footer.
         parts, body, _ = self.batch_13("E-header-cut-first-line")
         (line_label, _, lines), (row_label, _, rows) = self.b13_sections(parts, body)
-        self.assertIn("each a line of exact 400 pt", line_label)
-        self.assertIn("each a table of one row of exact 400 pt", row_label)
+        self.assertIn("header and footer of a 400 pt line, then a 12 pt line", line_label)
+        self.assertIn("header and footer of a table of a 400 pt row and a 12 pt row", row_label)
         for kind in ("header", "footer"):
             first, second = lines[kind].findall(f"{W}p")
             self.assertEqual(first.find(f"{W}pPr/{W}spacing").get(f"{W}line"), "8000")
             self.assertEqual(second.find(f"{W}pPr/{W}spacing").get(f"{W}line"), "240")
             table = rows[kind].find(f"{W}tbl")
-            (row,) = table.findall(f"{W}tr")
-            height = row.find(f"{W}trPr/{W}trHeight")
-            self.assertEqual((height.get(f"{W}val"), height.get(f"{W}hRule")), ("8000", "exact"))
+            heights = [(r.find(f"{W}trPr/{W}trHeight").get(f"{W}val"),
+                        r.find(f"{W}trPr/{W}trHeight").get(f"{W}hRule"))
+                       for r in table.findall(f"{W}tr")]
+            self.assertEqual(heights, [("8000", "exact"), ("240", "exact")])
             self.assertEqual(rows[kind][0].tag, f"{W}tbl", "the table comes first")
 
         # The margins: fixed (negative) margins of 420 and 415 pt, headers of 30 and 10 lines
@@ -5552,9 +5563,9 @@ class Packages(unittest.TestCase):
             self.assertEqual((m["top"], m["bottom"]), (-8400, -8300), label)
             self.assertEqual(set(stories), {"header"}, label)
             self.assertEqual(self.b13_story_lines(stories["header"]), [(12, count)], label)
-            self.assertIn(f"a header of {count} lines", label)
+            self.assertIn(f"header of {count} lines", label)
             room = (rules.PAGE_H + m["top"] + m["bottom"]) / 20
-            self.assertIn(f"which leave the body {room:.1f} pt", label)
+            self.assertIn(f"({room:.1f} pt left)", label)
             self.assertLess(m["header"] / 20 + 12 * count, -m["top"] / 20, label)
             self.assertEqual(12 * count > 0.4 * rules.PAGE_H / 20, count == 30, label)
 
@@ -5647,7 +5658,36 @@ class Packages(unittest.TestCase):
             (expected,) = [v for words, v in texts.items() if words in label]
             self.assertEqual(value, expected, label)
         self.assertIn("Μάιος", rules.GREEK_TONOS)
-        self.assertEqual(rules.GREEK_COMBINING.count("́"), 8)
+
+        def marks(text):
+            """Each letter of text with the combining marks its canonical decomposition has."""
+            letters = []
+            for c in unicodedata.normalize("NFD", text):
+                if unicodedata.combining(c):
+                    letters[-1][1].add(c)
+                elif not c.isspace():
+                    letters.append((c, set()))
+            return letters
+
+        tonos, dialytika = "\u0301", "\u0308"
+        precomposed = [c for c in rules.GREEK_TONOS if not c.isspace()]
+        self.assertEqual(len(precomposed), len(marks(rules.GREEK_TONOS)), "precomposed only")
+        with_tonos = [base for base, m in marks(rules.GREEK_TONOS) if tonos in m]
+        self.assertGreaterEqual(len(with_tonos), 8)
+        self.assertTrue(all(base.islower() for base in with_tonos))
+        self.assertEqual(sum(dialytika in m for _, m in marks(rules.GREEK_TONOS)), 4)
+        self.assertEqual(sum(m == {tonos, dialytika} for _, m in marks(rules.GREEK_TONOS)), 2)
+        self.assertNotEqual(unicodedata.normalize("NFC", rules.GREEK_COMBINING),
+                            rules.GREEK_COMBINING, "the accents are combining marks")
+        self.assertEqual(rules.GREEK_COMBINING.count(tonos), 8)
+        self.assertEqual(unicodedata.normalize("NFC", rules.GREEK_COMBINING),
+                         "άέήίόύώ Μάιος", "the letters of the precomposed case")
+        capitals = [base for base, m in marks(rules.GREEK_CAPITALS) if tonos in m]
+        self.assertGreaterEqual(len(capitals), 7)
+        self.assertTrue(all(base.isupper() for base in capitals))
+        polytonic = set().union(*(m for _, m in marks(rules.GREEK_POLYTONIC)))
+        self.assertTrue(polytonic & {"\u0313", "\u0314"}, "a breathing")
+        self.assertIn("\u0342", polytonic, "a perispomeni")
 
     def test_batch_13_cell_mark_cases_have_the_markup_their_labels_name(self):
         parts, body, _ = self.batch_13("E-cell-mark-height-picture")

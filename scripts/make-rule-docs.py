@@ -6927,7 +6927,8 @@ def cut_sections(cases: list[tuple[str, str, str, dict]], body_line: float = 12)
         str, tuple[tuple[str, str], ...], str]:
     """The body, header and footer parts and last section of cases given as (label, header
     paragraphs, footer paragraphs or "", options of section()): a section each, its label
-    the one line of its body, of exact body_line pt."""
+    the one line of its body, of exact body_line pt: short enough to fit the section's
+    width, so that the body asks for one line of room."""
     body, parts, last = "", [], ""
     for n, (label, header, footer, options) in enumerate(cases, 1):
         refs = [("headerReference", "default", f"header{n}.xml")]
@@ -6944,8 +6945,7 @@ def cut_sections(cases: list[tuple[str, str, str, dict]], body_line: float = 12)
 def header_cut_threshold(body_line: int) -> Doc:
     # On A5 (595.3 pt) a header of n lines of 12 pt leaves the body 487.9 - 12n pt above the
     # bottom margin of 72 pt: 199.9 pt for 24 lines, 19.9 pt for 39 and 7.9 pt for 40.
-    cases = [(f"a header of {count} lines of 12 pt on A5, which leaves the body "
-              f"{487.9 - 12 * count:.1f} pt; the body's lines exact {body_line} pt",
+    cases = [(f"header of {count} lines, {487.9 - 12 * count:.1f} pt left",
               exact_lines_para("header", count), "", {"size": A5})
              for count in range(24, 41)]
     body, parts, last = cut_sections(cases, body_line)
@@ -6969,8 +6969,8 @@ def header_cut_distance() -> Doc:
     cases = []
     for count, distance in ((33, 0), (35, 0), (33, 72)):
         room = max(0.0, footer_top - distance - 12 * count)
-        cases.append((f"a header of {count} lines of 12 pt {distance} pt from the edge and a "
-                      f"footer of 33 lines, which leave the body {room:.1f} pt, on A4",
+        cases.append((f"header of {count} lines {distance} pt from the edge, footer of 33, "
+                      f"{room:.1f} pt left",
                       exact_lines_para("header", count), exact_lines_para("footer", 33),
                       {"header_distance": twips(distance)}))
     body, parts, last = cut_sections(cases)
@@ -6987,7 +6987,7 @@ def header_cut_distance() -> Doc:
 
 
 def header_cut_page_sizes() -> Doc:
-    cases = [(f"a header and a footer of {count} lines of 12 pt each, on {name}",
+    cases = [(f"header and footer of {count} lines each, on {name}",
               exact_lines_para("header", count), exact_lines_para("footer", count),
               {"size": size})
              for name, count, size in (("Letter", 40, LETTER), ("A3", 50, A3))]
@@ -7005,8 +7005,8 @@ def header_cut_page_sizes() -> Doc:
 def header_cut_line_heights() -> Doc:
     # 30, 60 and 32 lines: 480 pt each, past the footer of 33 lines; 0.4 of A4 is 336.8 pt,
     # 21 lines of 16 pt, 42 of 8 pt, and 22 of 15 pt with the 23rd across it.
-    cases = [(f"a header of {count} lines of exact {height} pt and a footer of 33 lines of "
-              "12 pt, on A4", exact_lines_para("header", count, height),
+    cases = [(f"header of {count} lines of exact {height} pt, footer of 33 lines",
+              exact_lines_para("header", count, height),
               exact_lines_para("footer", 33), {})
              for count, height in ((30, 16), (60, 8), (32, 15))]
     body, parts, last = cut_sections(cases)
@@ -7030,11 +7030,11 @@ def header_table_rows(count: int, height: float) -> str:
 
 def header_cut_table() -> Doc:
     # 10 lines and 30 rows of 12 pt end 515.4 pt from the edge, past the footer of 33 lines;
-    # 0.4 of A4 falls in row 18.
+    # 0.4 of A4 (336.8 pt from the header's top) falls in row 19, after 18 whole rows.
     header = (exact_lines_para("header", 10) + header_table_rows(30, 12)
               + page_para(run("header line after the table")))
-    cases = [("a header of 10 lines of 12 pt, then a table of 30 rows of exact 12 pt, and "
-              "a footer of 33 lines, on A4", header, exact_lines_para("footer", 33), {})]
+    cases = [("header of 10 lines and 30 table rows of 12 pt, footer of 33 lines", header,
+              exact_lines_para("footer", 33), {})]
     body, parts, last = cut_sections(cases)
     return Doc(
         "E-header-cut-table",
@@ -7049,29 +7049,33 @@ def header_cut_table() -> Doc:
 
 def header_cut_first_line() -> Doc:
     # A first line or row of 400 pt is taller than 0.4 of A4 (336.8 pt); header and footer
-    # each hold one, then a line of 12 pt, and leave the body no room.
+    # each hold one, then a line or a second row of 12 pt, and leave the body no room. The
+    # second row tells keeping the first table from keeping its first row.
     def tall_line(kind: str) -> str:
         return (para(run(f"{kind} line 1, exact 400 pt"), space=spacing(line=("exact", 400)))
                 + page_para(run(f"{kind} line 2")))
 
     def tall_row(kind: str) -> str:
         rows = [([cell(page_para(run(f"{kind} row 1, exact 400 pt")))],
-                 '<w:trHeight w:val="8000" w:hRule="exact"/>')]
+                 '<w:trHeight w:val="8000" w:hRule="exact"/>'),
+                ([cell(page_para(run(f"{kind} row 2, exact 12 pt")))],
+                 '<w:trHeight w:val="240" w:hRule="exact"/>')]
         return (rule_table(rows, [TEXT_W], tbl_w=(TEXT_W, "dxa"), fixed=True)
                 + page_para(run(f"{kind} line after the table")))
 
     cases = [
-        ("a header and a footer, each a line of exact 400 pt, then a line of 12 pt, on A4",
-         tall_line("header"), tall_line("footer"), {}),
-        ("a header and a footer, each a table of one row of exact 400 pt, then a line of "
-         "12 pt, on A4", tall_row("header"), tall_row("footer"), {}),
+        ("header and footer of a 400 pt line, then a 12 pt line", tall_line("header"),
+         tall_line("footer"), {}),
+        ("header and footer of a table of a 400 pt row and a 12 pt row", tall_row("header"),
+         tall_row("footer"), {}),
     ]
     body, parts, last = cut_sections(cases)
     return Doc(
         "E-header-cut-first-line",
         "What Word keeps of a header and a footer that leave the body no room when their "
         "first line, or their first table's row, is taller than 0.4 of the page: a line of "
-        "exact 400 pt and a row of exact 400 pt, each followed by a line",
+        "exact 400 pt followed by a line, and a table of a row of exact 400 pt and a row of "
+        "12 pt followed by a line",
         body,
         headers=parts,
         last_section=last,
@@ -7083,8 +7087,7 @@ def header_cut_margins() -> Doc:
     # body 6.9 pt on A4; a header of 30 lines ends 395.4 pt from the top, above the body,
     # and is taller than 0.4 of the page, one of 10 lines is not.
     margins = (-twips(420), -twips(415))
-    cases = [(f"fixed top and bottom margins of 420 and 415 pt, which leave the body 6.9 pt, "
-              f"under a header of {count} lines of 12 pt that ends above the body, on A4",
+    cases = [(f"fixed margins 420 and 415 pt (6.9 pt left), header of {count} lines",
               exact_lines_para("header", count), "", {"margins": margins})
              for count in (30, 10)]
     body, parts, last = cut_sections(cases)
@@ -7278,8 +7281,8 @@ def cell_mark_height_merged() -> Doc:
         return rule_table(rows, EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
 
     body = (
-        table_case(1, "rows of 8 pt text with 9 pt paragraph marks (the document default); "
-                   "in rows 2 and 3 the second and third cells are merged vertically",
+        table_case(1, "rows 2 and 3 hold 8 pt text with 9 pt paragraph marks (the "
+                   "document default), their second and third cells merged vertically",
                    bank_table(True))
         + table_case(2, "the same rows without merged cells", bank_table(False))
         + para(run("End of the document."))
