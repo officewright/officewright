@@ -521,6 +521,15 @@ pub enum WrapKind {
     TopAndBottom,
 }
 
+impl WrapKind {
+    /// Whether text flows around the drawing: every kind but [`None`](Self::None).
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn wraps(self) -> bool {
+        self != Self::None
+    }
+}
+
 /// The first child of `element` of this name in `namespaces`, through
 /// `mc:AlternateContent`.
 pub(super) fn child<'a>(

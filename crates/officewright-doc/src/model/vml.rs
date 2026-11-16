@@ -139,6 +139,25 @@ impl<'a> VmlDrawing<'a> {
             .nth(1)
             .is_some()
     }
+
+    /// Whether one of its own shapes floats with text wrapping around it: a shape,
+    /// picture, text box or group placed `position:absolute` whose `w10:wrap` is of type
+    /// `square`, `tight`, `through` or `topAndBottom` (ECMA-376 Part 4, §19.3.2.6).
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn wraps_text(self) -> bool {
+        let names = &self.document.names;
+        self.document
+            .element(self.element)
+            .children_through_alternates(names.mc)
+            .filter(|child| {
+                child
+                    .local_in(&names.v)
+                    .is_some_and(|local| local != "shapetype")
+            })
+            .filter_map(|shape| anchor(shape, names, &mut |_, _, _| {}))
+            .any(|anchor| anchor.wrap().is_some_and(WrapKind::wraps))
+    }
 }
 
 /// An embedded object in a run (`w:object`, ECMA-376 Part 1, §17.3.3.19): content of
