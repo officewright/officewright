@@ -736,6 +736,13 @@ impl Glyf {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many components [`composite_components`] and [`closure_components`] have read
+    /// on this thread, for the tests that bound the work of the checks.
+    static COMPONENTS_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// The components of a composite glyph description, read as the subsetter's
 /// `remap_component_glyph` (`src/glyf.rs`) reads it, `None` where it fails.
 fn composite_components(entry: &[u8]) -> Option<Vec<u16>> {
@@ -751,6 +758,8 @@ fn composite_components(entry: &[u8]) -> Option<Vec<u16>> {
     loop {
         let flags = u16_at(entry, at)?;
         components.push(u16_at(entry, at + 2)?);
+        #[cfg(test)]
+        COMPONENTS_READ.with(|read| read.set(read.get() + 1));
         at += 4;
         at += if flags & ARG_1_AND_2_ARE_WORDS != 0 {
             4
@@ -800,6 +809,8 @@ fn closure_components(entry: &[u8]) -> Option<Vec<u16>> {
         };
         at += 4;
         components.push(component);
+        #[cfg(test)]
+        COMPONENTS_READ.with(|read| read.set(read.get() + 1));
         if flags & ARG_1_AND_2_ARE_WORDS != 0 {
             skip(&mut at, 2);
             skip(&mut at, 2);
@@ -1486,17 +1497,16 @@ mod tests {
         let face = crate::FontFace::from_bytes(font_of(&entries, false).build(), 0).unwrap();
         // Following .notdef's 30,000 components when the face is first checked leaves one.
         let mut state = State::new(&face, 30_001);
-        let started = std::time::Instant::now();
+        let before = COMPONENTS_READ.with(std::cell::Cell::get);
         for glyph in 1..30_000 {
             assert!(state.check(&face, glyph).is_err());
         }
         assert_eq!(state.components, 0);
-        // Reading .notdef's components for each glyph took over a minute in a debug build.
-        assert!(
-            started.elapsed().as_secs_f64() < 1.0,
-            "{:?}",
-            started.elapsed()
-        );
+        // Reading .notdef's components again for each glyph read 900 million of them, and
+        // took over a minute in a debug build; counted, not timed, so that a loaded
+        // machine does not fail it (#525).
+        let read = COMPONENTS_READ.with(std::cell::Cell::get) - before;
+        assert!(read <= 60_000, "{read} components read");
     }
 
     #[test]
