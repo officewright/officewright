@@ -10,7 +10,8 @@
 //! the layout relies on (`check_paragraph`), and break into lines that hold its text in
 //! order, in a column, with
 //! a line spacing, an alignment, a hanging indent and tab stops the first bytes give too,
-//! and a list label when they say so (`check_lines`). Up to four copies of it, kept with
+//! and a list label when they say so (`check_lines`), in a compatibility mode they give.
+//! Up to four copies of it, kept with
 //! the next, kept together, with or without widow control and a page break before as the
 //! first bytes say, are then laid out on pages of a height they give, the last of them in a
 //! second section of a start the first bytes give when they say so, with every line on
@@ -30,7 +31,7 @@ use officewright_font::{FontBook, FontOrigin};
 use officewright_layout::fuzzing::{check_lines, check_pages, check_paragraph};
 use officewright_layout::ir::{
     Alignment, AnchorHorizontalAlign, AnchorVerticalAlign, AnchoredObject, Border, BorderSide,
-    Cell, Document, DocumentSettings, Field, FieldKind, FontHint, HeaderFooterSet,
+    Cell, CompatMode, Document, DocumentSettings, Field, FieldKind, FontHint, HeaderFooterSet,
     HorizontalAnchor, HorizontalPlacement, HorizontalReference, ImageData, ImageFormat, ImageId,
     Indent, Inline, Insets, Level, LevelAlignment, LevelTextPart, LineSpacing, ListDefinition,
     ListInstance, ListItem, Margins, NumberFormat, ObjectContent, PageSetup, Paragraph,
@@ -204,7 +205,18 @@ fuzz_target!(|data: &[u8]| {
     let data = data.get(..2048).unwrap_or(data);
     // Even-page headers in use when bit 5 of byte 12 says so, as the footer below has them.
     let even = data.get(12).is_some_and(|byte| byte & 32 != 0);
-    let mut document = Document::new(DocumentSettings::default().with_even_and_odd_headers(even));
+    // The compatibility mode from bits 1 and 2 of byte 11.
+    let mode = [
+        CompatMode::Word2003,
+        CompatMode::Word2007,
+        CompatMode::Word2010,
+        CompatMode::Word2013,
+    ][usize::from(data.get(11).copied().unwrap_or(0) >> 1 & 3)];
+    let mut document = Document::new(
+        DocumentSettings::default()
+            .with_even_and_odd_headers(even)
+            .with_compat_mode(mode),
+    );
     let mut styles = Vec::new();
     for chunk in data.chunks(4).take(4) {
         styles.push(document.add_run_style(style(chunk)));
