@@ -399,8 +399,10 @@ fn every_test_font_is_within_the_budget_of_its_layout_tables() -> TestResult {
 }
 
 #[test]
-fn a_symbol_that_is_a_soft_hyphen_stays_with_the_character_before_it() -> TestResult {
-    // Symbol F0AD of Noto Sans, which is no symbol font, is its soft hyphen (issue #164).
+fn a_symbol_of_a_font_that_is_not_installed_is_reported_whatever_stands_in() -> TestResult {
+    // Times New Roman is not installed; Liberation Serif stands in for it and has a glyph
+    // at U+F004 (#567). Its symbol F004 is drawn with that glyph, and reported all the same,
+    // since the font it names is not there.
     let book = book()?;
     let mut document = Document::default();
     let id = document.add_run_style(
@@ -408,18 +410,68 @@ fn a_symbol_that_is_a_soft_hyphen_stays_with_the_character_before_it() -> TestRe
             .with_fonts(RunFonts::new("Calibri"))
             .with_size(Pt(11.0)),
     );
-    let inlines = [
-        Inline::text("ab", id),
-        Inline::symbol("Noto Sans", 0xF0AD, id),
-        Inline::text("cd", id),
-    ];
-    fuzzing::check_paragraph(&book, &document, &inlines)?;
-    let paragraph = fuzzing::paragraph(&book, &document, &inlines);
+    let paragraph = fuzzing::paragraph(
+        &book,
+        &document,
+        &[Inline::symbol("Times New Roman", 0xF004, id)],
+    );
     let runs: Vec<(&str, Option<&str>)> = paragraph
         .runs()
         .iter()
         .map(|run| (run.text(), run.face()))
         .collect();
-    assert_eq!(runs, [("ab\u{AD}cd", Some("Carlito"))]);
+    assert_eq!(runs, [("\u{F004}", Some("Liberation Serif"))]);
+    let messages: Vec<&str> = paragraph
+        .report()
+        .iter()
+        .map(|entry| entry.message())
+        .collect();
+    assert!(
+        messages.contains(
+            &"symbol F004 of \"Times New Roman\" cannot be drawn: the font is not installed"
+        ),
+        "{messages:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_symbol_that_is_a_soft_hyphen_stays_with_the_character_before_it() -> TestResult {
+    // Symbol 00AD of Noto Sans, which is no symbol font, is its soft hyphen (issue #164).
+    // Its symbol F0AD is U+F0AD, which it has no glyph for, in a run of its own, as Word
+    // draws it (#509). Carlito has no soft hyphen: its symbol 00AD is no soft hyphen
+    // either, but U+F0AD, in the run of the Carlito text around it.
+    let book = book()?;
+    let mut document = Document::default();
+    let id = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Calibri"))
+            .with_size(Pt(11.0)),
+    );
+    let runs = |font: &str, code: u16| -> TestResult<Vec<(String, Option<String>)>> {
+        let inlines = [
+            Inline::text("ab", id),
+            Inline::symbol(font, code, id),
+            Inline::text("cd", id),
+        ];
+        fuzzing::check_paragraph(&book, &document, &inlines)?;
+        let paragraph = fuzzing::paragraph(&book, &document, &inlines);
+        Ok(paragraph
+            .runs()
+            .iter()
+            .map(|run| (run.text().to_owned(), run.face().map(str::to_owned)))
+            .collect())
+    };
+    let run = |text: &str, face: &str| (text.to_owned(), Some(face.to_owned()));
+    assert_eq!(runs("Noto Sans", 0x00AD)?, [run("ab\u{AD}cd", "Carlito")]);
+    assert_eq!(
+        runs("Noto Sans", 0xF0AD)?,
+        [
+            run("ab", "Carlito"),
+            run("\u{F0AD}", "Noto Sans"),
+            run("cd", "Carlito")
+        ]
+    );
+    assert_eq!(runs("Carlito", 0x00AD)?, [run("ab\u{F0AD}cd", "Carlito")]);
     Ok(())
 }

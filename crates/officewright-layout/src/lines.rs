@@ -96,6 +96,9 @@ pub(crate) struct Line {
     pub(crate) height: Pt,
     /// The baseline, from the top of the line.
     pub(crate) baseline: Pt,
+    /// The room multiple line spacing adds below the text, a part of `height` that may
+    /// reach past the bottom of the body.
+    pub(crate) below_text: Pt,
     pub(crate) end: LineEnd,
     /// Whether the line holds a piece too wide for any line, which reaches past its
     /// end and is reported.
@@ -1292,6 +1295,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             descent: Pt(0.0),
             height: Pt(0.0),
             baseline: Pt(0.0),
+            below_text: Pt(0.0),
             end: fit.end_kind,
             overflow: fit.overflow,
         }
@@ -1494,22 +1498,31 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let leading = if no_leading { 0.0 } else { extent.leading };
         let natural = extent.ascent + extent.descent + leading;
         let top = leading + extent.ascent;
-        let (height, baseline) = match self.line_spacing() {
-            LineSpacing::Multiple(factor) if factor >= 1.0 => (natural * factor, top),
+        let (height, baseline, below_text) = match self.line_spacing() {
+            // The room multiple lines add goes below the text, and at the foot of a page
+            // it may reach past the bottom of the body: Word keeps the last of the four
+            // lines spaced 3 on page 1 of E-line-multiple, whose text fits, its shading
+            // reaching 3.8 pt below the bottom margin. That document is in compatibility
+            // mode 15; that older modes do the same is a hypothesis until a Word render.
+            LineSpacing::Multiple(factor) if factor >= 1.0 => {
+                let height = natural * factor;
+                (height, top, height - natural)
+            }
             // Lines closer than single are scaled whole: the text keeps its place in
             // the line (E-line-multiple, 0.5 and 0.83 lines).
-            LineSpacing::Multiple(factor) => (natural * factor, top * factor),
-            LineSpacing::Exact(height) => (height.0, height.0 * EXACT_BASELINE),
+            LineSpacing::Multiple(factor) => (natural * factor, top * factor, 0.0),
+            LineSpacing::Exact(height) => (height.0, height.0 * EXACT_BASELINE, 0.0),
             // The room the minimum adds goes above the text (E-line-at-least).
             LineSpacing::AtLeast(minimum) => {
                 let height = natural.max(minimum.0);
-                (height, height - natural + top)
+                (height, height - natural + top, 0.0)
             }
         };
         line.ascent = Pt(extent.ascent);
         line.descent = Pt(extent.descent);
         line.height = Pt(height);
         line.baseline = Pt(baseline);
+        line.below_text = Pt(below_text);
     }
 
     /// The paragraph's line spacing, with the values Word has no meaning for taken as
@@ -2251,22 +2264,31 @@ mod tests {
             let (layout, report) = lay(text("A"), props, 100.0);
             let line = layout.lines.first().cloned().expect("a line");
             let round = |pt: Pt| (pt.0 * 1e6).round() / 1e6;
-            (round(line.height), round(line.baseline), report.len())
+            (
+                round(line.height),
+                round(line.baseline),
+                round(line.below_text),
+                report.len(),
+            )
         };
         // Single: 11.5 pt, the baseline 9 pt down.
-        assert_eq!(measure(LineSpacing::Multiple(1.0)), (11.5, 9.0, 0));
-        // Double: the room goes below the text.
-        assert_eq!(measure(LineSpacing::Multiple(2.0)), (23.0, 9.0, 0));
+        assert_eq!(measure(LineSpacing::Multiple(1.0)), (11.5, 9.0, 0.0, 0));
+        // Double: the room goes below the text, where it may reach past the bottom of
+        // the body.
+        assert_eq!(measure(LineSpacing::Multiple(2.0)), (23.0, 9.0, 11.5, 0));
         // Half: the line shrinks whole.
-        assert_eq!(measure(LineSpacing::Multiple(0.5)), (5.75, 4.5, 0));
+        assert_eq!(measure(LineSpacing::Multiple(0.5)), (5.75, 4.5, 0.0, 0));
         // Exactly 20 pt: the baseline at 80 %.
-        assert_eq!(measure(LineSpacing::Exact(Pt(20.0))), (20.0, 16.0, 0));
+        assert_eq!(measure(LineSpacing::Exact(Pt(20.0))), (20.0, 16.0, 0.0, 0));
         // At least 20 pt: the room goes above the text; less than single does nothing.
-        assert_eq!(measure(LineSpacing::AtLeast(Pt(20.0))), (20.0, 17.5, 0));
-        assert_eq!(measure(LineSpacing::AtLeast(Pt(5.0))), (11.5, 9.0, 0));
+        assert_eq!(
+            measure(LineSpacing::AtLeast(Pt(20.0))),
+            (20.0, 17.5, 0.0, 0)
+        );
+        assert_eq!(measure(LineSpacing::AtLeast(Pt(5.0))), (11.5, 9.0, 0.0, 0));
         // No height at all: single lines, reported.
-        assert_eq!(measure(LineSpacing::Exact(Pt(0.0))), (11.5, 9.0, 1));
-        assert_eq!(measure(LineSpacing::Multiple(-1.0)), (11.5, 9.0, 1));
+        assert_eq!(measure(LineSpacing::Exact(Pt(0.0))), (11.5, 9.0, 0.0, 1));
+        assert_eq!(measure(LineSpacing::Multiple(-1.0)), (11.5, 9.0, 0.0, 1));
     }
 
     #[test]

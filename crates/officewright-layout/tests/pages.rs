@@ -299,6 +299,120 @@ fn the_pages_of_space_before_top_keep_what_the_layout_relies_on() -> TestResult 
     Ok(())
 }
 
+/// The document of `E-line-multiple`, as scripts/make-rule-docs.py writes it: a reference
+/// line, then for each multiple of single lines a paragraph of four lines and a reference
+/// line after it, and last a paragraph of 1.15 lines whose first line holds a 28 pt run;
+/// with the text of each paragraph's first line.
+fn line_multiple() -> (Document, Vec<String>) {
+    let mut document = Document::default();
+    let font = |size: f64| {
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Calibri"))
+            .with_size(Pt(size))
+    };
+    let style = document.add_run_style(font(11.0));
+    let large = document.add_run_style(font(28.0));
+    let spaced = |line: f64| {
+        ParagraphProps::default()
+            .with_spacing(Spacing::default().with_line(LineSpacing::Multiple(line / 240.0)))
+    };
+    let broken = |lines: Vec<String>| -> Vec<Inline> {
+        let mut inlines = Vec::new();
+        for line in lines {
+            if !inlines.is_empty() {
+                inlines.push(Inline::line_break(BreakClear::None, style));
+            }
+            inlines.push(Inline::text(line, style));
+        }
+        inlines
+    };
+    let single = |text: &str| {
+        paragraph(
+            style,
+            ParagraphProps::default(),
+            vec![Inline::text(text, style)],
+        )
+    };
+    let above = "Reference line above the first case, single line spacing.";
+    let mut blocks = vec![single(above)];
+    let mut texts = vec![above.to_owned()];
+    let cases = [
+        (120.0, "0.5"),
+        (200.0, "0.833333"),
+        (240.0, "1"),
+        (259.0, "1.07917"),
+        (276.0, "1.15"),
+        (360.0, "1.5"),
+        (480.0, "2"),
+        (720.0, "3"),
+    ];
+    for (line, factor) in cases {
+        let label = format!("multiple {factor} lines (w:line {line})");
+        let lines = (1..=4)
+            .map(|n| format!("{label}, line {n}: Hamburgefonts gjpqy"))
+            .collect();
+        blocks.push(paragraph(style, spaced(line), broken(lines)));
+        texts.push(format!("{label}, line 1: Hamburgefonts gjpqy"));
+        let after = format!("Reference line after {label}.");
+        blocks.push(single(&after));
+        texts.push(after);
+    }
+    let mut mixed = vec![
+        Inline::text("multiple 1.15 lines (w:line 276) with a ", style),
+        Inline::text("28 pt", large),
+        Inline::text(" run, line 1", style),
+        Inline::line_break(BreakClear::None, style),
+    ];
+    mixed.extend(broken(vec![
+        "line 2: Hamburgefonts gjpqy".to_owned(),
+        "line 3: Hamburgefonts gjpqy".to_owned(),
+    ]));
+    blocks.push(paragraph(style, spaced(276.0), mixed));
+    texts.push("multiple 1.15 lines (w:line 276) with a 28 pt run, line 1".to_owned());
+    let after = "Reference line after the mixed case.";
+    blocks.push(single(after));
+    texts.push(after.to_owned());
+    document.add_section(Section::new(a4()).with_blocks(blocks));
+    (document, texts)
+}
+
+#[test]
+fn a_line_of_multiple_spacing_stays_at_the_foot_of_a_page_where_its_text_fits() -> TestResult {
+    // Word keeps all four lines of three-line spacing on page 1 of `E-line-multiple`: the
+    // last one's text inside the body, the room the spacing adds below it, shaded, 3.8 pt
+    // past the bottom margin; page 2 starts with the reference line after them.
+    let book = book()?;
+    let (document, texts) = line_multiple();
+    let laid = fuzzing::paginate(&book, &document, 10)?;
+    let word = word_lines("E-line-multiple")?;
+    let pages = word.iter().map(|line| line.page).max().unwrap_or(0);
+    assert_eq!(laid.pages().len(), pages);
+    for (number, page) in laid.pages().iter().enumerate() {
+        let first = word
+            .iter()
+            .find(|line| line.page == number + 1)
+            .ok_or("an empty page")?;
+        let fragment = page.fragments().first().ok_or("an empty page of ours")?;
+        let ours = texts.get(fragment.paragraph()).ok_or("no such paragraph")?;
+        assert!(
+            fragment.lines().start == 0 && first.text.starts_with(ours.as_str()),
+            "page {}: Word starts it with {:?}, we with line {} of {ours:?}",
+            number + 1,
+            first.text,
+            fragment.lines().start,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_pages_of_line_multiple_keep_what_the_layout_relies_on() -> TestResult {
+    let book = book()?;
+    let (document, _) = line_multiple();
+    fuzzing::check_pages(&book, &document, 10)?;
+    Ok(())
+}
+
 /// A document built from `seed`: up to three sections of random starts, page heights and
 /// numbering, each of up to five random paragraphs (`random_paragraph`) kept with the
 /// next, kept together, with or without widow control, with page breaks before, a `PAGE`

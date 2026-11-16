@@ -463,9 +463,37 @@ impl Builder<'_, '_, '_> {
             .language()
             .latin()
             .is_some_and(|tag| crate::slot::language_is(tag, &["tr", "az"]));
+        // Whether the letter before, past its other combining marks, was a small Greek
+        // letter drawn as a capital: a combining tonos after it is left out, as one
+        // composed with it is, and a combining dialytika with a tonos keeps the dialytika.
+        let mut raised_greek = false;
+        let small_caps_only = style.small_caps() && !style.caps();
         for ch in text.chars() {
+            if raised_greek && ch == '\u{344}' {
+                let source_start = self.out.source.len();
+                self.out
+                    .source
+                    .push(if small_caps_only { '\u{308}' } else { ch });
+                let source = source_start..self.out.source.len();
+                self.character('\u{308}', source, id, style, false);
+                continue;
+            }
+            if raised_greek && ch == '\u{301}' {
+                // In small capitals the source is what is drawn; in capitals it keeps the
+                // tonos, with the letter before.
+                if !small_caps_only {
+                    self.out.source.push(ch);
+                    if let Some(previous) = self.pending.last_mut() {
+                        previous.source.end = self.out.source.len();
+                    }
+                }
+                continue;
+            }
             let lowercase = ch.is_lowercase();
             let upper = style.caps() || (style.small_caps() && lowercase);
+            if !('\u{300}'..='\u{36F}').contains(&ch) {
+                raised_greek = upper && lowercase && is_greek(ch);
+            }
             let drawn: Vec<char> = if upper {
                 uppercase(ch, turkic)
             } else {
@@ -517,12 +545,34 @@ impl Builder<'_, '_, '_> {
             self.out.source.push(ch);
         }
         let source = source_start..self.out.source.len();
-        // The font itself: a symbol font maps its codes at U+F020 to U+F0FF, another font
-        // has them as characters U+0020 to U+00FF.
+        // The font itself. A symbol font maps its codes at U+F020 to U+F0FF, or at U+0020
+        // to U+00FF, and a code of either range stands for the same symbol. Another font
+        // draws the code as it is written: Word draws symbol F0AD of Noto Sans with its
+        // missing-glyph shape, not as U+00AD, a soft hyphen, and breaks no line at it
+        // (`E-soft-hyphen-font`, cases 03 and 04; #509). That it draws its other codes so
+        // too is a hypothesis.
         let low = code & 0xFF;
-        let codes = [0xF000 | low, low].into_iter().filter_map(char::from_u32);
+        // What is drawn where the font has no glyph for the code: the code as written in a
+        // font that is no symbol font, with its missing-glyph shape, but for a control
+        // character, a space and a character that attaches to the one before, whose part in
+        // the line (a break, a tab, a soft hyphen) it would take; else the code U+F000 above
+        // the low byte, which has none.
+        let mut missing = 0xF000 | low;
         if let (true, Some(face)) = (choice.installed, choice.face) {
-            for ch in codes {
+            let symbol = self
+                .fonts
+                .face(face)
+                .is_some_and(|shaping| shaping.face().is_symbol());
+            let codes = if symbol {
+                [Some(0xF000 | low), Some(low)]
+            } else {
+                let plain = |ch: char| !(ch.is_control() || ch.is_whitespace() || attaches(ch));
+                if char::from_u32(code).is_some_and(plain) {
+                    missing = code;
+                }
+                [Some(code), None]
+            };
+            for ch in codes.into_iter().flatten().filter_map(char::from_u32) {
                 if self.fonts.has_glyph(face, ch) {
                     // A soft hyphen of a font that is not a symbol font stays with the
                     // character before it, as in text.
@@ -557,17 +607,25 @@ impl Builder<'_, '_, '_> {
                 self.push(ch, source, look);
             }
             None => {
-                let why = if choice.installed {
-                    "the font has no such symbol"
-                } else {
-                    "the font is not installed"
-                };
-                self.fonts.report_once(
-                    ReportKind::GlyphMissing,
-                    self.location,
-                    format!("symbol {code:04X} of \"{font}\" cannot be drawn: {why}"),
-                );
-                let ch = char::from_u32(0xF000 | low).unwrap_or('\u{FFFD}');
+                let ch = char::from_u32(missing).unwrap_or('\u{FFFD}');
+                // Reported unless the font has a glyph for what is drawn, as a font that is
+                // no symbol font may have for the code U+F000 above a control character's.
+                let drawn = choice.installed
+                    && choice
+                        .face
+                        .is_some_and(|face| self.fonts.has_glyph(face, ch));
+                if !drawn {
+                    let why = if choice.installed {
+                        "the font has no such symbol"
+                    } else {
+                        "the font is not installed"
+                    };
+                    self.fonts.report_once(
+                        ReportKind::GlyphMissing,
+                        self.location,
+                        format!("symbol {code:04X} of \"{font}\" cannot be drawn: {why}"),
+                    );
+                }
                 let size = drawn_size(&style, style.size(), false);
                 let look = self.look(id, &style, choice, size, style.size(), Slot::Ascii);
                 self.push(ch, source, look);
@@ -855,11 +913,17 @@ impl Builder<'_, '_, '_> {
             let script = scripts.get(start).copied().unwrap_or(Script::Common);
             let placed = pending.get(start..end).unwrap_or(&[]);
             // Drawn characters that share a source character, or have none (a symbol
-            // whose code is no character).
-            let expanded = placed.iter().any(|placed| placed.source.is_empty())
-                || placed
-                    .windows(2)
-                    .any(|pair| matches!(pair, [a, b] if a.source == b.source));
+            // whose code is no character), or stand for several (a Greek capital and the
+            // tonos it leaves out).
+            let source = &self.out.source;
+            let expanded = placed.iter().any(|placed| {
+                placed.source.is_empty()
+                    || source
+                        .get(placed.source.clone())
+                        .is_some_and(|text| text.chars().nth(1).is_some())
+            }) || placed
+                .windows(2)
+                .any(|pair| matches!(pair, [a, b] if a.source == b.source));
             let sources = if expanded {
                 placed
                     .iter()
@@ -960,12 +1024,51 @@ fn inline_style(inline: &Inline) -> Option<RunStyleId> {
     }
 }
 
-/// The uppercase of `ch`, the Turkic way for i in Turkish and Azerbaijani.
+/// The uppercase of `ch`, the Turkic way for i in Turkish and Azerbaijani, and Greek
+/// without its tonos ([`greek_capital_without_tonos`]).
 fn uppercase(ch: char, turkic: bool) -> Vec<char> {
     if turkic && ch == 'i' {
         return vec!['\u{0130}'];
     }
+    if let Some(capital) = greek_capital_without_tonos(ch) {
+        return vec![capital];
+    }
     ch.to_uppercase().collect()
+}
+
+/// The capital of a Greek small letter with a tonos, without it, as Word draws Greek in
+/// small capitals (`business/form-ec-state-aid-notification-el`, whose "Νομικό καθεστώς"
+/// Word draws as "ΝΟΜΙΚΟ ΚΑΘΕΣΤΩΣ"), keeping a dialytika; in capitals too, and by the
+/// characters whatever the run's language, hypotheses until a rule document (#555).
+fn greek_capital_without_tonos(ch: char) -> Option<char> {
+    Some(match ch {
+        '\u{3AC}' => '\u{391}',
+        '\u{3AD}' => '\u{395}',
+        '\u{3AE}' => '\u{397}',
+        '\u{3AF}' => '\u{399}',
+        '\u{3CC}' => '\u{39F}',
+        '\u{3CD}' => '\u{3A5}',
+        '\u{3CE}' => '\u{3A9}',
+        '\u{390}' => '\u{3AA}',
+        '\u{3B0}' => '\u{3AB}',
+        // The same letters with an oxia, which Unicode takes for the tonos.
+        '\u{1F71}' => '\u{391}',
+        '\u{1F73}' => '\u{395}',
+        '\u{1F75}' => '\u{397}',
+        '\u{1F77}' => '\u{399}',
+        '\u{1F79}' => '\u{39F}',
+        '\u{1F7B}' => '\u{3A5}',
+        '\u{1F7D}' => '\u{3A9}',
+        '\u{1FD3}' => '\u{3AA}',
+        '\u{1FE3}' => '\u{3AB}',
+        _ => return None,
+    })
+}
+
+/// Whether `ch` is in Unicode's Greek and Coptic block (monotonic Greek; polytonic
+/// letters keep their accents).
+fn is_greek(ch: char) -> bool {
+    matches!(ch, '\u{370}'..='\u{3FF}')
 }
 
 /// The script of each character, with characters common to scripts and inherited ones
@@ -1259,6 +1362,84 @@ mod tests {
         let (itemized, _, _) = setup.run(&[Inline::text("ab", symbol_small)]);
         assert_eq!(itemized.text, "\u{391}\u{392}");
         assert_eq!(itemized.source, "AB");
+    }
+
+    #[test]
+    fn greek_in_capitals_and_small_capitals_drops_its_tonos() {
+        // Issue #517: Word draws "Νομικό καθεστώς" in small capitals as "ΝΟΜΙΚΟ ΚΑΘΕΣΤΩΣ"
+        // (business/form-ec-state-aid-notification-el), its text too.
+        let mut setup = Setup::new(vec![minimal()]);
+        let caps = setup.style(plain(TEST).with_caps(true));
+        let small = setup.style(plain(TEST).with_small_caps(true));
+        let drawn = |setup: &mut Setup, text: &str, style| {
+            let (itemized, _, _) = setup.run(&[Inline::text(text, style)]);
+            (itemized.text, itemized.source)
+        };
+        let both = |text: &str| (text.to_owned(), text.to_owned());
+        assert_eq!(
+            drawn(
+                &mut setup,
+                "\u{39D}\u{3BF}\u{3BC}\u{3B9}\u{3BA}\u{3CC}",
+                small
+            ),
+            both("\u{39D}\u{39F}\u{39C}\u{399}\u{39A}\u{39F}")
+        );
+        // Each letter with a tonos, the dialytika kept, also where it has a tonos too.
+        assert_eq!(
+            drawn(
+                &mut setup,
+                "\u{3AC}\u{3AD}\u{3AE}\u{3AF}\u{3CC}\u{3CD}\u{3CE}\u{390}\u{3B0}\u{3CA}",
+                small
+            ),
+            both("\u{391}\u{395}\u{397}\u{399}\u{39F}\u{3A5}\u{3A9}\u{3AA}\u{3AB}\u{3AA}")
+        );
+        // A combining tonos after the letter is left out as well.
+        assert_eq!(
+            drawn(&mut setup, "\u{3BF}\u{301}a", small),
+            both("\u{39F}A")
+        );
+        // In capitals the source keeps the tonos, composed or not.
+        assert_eq!(
+            drawn(&mut setup, "\u{3CC}\u{3BF}\u{301}", caps),
+            (
+                "\u{39F}\u{39F}".to_owned(),
+                "\u{3CC}\u{3BF}\u{301}".to_owned()
+            )
+        );
+        // Small capitals leave capitals as they are, with their tonos; Latin keeps its
+        // accents.
+        assert_eq!(
+            drawn(&mut setup, "\u{38C}\u{39F}\u{301}", small),
+            both("\u{38C}\u{39F}\u{301}")
+        );
+        assert_eq!(
+            drawn(&mut setup, "e\u{301}", caps),
+            ("E\u{301}".to_owned(), "e\u{301}".to_owned())
+        );
+        // The same letters written otherwise are drawn the same: ΐ fully decomposed, and
+        // with a combining dialytika and tonos, and ό with an oxia.
+        assert_eq!(
+            drawn(
+                &mut setup,
+                "\u{3B9}\u{308}\u{301}\u{3B9}\u{344}\u{1F79}",
+                small
+            ),
+            both("\u{399}\u{308}\u{399}\u{308}\u{39F}")
+        );
+        // In capitals, a capital typed with its tonos keeps it, composed or not, as small
+        // capitals keep it; capitals with small capitals are capitals.
+        assert_eq!(
+            drawn(&mut setup, "\u{386}\u{391}\u{301}", caps),
+            both("\u{386}\u{391}\u{301}")
+        );
+        let caps_and_small = setup.style(plain(TEST).with_caps(true).with_small_caps(true));
+        assert_eq!(
+            drawn(&mut setup, "\u{3CC}\u{3BF}\u{301}", caps_and_small),
+            (
+                "\u{39F}\u{39F}".to_owned(),
+                "\u{3CC}\u{3BF}\u{301}".to_owned()
+            )
+        );
     }
 
     #[test]
@@ -1744,30 +1925,179 @@ mod tests {
 
     #[test]
     fn keeps_a_symbol_that_is_a_soft_hyphen_with_the_character_before_it() {
-        // Hyph is no symbol font and has a soft hyphen: symbol F0AD of it is U+00AD.
+        // Hyph is no symbol font and has a soft hyphen: its symbol 00AD is U+00AD.
         let hyph = renamed(with_soft_hyphen(minimal()), "Officewright Hyph");
         let mut setup = Setup::new(vec![minimal(), hyph]);
         let style = setup.style(plain(TEST));
         let other = setup.style(plain(TEST).with_size(Pt(20.0)));
         let (itemized, report, families) = setup.run(&[
             Inline::text("A", style),
-            Inline::symbol("Officewright Hyph", 0xF0AD, other),
+            Inline::symbol("Officewright Hyph", 0x00AD, other),
             Inline::text("A", style),
         ]);
         // In the run, face and size of the A before it, as a soft hyphen of text is.
-        assert_eq!(runs(&itemized), [("A\u{AD}A", "A\u{F0AD}A", 10.0)]);
+        assert_eq!(runs(&itemized), [("A\u{AD}A", "A\u{AD}A", 10.0)]);
         assert_eq!(families, [TEST]);
         assert!(report.is_empty(), "{report:?}");
         // With no character before it, in its own font.
         let (itemized, _, families) = setup.run(&[
-            Inline::symbol("Officewright Hyph", 0xF0AD, other),
+            Inline::symbol("Officewright Hyph", 0x00AD, other),
             Inline::text("A", style),
         ]);
         assert_eq!(
             runs(&itemized),
-            [("\u{AD}", "\u{F0AD}", 20.0), ("A", "A", 10.0)]
+            [("\u{AD}", "\u{AD}", 20.0), ("A", "A", 10.0)]
         );
         assert_eq!(families, ["Officewright Hyph", TEST]);
+    }
+
+    #[test]
+    fn a_font_that_is_no_symbol_font_draws_a_symbol_s_code_as_it_is_written() {
+        // Word draws symbol F0AD of Noto Sans, which has U+00AD but no U+F0AD, with the
+        // font's missing-glyph shape, and breaks no line at it (`E-soft-hyphen-font`, cases
+        // 03 and 04; #509). Hyph is no symbol font and has U+00AD: symbol F0AD of it is
+        // U+F0AD, in its own run, and no soft hyphen. Its code 0041 is U+0041.
+        let hyph = renamed(with_soft_hyphen(minimal()), "Officewright Hyph");
+        let mut setup = Setup::new(vec![minimal(), hyph]);
+        let style = setup.style(plain(TEST));
+        let (itemized, report, families) = setup.run(&[
+            Inline::text("AA", style),
+            Inline::symbol("Officewright Hyph", 0xF0AD, style),
+            Inline::text("AA", style),
+        ]);
+        assert_eq!(
+            runs(&itemized),
+            [
+                ("AA", "AA", 10.0),
+                ("\u{F0AD}", "\u{F0AD}", 10.0),
+                ("AA", "AA", 10.0)
+            ]
+        );
+        assert_eq!(families, [TEST, "Officewright Hyph", TEST]);
+        assert_eq!(
+            messages(&report),
+            [(
+                ReportKind::GlyphMissing,
+                "symbol F0AD of \"Officewright Hyph\" cannot be drawn: the font has no such \
+                 symbol"
+            )]
+        );
+        // No line may end after it, nor before it.
+        let breaks = crate::breaks::BreakMap::new(&itemized.text, true);
+        assert_eq!(
+            breaks.all(),
+            [(itemized.text.len(), crate::breaks::Opportunity::Mandatory)]
+        );
+        let (itemized, report, _) =
+            setup.run(&[Inline::symbol("Officewright Hyph", 0x0041, style)]);
+        assert_eq!(runs(&itemized), [("A", "A", 10.0)]);
+        assert!(report.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn a_symbol_font_draws_a_symbol_s_code_and_its_low_byte_alike() {
+        use crate::testing::{with_low_symbol_cmap, with_symbol_cmap};
+        // Symb is a symbol font: its codes F041 and 0041 are both its glyph at U+F041.
+        let sym = renamed(with_symbol_cmap(minimal()), "Officewright Symb");
+        let mut setup = Setup::new(vec![minimal(), sym]);
+        let style = setup.style(plain(TEST));
+        let (itemized, report, families) = setup.run(&[
+            Inline::symbol("Officewright Symb", 0xF041, style),
+            Inline::symbol("Officewright Symb", 0x0041, style),
+        ]);
+        assert_eq!(runs(&itemized), [("\u{F041}\u{F041}", "\u{F041}A", 10.0)]);
+        assert_eq!(families, ["Officewright Symb"]);
+        assert!(report.is_empty(), "{report:?}");
+        // Symc is a symbol font that maps its codes at U+0020 to U+00FF: both codes are
+        // its glyph at U+0041.
+        let low = renamed(with_low_symbol_cmap(minimal()), "Officewright Symc");
+        let mut setup = Setup::new(vec![minimal(), low]);
+        let style = setup.style(plain(TEST));
+        let (itemized, report, families) = setup.run(&[
+            Inline::symbol("Officewright Symc", 0xF041, style),
+            Inline::symbol("Officewright Symc", 0x0041, style),
+        ]);
+        assert_eq!(runs(&itemized), [("AA", "\u{F041}A", 10.0)]);
+        assert_eq!(families, ["Officewright Symc"]);
+        assert!(report.is_empty(), "{report:?}");
+        // A code neither has, 0042, is drawn U+F000 above, with the font's missing-glyph
+        // shape, and reported.
+        let (itemized, report, _) =
+            setup.run(&[Inline::symbol("Officewright Symc", 0x0042, style)]);
+        assert_eq!(runs(&itemized), [("\u{F042}", "B", 10.0)]);
+        assert_eq!(messages(&report).len(), 1, "{report:?}");
+    }
+
+    #[test]
+    fn a_symbol_a_font_cannot_draw_is_its_code_as_written() {
+        use crate::testing::with_codes_raised;
+        // Rais is no symbol font and has its glyph of `A` at U+F041 only: its symbol 0041
+        // is U+0041, which it has no glyph for, so its missing-glyph shape, reported.
+        let raised = renamed(with_codes_raised(minimal()), "Officewright Rais");
+        let mut setup = Setup::new(vec![minimal(), raised]);
+        let style = setup.style(plain(TEST));
+        let (itemized, report, _) =
+            setup.run(&[Inline::symbol("Officewright Rais", 0x0041, style)]);
+        assert_eq!(runs(&itemized), [("A", "A", 10.0)]);
+        assert_eq!(
+            messages(&report),
+            [(
+                ReportKind::GlyphMissing,
+                "symbol 0041 of \"Officewright Rais\" cannot be drawn: the font has no such \
+                 symbol"
+            )]
+        );
+        // Its symbol F041 is its glyph.
+        let (itemized, report, _) =
+            setup.run(&[Inline::symbol("Officewright Rais", 0xF041, style)]);
+        assert_eq!(runs(&itemized), [("\u{F041}", "\u{F041}", 10.0)]);
+        assert!(report.is_empty(), "{report:?}");
+        // Its symbol 000D, a carriage return it has no glyph for, is drawn as U+F00D, so that
+        // no line ends at it.
+        let (itemized, report, _) = setup.run(&[
+            Inline::text("A", style),
+            Inline::symbol("Officewright Rais", 0x000D, style),
+            Inline::text("A", style),
+        ]);
+        assert_eq!(
+            runs(&itemized),
+            [("A", "A", 10.0), ("\u{F00D}", "\r", 10.0), ("A", "A", 10.0)]
+        );
+        let breaks = crate::breaks::BreakMap::new(&itemized.text, true);
+        assert_eq!(
+            breaks.all(),
+            [(itemized.text.len(), crate::breaks::Opportunity::Mandatory)]
+        );
+        assert_eq!(messages(&report).len(), 1, "{report:?}");
+        // Its symbols 00AD, a soft hyphen, 0081 and 0085, control characters, and 00A0, a space,
+        // which it has no glyphs for either, are drawn U+F000 above, in a run of their own,
+        // so that they take no part in the line; each is reported.
+        for code in [0x00AD, 0x0081, 0x0085, 0x00A0] {
+            let (itemized, report, _) = setup.run(&[
+                Inline::text("A", style),
+                Inline::symbol("Officewright Rais", code, style),
+                Inline::text("A", style),
+            ]);
+            let drawn = char::from_u32(0xF000 | u32::from(code)).map(String::from);
+            let source = char::from_u32(u32::from(code)).map(String::from);
+            let middle = runs(&itemized)
+                .get(1)
+                .map(|run| (run.0.to_owned(), run.1.to_owned()));
+            assert_eq!(middle, drawn.zip(source), "{code:04X}");
+            let breaks = crate::breaks::BreakMap::new(&itemized.text, true);
+            assert_eq!(
+                breaks.all(),
+                [(itemized.text.len(), crate::breaks::Opportunity::Mandatory)],
+                "{code:04X}"
+            );
+            assert_eq!(messages(&report).len(), 1, "{code:04X}: {report:?}");
+        }
+        // Its symbol 0020, a space, is drawn U+F000 above too, where it has a glyph: drawn,
+        // so not reported.
+        let (itemized, report, _) =
+            setup.run(&[Inline::symbol("Officewright Rais", 0x0020, style)]);
+        assert_eq!(runs(&itemized), [("\u{F020}", " ", 10.0)]);
+        assert!(report.is_empty(), "{report:?}");
     }
 
     #[test]
