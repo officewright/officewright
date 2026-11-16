@@ -884,7 +884,8 @@ fn piece_item(piece: &crate::lines::Piece) -> usize {
 /// Lays out `paragraph` of `document` in a column `width` points wide with the fonts of
 /// `book`, and checks what pagination relies on: the lines hold the paragraph's text in
 /// order, all of it, each byte once; a line wider than its room is one the breaker
-/// marks as holding a piece too wide for any line, and the report says so; a line
+/// marks as holding a piece too wide for any line, and the report says so, or, before
+/// Word 2013's mode, one with a tab from within its room to a stop past it; a line
 /// starts with a soft hyphen only where a line may end before it; heights and baselines
 /// are numbers, heights and widths not negative, and the room below a line's text that
 /// may reach past the bottom of the body is a part of its height.
@@ -951,7 +952,13 @@ pub fn check_lines(
             }
             + label_room;
         let wide = line.width.0 > room.max(0.0) + 1e-6 && line.width.0 > 0.0;
-        if wide && !(line.overflow && reported) {
+        let beyond = document.settings().compat_mode() < crate::ir::CompatMode::Word2013
+            && line.pieces.iter().any(|piece| {
+                matches!(piece.kind, crate::lines::PieceKind::Tab { .. })
+                    && piece.x.0 <= line.end_edge.0 + 1e-6
+                    && piece.x.0 + piece.width.0 > line.end_edge.0 + 1e-6
+            });
+        if wide && !(line.overflow && reported) && !beyond {
             return Err(format!(
                 "line {index} is {} wide in {room}: {:?}",
                 line.width.0,

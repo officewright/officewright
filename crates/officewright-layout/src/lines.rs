@@ -65,6 +65,23 @@ struct Fit {
     /// The first tab that starts past the end of the line, with no place before it
     /// where the line may end: it and the tabs after it hang like the spaces there.
     hanging_tab: Option<usize>,
+    /// Whether the line holds a tab to a stop past its end that Word takes before mode
+    /// 15 ([`Cursor::tab`]), so that the line may be wider than its room.
+    beyond: bool,
+}
+
+/// What a tab to a stop past the end of a line does ([`Cursor::tab`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PastEnd {
+    /// Word 2013 and later: the line ends before a tab to a start stop past its end, and
+    /// an end stop past it is taken at the end; in table cells and text boxes too, a
+    /// hypothesis until a Word render.
+    Wrap,
+    /// Before mode 15: a start stop of the paragraph's own past the end is taken.
+    Take,
+    /// Before mode 15, in a table cell or a text box, and a list label's tab in every
+    /// mode: the tab reaches the end.
+    Reach,
 }
 
 /// What shaping again at a cut replaced: the units at `first`, now `len` others.
@@ -325,6 +342,8 @@ pub(crate) struct Input<'p> {
     /// Whether the paragraph is in a table cell, where its paragraph mark and breaks keep
     /// counting in the height of a line of text (see `set_height`).
     pub(crate) cell: bool,
+    /// Whether the paragraph is in a text box.
+    pub(crate) in_box: bool,
 }
 
 /// What the line breaker works with.
@@ -353,6 +372,8 @@ pub(crate) struct Breaker<'p, 'f, 'b> {
     label_shift: Pt,
     /// Whether the paragraph is in a table cell.
     cell: bool,
+    /// Whether the paragraph is in a text box.
+    in_box: bool,
 }
 
 impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
@@ -371,6 +392,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             width,
             location,
             cell,
+            in_box,
         } = input;
         let (text, starts) = break_text(itemized);
         let props = paragraph.props();
@@ -394,6 +416,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             splice: None,
             label_shift: Pt(0.0),
             cell,
+            in_box,
         };
         breaker.scales = breaker.measure_items();
         breaker.units = breaker.make_units(shaped);
@@ -698,6 +721,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     hyphen: false,
                     overflow: false,
                     hanging_tab: None,
+                    beyond: false,
                 };
                 let mut line = self.place(end, fit, false);
                 self.set_height(&mut line, true);
@@ -727,7 +751,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             let mut line = self.place(start, fit, first);
             // Indents wider than the column leave no room, not less than none.
             let room = (right.0 - line.start.0).max(0.0);
-            let fits = line.width.0 <= room + EPSILON;
+            let fits = line.width.0 <= room + EPSILON || fit.beyond;
             if fits || fit.end_kind != LineEnd::Wrap || line.overflow {
                 return (fit.end, line);
             }
@@ -825,12 +849,31 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let mut candidate: Option<(usize, bool)> = None;
         let mut overflow = false;
         let mut hanging_tab: Option<usize> = None;
-        let wrap = |end: usize, hyphen: bool, overflow: bool, hanging_tab: Option<usize>| Fit {
+        let past_end = self.past_end();
+        // The items of the list label and its suffix: the label's tab keeps its line, and
+        // takes no stop past the end (`Breaker::label_end`).
+        let label_end = self.label_end();
+        // Whether the line holds anything of the paragraph's own that shows, before the unit
+        // at hand: not spaces, floating objects or the list label. A tab counts, as text
+        // does before a tab in `E-tab-margin`; that a line that holds only tabs ends before
+        // one to a stop past its end, and only spaces or floating objects do not, are
+        // hypotheses until a Word render.
+        let mut shown = false;
+        // The tab to a stop past the end that Word takes before mode 15, if the line
+        // holds one: the text after it does not wrap, and the line ends at the next
+        // place it may end.
+        let mut beyond: Option<usize> = None;
+        let wrap = |end: usize,
+                    hyphen: bool,
+                    overflow: bool,
+                    hanging_tab: Option<usize>,
+                    beyond: Option<usize>| Fit {
             end,
             end_kind: LineEnd::Wrap,
             hyphen,
             overflow,
             hanging_tab: hanging_tab.filter(|&tab| tab < end),
+            beyond: beyond.is_some_and(|tab| tab < end),
         };
         let mut index = start;
         while let Some(unit) = self.units.get(index).cloned() {
@@ -863,19 +906,40 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                         hyphen: false,
                         overflow,
                         hanging_tab,
+                        beyond: beyond.is_some(),
                     };
                 }
-                UnitKind::Tab { .. } => {
+                UnitKind::Tab { item } => {
                     // A tab after spaces that already hang past the end of the line
                     // starts the next line, if this one may end before it; else it stays,
-                    // and hangs with the spaces.
-                    if cursor.x.0 > right.0 + EPSILON {
+                    // and hangs with the spaces. After a tab to a stop past the end that
+                    // Word takes before mode 15, the line goes on to its next place to end.
+                    if cursor.x.0 > right.0 + EPSILON && beyond.is_none() {
                         if let Some((end, hyphen)) = candidate {
-                            return wrap(end, hyphen, overflow, hanging_tab);
+                            return wrap(end, hyphen, overflow, hanging_tab, beyond);
                         }
                         hanging_tab.get_or_insert(index);
+                    } else if past_end == PastEnd::Wrap
+                        && shown
+                        && self.start_stop_past(cursor.x, right)
+                    {
+                        // Word 2013 and later end the line before a tab to a start stop
+                        // past its end, even where UAX #14 lets no line end, and the tab
+                        // starts the next line (`E-tab-margin`, cases 1, 2 and 4 to 8:
+                        // after "before", after "(" and between two tabs).
+                        return wrap(index, false, overflow, hanging_tab, beyond);
                     }
-                    cursor.tab(&self.tabs, right);
+                    let from = cursor.x;
+                    let rule = if *item >= label_end {
+                        past_end
+                    } else {
+                        PastEnd::Reach
+                    };
+                    cursor.tab(&self.tabs, right, rule);
+                    if from.0 <= right.0 + EPSILON && cursor.x.0 > right.0 + EPSILON {
+                        beyond.get_or_insert(index);
+                    }
+                    shown |= *item >= label_end;
                 }
                 UnitKind::Glyphs { text, .. } if is_space(self.itemized, text) => {
                     cursor.space(unit.width);
@@ -885,21 +949,22 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     let x = cursor.peek(unit.width, what);
                     // What does not show fits wherever the line has got to; characters
                     // condensed to no width show, and must start before the end.
-                    let over = shows(&unit) && x.0 > right.0 + EPSILON;
+                    let over = shows(&unit) && x.0 > right.0 + EPSILON && beyond.is_none();
                     if over {
                         // The line ends at its last place to end, if it has one (after
                         // spaces at its start, too), else before the unit that does not
                         // fit, between two clusters; a unit alone on its line that does
                         // not fit stays there, reported.
                         if let Some((end, hyphen)) = candidate {
-                            return wrap(end, hyphen, overflow, hanging_tab);
+                            return wrap(end, hyphen, overflow, hanging_tab, beyond);
                         }
                         if cursor.has_content {
-                            return wrap(index, false, overflow, hanging_tab);
+                            return wrap(index, false, overflow, hanging_tab, beyond);
                         }
                         self.report_overflow(kind);
                         overflow = true;
                     }
+                    shown |= shows(&unit) && unit.kind.item() >= label_end;
                     cursor.add(unit.width, what);
                 }
             }
@@ -918,7 +983,20 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             match self.breaks.at(at) {
                 Some(Opportunity::Allowed) if index < self.units.len() => {
                     let hyphen = self.ends_in_soft_hyphen(index - 1);
-                    if !hyphen || cursor.x.0 + self.hyphen_width(index - 1).0 <= right.0 + EPSILON {
+                    if let Some(tab) = beyond {
+                        // The text after the tab, to the next place the line may end,
+                        // stays on the line wherever it reaches: Word's renders of
+                        // `E-tab-margin-alone-12` and `-14` keep the one word after it.
+                        // Hypotheses until a Word render: that the line ends at that place,
+                        // and not at a soft hyphen in the text after the tab; and that it
+                        // keeps the text before the tab, though it could end before it (in
+                        // the renders "before" is a paragraph of its own).
+                        if index > tab + 1 && !hyphen {
+                            return wrap(index, false, overflow, hanging_tab, beyond);
+                        }
+                    } else if !hyphen
+                        || cursor.x.0 + self.hyphen_width(index - 1).0 <= right.0 + EPSILON
+                    {
                         candidate = Some((index, hyphen));
                     }
                 }
@@ -941,6 +1019,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                             hyphen: false,
                             overflow,
                             hanging_tab,
+                            beyond: beyond.is_some(),
                         };
                     }
                 }
@@ -953,7 +1032,36 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             hyphen: false,
             overflow,
             hanging_tab,
+            beyond: beyond.is_some(),
         }
+    }
+
+    /// The item after those of the list label and its suffix. No render shows a label's
+    /// tab past the end, so it is laid out as before Word's renders of `E-tab-margin` were
+    /// taken in, in every mode: the line does not end before it, and it takes no stop past
+    /// the end but reaches the end ([`PastEnd::Reach`]); a hypothesis until a Word render.
+    fn label_end(&self) -> usize {
+        self.itemized.label.map_or(0, |label| label.with_suffix)
+    }
+
+    /// What a tab to a stop past the end of a line of the paragraph does. That table cells
+    /// and text boxes follow the rule of mode 15 as the body does is a hypothesis until a
+    /// Word render: the renders show body paragraphs only.
+    fn past_end(&self) -> PastEnd {
+        if self.document.settings().compat_mode() >= CompatMode::Word2013 {
+            PastEnd::Wrap
+        } else if self.cell || self.in_box {
+            PastEnd::Reach
+        } else {
+            PastEnd::Take
+        }
+    }
+
+    /// Whether a tab at `x` goes to a start stop past `end`, the end of the line.
+    fn start_stop_past(&self, x: Pt, end: Pt) -> bool {
+        self.tabs
+            .next(x)
+            .is_some_and(|stop| stop.kind == TabKind::Start && stop.position.0 > end.0 + EPSILON)
     }
 
     /// What a unit holds, for a decimal tab before it.
@@ -1217,7 +1325,12 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     content_end = Pt(origin + offset);
                 }
                 let hanging = index >= last_content;
-                let (x, width, leader) = cursor.tab(&self.tabs, right);
+                let rule = if item >= self.label_end() {
+                    self.past_end()
+                } else {
+                    PastEnd::Reach
+                };
+                let (x, width, leader) = cursor.tab(&self.tabs, right, rule);
                 pieces.push(Piece {
                     x,
                     width,
@@ -1794,26 +1907,65 @@ impl Cursor {
     }
 
     /// Adds a tab: the stop it goes to after the current place, given the end of the
-    /// line. Returns where the tab starts, its width so far and its leader.
+    /// line and what a tab to a stop past it does ([`PastEnd`]). Returns where the tab
+    /// starts, its width so far and its leader.
     ///
     /// A tab whose stop is past the end of the line, or that has no stop, reaches the
-    /// end of the line, so that the text after it goes on the next line. That is a
-    /// hypothesis until a Word render (`E-tab-margin.docx`). A stop at the end itself is
-    /// within the line: Word's render of `cv-en-compact.docx` ends the text of an end
-    /// tab at the right margin.
-    fn tab(&mut self, tabs: &TabStops, end: Pt) -> (Pt, Pt, TabLeader) {
+    /// end of the line with that stop's leader, so that the text after it goes on the
+    /// next line. In mode 15 the line ends before a tab to a start stop past its end
+    /// after anything of the paragraph's own that shows ([`Breaker::fit`]), so such a tab
+    /// reaches the end only after nothing of that kind (spaces, floating objects and a
+    /// list label are not), as at the start of a line, where Word's render of
+    /// `E-tab-margin-alone.docx` draws its dot leader alone on a line, from the line's
+    /// start to the margin. That the tabs to
+    /// centre and decimal stops past the end reach it too, in every mode, is a hypothesis
+    /// until a Word render. Two stops past the end are taken all the same:
+    ///
+    /// - in mode 15, an end stop, at the end of the line: Word's render of
+    ///   `E-tab-margin.docx` ends the text after a tab to an end stop 18 pt into the
+    ///   right margin at the margin;
+    /// - before mode 15, a start stop of the paragraph's own, wherever it is: Word's
+    ///   renders of `E-tab-margin-alone-12.docx` and `-14.docx` put the text after it at
+    ///   a stop 18 pt into the right margin, with the dot leader up to it, and at one
+    ///   past the edge of the page. Hypotheses until a Word render: that the automatic
+    ///   stops past the end are not taken; that mode 11 takes the paragraph's own as
+    ///   modes 12 and 14 do; and that in table cells and text boxes, which the renders do
+    ///   not show and where the text would run past the cell or the box, none is taken.
+    ///
+    /// A stop at the end itself is within the line: Word's render of `cv-en-compact.docx`
+    /// ends the text of an end tab at the right margin.
+    fn tab(&mut self, tabs: &TabStops, end: Pt, past_end: PastEnd) -> (Pt, Pt, TabLeader) {
         if let Some(pending) = self.pending.take() {
             self.x = Pt(pending.start.0 + pending.width() + pending.text);
         }
         let start = self.x;
         self.has_content = true;
-        let stop = tabs
-            .next(start)
-            .filter(|stop| stop.position.0 <= end.0 + EPSILON);
+        let next = tabs.next(start);
+        let stop = next.and_then(|stop| {
+            if stop.position.0 <= end.0 + EPSILON {
+                Some(stop)
+            } else if past_end == PastEnd::Wrap
+                && stop.kind == TabKind::End
+                && start.0 <= end.0 + EPSILON
+            {
+                Some(Stop {
+                    position: end,
+                    ..stop
+                })
+            } else if past_end == PastEnd::Take && stop.kind == TabKind::Start && !stop.automatic {
+                Some(stop)
+            } else {
+                None
+            }
+        });
         let Some(stop) = stop else {
             let width = Pt((end.0 - start.0).max(0.0));
             self.x = Pt(start.0 + width.0);
-            return (start, width, TabLeader::None);
+            return (
+                start,
+                width,
+                next.map_or(TabLeader::None, |stop| stop.leader),
+            );
         };
         match stop.kind {
             TabKind::Center | TabKind::End | TabKind::Decimal => {
@@ -2240,6 +2392,51 @@ mod tests {
     }
 
     #[test]
+    fn before_mode_15_a_stop_past_the_end_is_taken_only_outside_cells_and_boxes() {
+        use crate::ir::{CompatMode, DocumentSettings, TabStop};
+        // "A", a tab to the paragraph's own stop at 50 pt and "A" in a column 30 pt wide,
+        // in mode 14: in the body the text after the tab goes to the stop, as in Word's
+        // render of `E-tab-margin-alone-14`; in a table cell and a text box, which the
+        // renders do not show, the tab reaches the end and the text wraps.
+        let book = book(vec![minimal()]);
+        let mut document =
+            Document::new(DocumentSettings::default().with_compat_mode(CompatMode::Word2010));
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let paragraph = Paragraph::new(style)
+            .with_props(
+                ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(50.0))]),
+            )
+            .with_inlines([
+                Inline::text("A", style),
+                Inline::tab(style),
+                Inline::text("A", style),
+            ]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let location = Location::default();
+        let itemized =
+            crate::itemize::itemize(&document, paragraph.inlines(), &mut fonts, &location);
+        let shaped =
+            crate::itemize::shape_runs(&document, &itemized, &mut fonts, &mut shaper, &location);
+        for (cell, in_box, lines) in [(false, false, 1), (true, false, 2), (false, true, 2)] {
+            let input = Input {
+                document: &document,
+                paragraph: &paragraph,
+                width: Pt(30.0),
+                location: &location,
+                cell,
+                in_box,
+            };
+            let laid = Breaker::new(input, &itemized, &shaped, &mut fonts, &mut shaper).lines();
+            assert_eq!(laid.len(), lines, "cell {cell}, box {in_box}");
+        }
+    }
+
+    #[test]
     fn undoing_a_splice_maps_an_end_by_its_place_in_the_text() {
         // "AAAA" in the test font: a unit per letter, at bytes 0, 1, 2 and 3.
         let book = book(vec![minimal()]);
@@ -2263,6 +2460,7 @@ mod tests {
             width: Pt(100.0),
             location: &location,
             cell: false,
+            in_box: false,
         };
         let starts = |breaker: &Breaker<'_, '_, '_>| -> Vec<usize> {
             breaker.units.iter().map(|unit| unit.range.start).collect()
