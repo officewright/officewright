@@ -2292,6 +2292,34 @@ mod tests {
     }
 
     #[test]
+    fn a_target_is_written_once_for_links_that_came_from_two_documents() {
+        // The second page comes from another document whose link goes where the first
+        // page's does: the two links were checked apart, and the file writes their
+        // target once all the same.
+        let site = LinkTarget::Uri("https://example.com/".to_owned());
+        let mut doc = Document::new();
+        doc.add_page(PageSize::A4)
+            .unwrap()
+            .add_link(Pt(0.0), Pt(0.0), Pt(10.0), Pt(10.0), &site)
+            .unwrap();
+        doc.add_page(PageSize::A4).unwrap();
+        let mut other = Document::new();
+        other
+            .add_page(PageSize::A4)
+            .unwrap()
+            .add_link(Pt(0.0), Pt(20.0), Pt(10.0), Pt(10.0), &site)
+            .unwrap();
+        std::mem::swap(doc.page_mut(1).unwrap(), other.page_mut(0).unwrap());
+        let pdf = String::from_utf8_lossy(&doc.to_bytes().unwrap()).into_owned();
+        assert_eq!(
+            pdf.matches("/URI (https://example.com/)").count(),
+            1,
+            "{pdf}"
+        );
+        assert_eq!(pdf.matches("/A ").count(), 2, "{pdf}");
+    }
+
+    #[test]
     fn a_page_has_at_most_max_links_links() {
         let mut doc = Document::new();
         let page = doc.add_page(PageSize::A4).unwrap();
@@ -2333,6 +2361,18 @@ mod tests {
             err.to_string(),
             "a link on the page at index 1 goes to the destination \"appendix\", which no page \
              adds"
+        );
+        // A name outside ASCII is named as it was given.
+        let mut doc = linked();
+        let unknown = LinkTarget::Destination("Глава 2 (100%)".to_owned());
+        doc.page_mut(2)
+            .unwrap()
+            .add_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &unknown)
+            .unwrap();
+        let err = refused(&doc);
+        assert!(
+            matches!(&err, Error::UnknownDestination { name, page: 2 } if name == "Глава 2 (100%)"),
+            "{err}"
         );
 
         let mut doc = linked();

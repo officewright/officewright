@@ -2,9 +2,14 @@
 //! memory of the whole process. Linux only, where `/proc` gives the memory.
 #![cfg(target_os = "linux")]
 
+use std::sync::Mutex;
+
 use officewright_pdf::{Document, LinkTarget, PageSize, Pt};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// Held by each test while it measures, as the memory is the whole process's.
+static MEASURING: Mutex<()> = Mutex::new(());
 
 /// The resident memory of the process in bytes, from `/proc/self/statm`.
 fn resident() -> TestResult<u64> {
@@ -22,6 +27,9 @@ fn resident() -> TestResult<u64> {
 fn a_link_over_many_lines_keeps_and_writes_its_target_once() -> TestResult {
     // A URI of 32,000 bytes, the most a PDF string holds less a little, on 16,000 lines
     // of two pages: one annotation for each line.
+    let _measuring = MEASURING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let uri = format!("https://example.com/{}", "a".repeat(32_000 - 20));
     let target = LinkTarget::Uri(uri.clone());
     let mut doc = Document::new();
@@ -44,5 +52,33 @@ fn a_link_over_many_lines_keeps_and_writes_its_target_once() -> TestResult {
         .filter(|window| *window == uri.as_bytes())
         .count();
     assert_eq!(written, 1);
+    Ok(())
+}
+
+#[test]
+fn links_to_many_targets_keep_each_once() -> TestResult {
+    // 1000 links, each to a URI of its own of 32,000 bytes: 32 MB of URIs.
+    let _measuring = MEASURING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let uris: Vec<String> = (0..1000)
+        .map(|i| format!("https://example.com/{i:04}/{}", "a".repeat(32_000 - 25)))
+        .collect();
+    let mut doc = Document::new();
+    let page = doc.add_page(PageSize::A4)?;
+    let before = resident()?;
+    for (i, uri) in uris.iter().enumerate() {
+        let y = 800.0 - 0.5 * i as f64;
+        page.add_link(
+            Pt(72.0),
+            Pt(y),
+            Pt(400.0),
+            Pt(0.5),
+            &LinkTarget::Uri(uri.clone()),
+        )?;
+    }
+    let grown = resident()?.saturating_sub(before);
+    // Each URI kept once; a second copy of each would take 64 MB.
+    assert!(grown < 48 << 20, "the links took {grown} bytes");
     Ok(())
 }

@@ -5,7 +5,9 @@ forms sort otherwise than their keys. With tools that share no code with it:
 
 - qpdf validates the file structure, and its JSON gives each page's link annotations and
   the name tree, which this test walks to find the page of each link's destination;
-- pdfinfo lists the named destinations with their pages and positions.
+- pdfinfo lists the named destinations with their pages and positions;
+- pdftohtml follows each link, as a reader does, to its URI or the page of its
+  destination.
 
 OW_LINKS must point at the example's binary (scripts/check.sh sets it).
 """
@@ -154,6 +156,24 @@ class LinksTest(unittest.TestCase):
             for _, (kind, name) in links:
                 if kind == "dest":
                     self.assertIn(key(name), found)
+
+    def test_poppler_follows_each_link(self):
+        xml = run(["pdftohtml", "-xml", "-i", "-stdout", str(self.pdf)]).stdout.decode("utf-8")
+        found = []
+        page = 0
+        for match in re.finditer(r'<page number="(\d+)"|<a href="([^"]*)">', xml):
+            if match.group(1):
+                page = int(match.group(1))
+                continue
+            href = match.group(2)
+            internal = re.fullmatch(r".*#(\d+)", href)
+            found.append((page, ("page", int(internal.group(1))) if internal else ("uri", href)))
+        expected = [
+            (number, ("page", DESTINATIONS[name][0]) if kind == "dest" else ("uri", name))
+            for number, links in enumerate(LINKS, 1)
+            for _, (kind, name) in links
+        ]
+        self.assertEqual(found, expected)
 
     def test_pdfinfo_lists_every_destination(self):
         lines = run(["pdfinfo", "-dests", str(self.pdf)]).stdout.decode("utf-8").splitlines()

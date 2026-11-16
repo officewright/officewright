@@ -53,6 +53,7 @@ linux)
 	need pdffonts "apt install poppler-utils"
 	need pdftoppm "apt install poppler-utils"
 	need pdfinfo "apt install poppler-utils"
+	need pdftohtml "apt install poppler-utils"
 	need cc "apt install gcc"
 	need c++ "apt install g++"
 	need nm "apt install binutils"
