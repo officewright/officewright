@@ -841,8 +841,8 @@ fn a_soft_hyphen_of_another_size_makes_its_line_no_taller_but_text_of_that_size_
     // A line that ends at the soft hyphen keeps its letters' height, and the line of
     // the 20 pt word after it is where it is with the soft hyphen in the letters' size.
     let (own, same) = (
-        painted("Extraordinarily", big, "longwordsplit", 200.0),
-        painted("Extraordinarily", text, "longwordsplit", 200.0),
+        painted("Extraordinarily", big, "longwordsplit", 150.0),
+        painted("Extraordinarily", text, "longwordsplit", 150.0),
     );
     assert_eq!(y(&own, "-")?, BASELINE, "{}", own.text());
     assert_eq!(
