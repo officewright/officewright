@@ -3,10 +3,12 @@
 //! named destinations of.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use officewright_core::Pt;
 
 use crate::display::{DisplayItem, Point};
+use crate::ir::LinkTarget;
 use crate::itemize::{Itemized, Mark};
 use crate::lines::{Line, Piece, PieceKind};
 
@@ -127,7 +129,9 @@ fn line_links(itemized: &Itemized, line: &Line, (x, y): (f64, f64), out: &mut Ve
                     .get(at)
                     .is_some_and(|span| span.start.item <= item)
                     .then_some(at);
-                if let Some(link) = previous {
+                // A floating object or a note's mark takes no room: a link of nothing else
+                // takes none on the line, and a floating object's frame takes it.
+                if let Some(link) = previous.filter(|_| piece.width.0 > 0.0) {
                     extend(link, piece.x.0, end);
                 }
             }
@@ -151,6 +155,16 @@ fn line_links(itemized: &Itemized, line: &Line, (x, y): (f64, f64), out: &mut Ve
             });
         }
     }
+}
+
+/// The target of the link that item `item` of `itemized`, an item that is not text, is in.
+pub(crate) fn target_of(itemized: &Itemized, item: usize) -> Option<Arc<LinkTarget>> {
+    let links = &itemized.links;
+    let at = links.partition_point(|link| link.end.item <= item);
+    links
+        .get(at)
+        .filter(|link| link.start.item <= item)
+        .map(|link| link.target.clone())
 }
 
 /// The item of a piece that has a place of its own among the paragraph's pieces; `None`
@@ -490,6 +504,89 @@ mod tests {
                 Mark::Link(50.0, 20.0, 38.5, 11.5, "u"),
             ]
         );
+    }
+
+    #[test]
+    fn a_hyphen_belongs_to_the_link_of_what_it_follows_only() {
+        // 25 pt wide in a font whose `Á` and hyphen are 6 pt: a link of `Á` alone, then
+        // "ÁÁ", a soft hyphen and "ÁÁÁ" in a style of their own, outside the link. The first
+        // line ends at the soft hyphen, whose hyphen follows the unlinked "ÁÁ".
+        let font = with_soft_hyphen(with_hyphen(minimal()));
+        let (_, layout) = laid_in(font, 25.0, ParagraphProps::default(), |style, document| {
+            let other = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0))
+                    .with_kern_min(Some(Pt(100.0))),
+            );
+            vec![
+                Inline::link_start(uri("word")),
+                Inline::text("Á", style),
+                Inline::link_end(),
+                Inline::text("ÁÁ", other),
+                Inline::soft_hyphen(other),
+                Inline::text("ÁÁÁ", other),
+            ]
+        });
+        assert_eq!(layout.lines.len(), 2);
+        assert_eq!(layout.itemized.items.len(), 2);
+        assert_eq!(
+            all_marks(&layout),
+            [Mark::Link(50.0, 20.0, 6.0, 11.5, "word")]
+        );
+    }
+
+    #[test]
+    fn a_bookmark_after_a_soft_hyphen_where_the_line_ends_marks_the_next_line() {
+        // The hyphen drawn at the end of the first line stands for no text: the bookmark
+        // after the soft hyphen marks the second line, which holds what follows it.
+        let font = with_soft_hyphen(with_hyphen(minimal()));
+        let (_, layout) = laid_in(font, 25.0, ParagraphProps::default(), |style, _| {
+            vec![
+                Inline::text("ÁÁÁ", style),
+                Inline::soft_hyphen(style),
+                Inline::bookmark("after"),
+                Inline::text("ÁÁÁ", style),
+            ]
+        });
+        assert_eq!(layout.lines.len(), 2);
+        assert_eq!(all_marks(&layout), [Mark::Destination(50.0, 31.5, "after")]);
+    }
+
+    #[test]
+    fn a_floating_object_takes_no_room_of_its_link_on_the_line() {
+        use crate::ir::{AnchoredObject, HorizontalAnchor, VerticalAnchor};
+        // A link holding only a floating picture draws no box on the line: the picture's
+        // frame takes the link where the page draws it.
+        let (_, layout) = laid(100.0, ParagraphProps::default(), |style, document| {
+            let image = document.add_image(ImageData::new(ImageFormat::Png, Vec::new()));
+            let picture = || {
+                Inline::anchored(AnchoredObject::new(
+                    ObjectContent::Picture(Picture::new(image)),
+                    Size::new(Pt(80.0), Pt(50.0)),
+                    HorizontalAnchor::default(),
+                    VerticalAnchor::default(),
+                ))
+            };
+            vec![
+                picture(),
+                Inline::text("A", style),
+                Inline::link_start(uri("logo")),
+                picture(),
+                Inline::link_end(),
+                Inline::text("A", style),
+                Inline::tab(style),
+            ]
+        });
+        assert_eq!(all_marks(&layout), []);
+        // The pictures are items 0, before the link, and 2, in it, between the runs of
+        // text; the tab after the link is item 4.
+        assert_eq!(target_of(&layout.itemized, 0), None);
+        assert_eq!(
+            target_of(&layout.itemized, 2).as_deref(),
+            Some(&uri("logo"))
+        );
+        assert_eq!(target_of(&layout.itemized, 4), None);
     }
 
     #[test]

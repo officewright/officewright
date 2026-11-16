@@ -5810,6 +5810,57 @@ mod tests {
     }
 
     #[test]
+    fn a_floating_picture_in_a_link_takes_the_link_over_its_frame() {
+        use crate::ir::{HorizontalPlacement, HorizontalReference, LinkTarget};
+        use crate::ir::{VerticalPlacement, VerticalReference};
+        // A picture 30 by 10 pt placed 50 pt from the page's left edge and 70 pt down, in a
+        // link between two letters: the link takes the picture's frame, and nothing on the
+        // line, where the picture takes no room.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let picture = anchored_picture(
+            &mut document,
+            (
+                HorizontalReference::Page,
+                HorizontalPlacement::Offset(Pt(50.0)),
+            ),
+            (VerticalReference::Page, VerticalPlacement::Offset(Pt(70.0))),
+        );
+        let paragraph = Paragraph::new(style).with_inlines([
+            Inline::text("A", style),
+            Inline::link_start(LinkTarget::Uri("https://example.com/".into())),
+            picture,
+            Inline::link_end(),
+            Inline::text("A", style),
+        ]);
+        document.add_section(Section::new(setup()).with_blocks([paragraph.into()]));
+        let (laid, _) = laid(&document, 10);
+        let pages = laid.expect("pages").pages;
+        let boxes: Vec<String> = pages[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Image(image) => Some(format!(
+                    "image {} {} {} {}",
+                    image.at.x.0, image.at.y.0, image.width.0, image.height.0
+                )),
+                DisplayItem::Link {
+                    at, width, height, ..
+                } => Some(format!(
+                    "link {} {} {} {}",
+                    at.x.0, at.y.0, width.0, height.0
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(boxes, ["image 50 70 30 10", "link 50 70 30 10"]);
+    }
+
+    #[test]
     fn links_and_bookmarks_in_headers_and_table_cells_are_where_their_text_is() {
         use crate::ir::LinkTarget;
 

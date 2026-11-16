@@ -1151,6 +1151,15 @@ impl Painting<'_, '_, '_> {
         let mut items = Vec::new();
         let at = Point { x: Pt(x), y: Pt(y) };
         self.content(item, object.content(), (at, object.size()), &mut items);
+        // An object in a link takes the link over its frame.
+        if let Some(target) = crate::links::target_of(&self.layout.itemized, item) {
+            items.push(DisplayItem::Link {
+                at,
+                width: object.size().width(),
+                height: object.size().height(),
+                target,
+            });
+        }
         self.floats.push(Float {
             behind: object.behind_text(),
             z_order: object.z_order(),

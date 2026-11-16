@@ -264,7 +264,7 @@ fn render(
         options.max_pages,
         || PdfPages::new(&document, options.compression),
     )?;
-    painted.link_bookmarks();
+    painted.add_links();
     // Only the last pass's painting is reported, after what the layout reported, as when
     // the pages were painted once they were all laid out.
     for (kind, location, message) in painted.notes.entries {
@@ -296,15 +296,61 @@ struct PdfPages<'a> {
     most_waiting: usize,
 }
 
-/// The bookmarks painted so far, and the links to bookmarks, which wait for the last page:
-/// a page may link to a bookmark that a later page shows, or that no page shows, as it is
-/// in content that is left out or cut off.
+/// The bookmarks painted so far, and the links, which wait for the last page: a page may
+/// link to a bookmark that a later page shows, or that no page shows, as it is in content
+/// that is left out or cut off.
 #[derive(Default)]
 struct Links {
     /// The names of the bookmarks given a destination: the first of each name.
     bookmarks: HashSet<Arc<str>>,
-    /// Each link to a bookmark: its page's index, its box and the bookmark's name.
-    waiting: Vec<(usize, Bounds, Arc<str>)>,
+    /// The names of the bookmarks left out, as a PDF cannot hold them.
+    refused: HashSet<Arc<str>>,
+    /// Each link: its page's index, its box and where it goes, in the order the pages
+    /// paint them.
+    waiting: Vec<(usize, Bounds, Arc<LinkTarget>)>,
+}
+
+/// The most characters of a name that a message of the report quotes.
+const QUOTED_NAME: usize = 64;
+
+impl Links {
+    /// Adds the links to the pages of `pdf`, once every page is painted, each page's in the
+    /// order it paints them, which viewers move through them in: those to a URI, and
+    /// those to a bookmark that a page shows, to the first destination of its name. The
+    /// others are left out, and noted in `notes`.
+    fn add_to(&mut self, pdf: &mut pdf::Document, notes: &mut Notes) {
+        for (page, (x, y, width, height), target) in std::mem::take(&mut self.waiting) {
+            let target = match &*target {
+                LinkTarget::Uri(uri) => pdf::LinkTarget::Uri(uri.clone()),
+                LinkTarget::Bookmark(name) if self.bookmarks.contains(name.as_str()) => {
+                    pdf::LinkTarget::Destination(name.clone())
+                }
+                LinkTarget::Bookmark(name) => {
+                    let (kind, why) = if self.refused.contains(name.as_str()) {
+                        (ReportKind::ValueClamped, "which a PDF cannot hold")
+                    } else {
+                        (ReportKind::FeatureUnsupported, "which no page shows")
+                    };
+                    let mut quoted: String = name.chars().take(QUOTED_NAME).collect();
+                    if quoted.len() < name.len() {
+                        quoted.push('…');
+                    }
+                    notes.add(
+                        kind,
+                        &Location::default(),
+                        format!("a link to the bookmark {quoted:?}, {why}, is left out"),
+                    );
+                    continue;
+                }
+            };
+            if let Some(Err(error)) = pdf
+                .page_mut(page)
+                .map(|pdf_page| pdf_page.add_link(x, y, width, height, &target))
+            {
+                notes.link_left_out(&error);
+            }
+        }
+    }
 }
 
 /// An entry of the report: its kind, where, and what.
@@ -334,27 +380,9 @@ impl<'a> PdfPages<'a> {
         }
     }
 
-    /// Adds the links to bookmarks, once every page is painted: those to a bookmark that
-    /// a page shows go to its first destination; the others are left out, and reported.
-    fn link_bookmarks(&mut self) {
-        for (page, (x, y, width, height), name) in std::mem::take(&mut self.links.waiting) {
-            if !self.links.bookmarks.contains(&name) {
-                self.notes.add(
-                    ReportKind::FeatureUnsupported,
-                    &Location::default(),
-                    format!("a link to the bookmark {name:?}, which no page shows, is left out"),
-                );
-                continue;
-            }
-            let target = pdf::LinkTarget::Destination(name.to_string());
-            if let Some(Err(error)) = self
-                .pdf
-                .page_mut(page)
-                .map(|pdf_page| pdf_page.add_link(x, y, width, height, &target))
-            {
-                self.notes.link_left_out(&error);
-            }
-        }
+    /// Adds the links, once every page is painted ([`Links::add_to`]).
+    fn add_links(&mut self) {
+        self.links.add_to(&mut self.pdf, &mut self.notes);
     }
 }
 
@@ -439,10 +467,9 @@ impl Painter<'_, '_, '_> {
         self.paint(width, height, &page.items)
     }
 
-    /// Adds a page `width` by `height` and paints `items` on it. Links to URIs are added
-    /// at once, those to bookmarks once every page is painted
-    /// ([`PdfPages::link_bookmarks`]); a bookmark's destination is added where the first
-    /// bookmark of its name is.
+    /// Adds a page `width` by `height` and paints `items` on it. Its links are added once
+    /// every page is painted ([`Links::add_to`]); a bookmark's destination is added where
+    /// the first bookmark of its name is.
     fn paint(&mut self, width: Pt, height: Pt, items: &[DisplayItem]) -> Result<()> {
         let items = self.drawn(width, height, items);
         let index = self.pdf.page_count();
@@ -450,19 +477,7 @@ impl Painter<'_, '_, '_> {
         let (notes, links) = (&mut self.notes, &mut self.links);
         for item in items {
             match item {
-                Drawn::Link((x, y, w, h), target) => match &*target {
-                    LinkTarget::Bookmark(name) => {
-                        links
-                            .waiting
-                            .push((index, (x, y, w, h), Arc::from(name.as_str())));
-                    }
-                    LinkTarget::Uri(uri) => {
-                        let target = pdf::LinkTarget::Uri(uri.clone());
-                        if let Err(error) = pdf_page.add_link(x, y, w, h, &target) {
-                            notes.link_left_out(&error);
-                        }
-                    }
-                },
+                Drawn::Link(bounds, target) => links.waiting.push((index, bounds, target)),
                 Drawn::Destination(x, y, name) => {
                     if links.bookmarks.contains(&name) {
                         continue;
@@ -471,11 +486,14 @@ impl Painter<'_, '_, '_> {
                         Ok(()) => {
                             links.bookmarks.insert(name);
                         }
-                        Err(error) => notes.add(
-                            ReportKind::ValueClamped,
-                            &Location::default(),
-                            format!("a bookmark is left out, as a PDF cannot hold it: {error}"),
-                        ),
+                        Err(error) => {
+                            notes.add(
+                                ReportKind::ValueClamped,
+                                &Location::default(),
+                                format!("a bookmark is left out, as a PDF cannot hold it: {error}"),
+                            );
+                            links.refused.insert(name);
+                        }
                     }
                 }
                 Drawn::Glyphs(run) => pdf_page.draw_glyphs(&run)?,
@@ -1187,6 +1205,110 @@ mod tests {
     }
 
     #[test]
+    fn bookmarks_a_pdf_cannot_hold_are_left_out_and_so_are_the_links_to_them() {
+        use crate::ir::{Inline, LinkTarget};
+
+        // An empty name, and one of 40,000 bytes, more than a PDF string holds: the
+        // bookmarks are left out, and the links to them; the report says why, quoting at
+        // most 64 characters of a name.
+        let long = "x".repeat(40_000);
+        let (report, text) = paged(|style| {
+            let link = |name: &str| {
+                [
+                    Inline::link_start(LinkTarget::Bookmark(name.to_owned())),
+                    Inline::text("A", style),
+                    Inline::link_end(),
+                ]
+            };
+            let mut first: Vec<Inline> = [link(""), link(&long)].concat();
+            first.extend([
+                Inline::bookmark(""),
+                Inline::bookmark(long.as_str()),
+                Inline::text("A", style),
+            ]);
+            vec![(0.0, first)]
+        });
+        assert!(!text.contains("/Subtype /Link"), "{text}");
+        assert!(!text.contains("/Names"));
+        let messages: Vec<&str> = report
+            .entries()
+            .iter()
+            .map(|entry| entry.message())
+            .collect();
+        let refused = messages
+            .iter()
+            .filter(|m| m.starts_with("a bookmark is left out, as a PDF cannot hold it: "))
+            .count();
+        assert_eq!(refused, 2, "{messages:?}");
+        assert!(
+            messages.contains(&"a link to the bookmark \"\", which a PDF cannot hold, is left out")
+        );
+        let quoted = format!(
+            "a link to the bookmark \"{}…\", which a PDF cannot hold, is left out",
+            "x".repeat(64)
+        );
+        assert!(messages.contains(&quoted.as_str()), "{messages:?}");
+    }
+
+    #[test]
+    fn a_page_s_links_are_in_the_order_it_paints_them() {
+        use crate::ir::{Inline, LinkTarget};
+
+        // A link to a bookmark of the next page, then one to a URI: the page lists them in
+        // that order, which viewers move through them in.
+        let (_, text) = paged(|style| {
+            let link = |target: LinkTarget| {
+                [
+                    Inline::link_start(target),
+                    Inline::text("A", style),
+                    Inline::link_end(),
+                ]
+            };
+            let first = [
+                link(LinkTarget::Bookmark("Next".into())),
+                link(LinkTarget::Uri("https://example.com/".into())),
+            ]
+            .concat();
+            vec![
+                (0.0, first),
+                (
+                    0.0,
+                    vec![Inline::bookmark("Next"), Inline::text("A", style)],
+                ),
+            ]
+        });
+        let page = text.split("<< /Type /Page ").nth(1).expect("a page");
+        let annotations = page
+            .split("/Annots [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("the page's links");
+        let objects: Vec<&str> = annotations
+            .split(" 0 R")
+            .map(str::trim)
+            .filter(|number| !number.is_empty())
+            .collect();
+        let kinds: Vec<&str> = objects
+            .iter()
+            .map(|number| {
+                let start = format!("\n{number} 0 obj\n");
+                let object = text.split(start.as_str()).nth(1).expect("the link");
+                if object.starts_with("<< /Type /Annot /Subtype /Link")
+                    && object
+                        .split("endobj")
+                        .next()
+                        .is_some_and(|o| o.contains("/Dest (Next)"))
+                {
+                    "bookmark"
+                } else {
+                    "uri"
+                }
+            })
+            .collect();
+        assert_eq!(kinds, ["bookmark", "uri"]);
+    }
+
+    #[test]
     fn links_to_bookmarks_wait_for_the_pass_whose_pdf_is_kept() {
         use crate::ir::{Field, FieldKind, Inline, LinkTarget};
 
@@ -1311,6 +1433,7 @@ mod tests {
         painter
             .paint(Pt(100.0), Pt(200.0), &vec![link; 8193])
             .expect("a page");
+        painter.links.add_to(&mut painter.pdf, &mut painter.notes);
         painter.pdf.set_compression(pdf::Compression::None);
         let text = String::from_utf8_lossy(&painter.pdf.to_bytes().expect("a PDF")).into_owned();
         assert_eq!(text.matches("/Subtype /Link").count(), 8191);
