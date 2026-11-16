@@ -5864,41 +5864,57 @@ mod tests {
 
     #[test]
     fn links_that_a_row_of_exact_height_cuts_off_are_reported() {
-        use crate::ir::{LinkTarget, RowHeight};
+        use crate::ir::{Indent, LinkTarget, RowHeight};
         const CUT: &str =
             "links of text and pictures that a table row of exact height cuts off are left out";
-        // A row of an exact 20 pt holding two lines: a link on the second, which the row
-        // cuts off, is reported; one on the first, inside the row, is not.
-        let reported = |second: bool| {
+        // A row of an exact `height` holding two 20 pt lines, the link on line `on`, its
+        // paragraph indented by `indent`: reported where the row leaves none of the link,
+        // below it or beside it, as an overflow; not where it is inside the row, nor where
+        // the row cuts it only in part.
+        let reported = |height: f64, on: usize, indent: f64| {
             let document = document(|style| {
-                let mut inlines = vec![Inline::text("A", style)];
                 let link = [
                     Inline::link_start(LinkTarget::Uri("u".into())),
                     Inline::text("A", style),
                     Inline::link_end(),
                 ];
-                if second {
-                    inlines.push(Inline::line_break(BreakClear::None, style));
-                    inlines.extend(link);
-                } else {
-                    inlines.extend(link);
-                    inlines.push(Inline::line_break(BreakClear::None, style));
-                    inlines.push(Inline::text("A", style));
+                let mut inlines = Vec::new();
+                for line in 1..=2 {
+                    if line > 1 {
+                        inlines.push(Inline::line_break(BreakClear::None, style));
+                    }
+                    if line == on {
+                        inlines.extend(link.clone());
+                    } else {
+                        inlines.push(Inline::text("A", style));
+                    }
                 }
+                let props = spacing(0.0, 0.0).with_indent(Indent::default().with_start(Pt(indent)));
                 let row = Row::default()
-                    .with_height(RowHeight::Exact(Pt(20.0)))
+                    .with_height(RowHeight::Exact(Pt(height)))
                     .with_cells([Cell::default().with_blocks([Paragraph::new(style)
-                        .with_props(spacing(0.0, 0.0))
+                        .with_props(props)
                         .with_inlines(inlines)
                         .into()])]);
                 vec![Section::new(setup()).with_blocks(vec![table_with(vec![row], 0.0).into()])]
             });
             let (laid, report) = laid(&document, 10);
             laid.expect("pages");
-            messages(&report).iter().any(|m| m == CUT)
+            report
+                .entries()
+                .iter()
+                .find(|entry| entry.message() == CUT)
+                .map(crate::report::ReportEntry::kind)
         };
-        assert!(reported(true));
-        assert!(!reported(false));
+        assert_eq!(reported(20.0, 2, 0.0), Some(ReportKind::Overflow));
+        assert_eq!(reported(20.0, 1, 0.0), None);
+        // Line 2, from 20 to 40, in a row of 30: cut in part, and kept as far as the row.
+        assert_eq!(reported(30.0, 2, 0.0), None);
+        // Line 1 inside a row of 30, but 60 pt left of the cell, which the row clips to.
+        assert_eq!(reported(30.0, 1, -60.0), Some(ReportKind::Overflow));
+        // Line 2 in a row of 20.005 pt: 0.005 pt of it inside the row, less than a link may
+        // be, so the painter leaves the link out.
+        assert_eq!(reported(20.005, 2, 0.0), Some(ReportKind::Overflow));
     }
 
     #[test]

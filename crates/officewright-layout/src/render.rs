@@ -55,10 +55,6 @@ const MIN_PAGE_SIDE: f64 = 3.0;
 /// picture shows nothing, and is not drawn.
 const MIN_PICTURE: f64 = 0.01;
 
-/// The smallest width or height of a link that `officewright-pdf` makes; a smaller one
-/// could not be clicked, and is left out.
-const MIN_LINK: f64 = 0.01;
-
 /// How a document is rendered into PDF: the most pages it may take, the fonts besides
 /// those of the document that the book of [`font_book`](Self::font_book) holds, and how
 /// the PDF's streams are compressed.
@@ -591,7 +587,9 @@ impl Painter<'_, '_, '_> {
                         area = area.and_then(|area| overlap(area, *clip));
                     }
                     // A box smaller than a PDF's link would be too small to click.
-                    if let Some(area) = area.filter(|area| area.2.0.min(area.3.0) >= MIN_LINK) {
+                    if let Some(area) =
+                        area.filter(|area| area.2.0.min(area.3.0) >= crate::links::MIN_LINK)
+                    {
                         drawn.push(Drawn::Link(area, target.clone()));
                     }
                 }

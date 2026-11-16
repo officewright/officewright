@@ -12,6 +12,10 @@ use crate::ir::LinkTarget;
 use crate::itemize::{Itemized, Mark};
 use crate::lines::{Line, Piece, PieceKind};
 
+/// The smallest width or height of a link that a PDF takes: a smaller one could not be
+/// clicked, and is left out.
+pub(crate) const MIN_LINK: f64 = 0.01;
+
 /// Adds to `out` the links and bookmarks of `lines` of a paragraph laid out in `all`,
 /// itemized as `itemized`, the first of `lines` with its top at `origin.y`, in a column
 /// whose start edge is at `origin.x`.

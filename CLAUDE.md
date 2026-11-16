@@ -82,7 +82,8 @@ crates/
                         frame of a floating object in a link, to a URI or to the first
                         destination of a bookmark's name, its bookmarks as named destinations
                         at the lines they start, and links to bookmarks no page shows left out
-                        and reported;
+                        and reported (not yet: the link of a picture that a row of exact
+                        height draws whole is cut to the row, as the box of its line);
                         feature `fuzzing` opens entry points for the fuzz targets, examples and the tests
                         with the test fonts and Word's renders, which are not API; `data/symbol.txt`
                         (Unicode's Adobe Symbol mapping) stays out of the published crate
