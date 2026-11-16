@@ -1762,6 +1762,7 @@ impl<'d> Stacked<'d> {
                         // A cell does not place floating objects yet: reported by `stack`.
                         page: None,
                         floats: Vec::new(),
+                        exclusions: None,
                         // Hypothesis: in a cell, as no reference shows it, a bar tab reaches
                         // only through the lines.
                         bar_reach: (0.0, 0.0),

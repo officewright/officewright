@@ -16,6 +16,7 @@ use crate::lists::{Counters, Label};
 use crate::pages::report_list_formats;
 use crate::report::{Location, ReportKind};
 use crate::shape::Shaper;
+use crate::wrap::Around;
 
 /// The space automatic spacing (`w:beforeAutospacing`, `w:afterAutospacing`) puts
 /// above or below a paragraph, whatever its font size and spacing: Word's renders of
@@ -35,9 +36,10 @@ pub(crate) struct ParagraphLayout {
 }
 
 impl ParagraphLayout {
-    /// The height of the lines.
+    /// The height of the lines, with the room floating objects they go below take above
+    /// them.
     pub(crate) fn height(&self) -> Pt {
-        Pt(self.lines.iter().map(|line| line.height.0).sum())
+        Pt(self.lines.iter().map(|line| line.advance()).sum())
     }
 
     /// The text box that item `item` shows, laid out.
@@ -103,7 +105,26 @@ pub(crate) fn lay_out_with(
         width,
         tools,
         (location, fields),
-        (true, false),
+        (true, false, None),
+    )
+}
+
+/// [`lay_out_with`], its lines going around the floating objects of `around`.
+pub(crate) fn lay_out_around(
+    document: &Document,
+    paragraph: (&Paragraph, Option<&Label>),
+    width: Pt,
+    tools: (&mut Fonts<'_>, &mut Shaper),
+    (location, fields): (&Location, Option<&FieldValues>),
+    around: &Around<'_>,
+) -> ParagraphLayout {
+    lay_out_paragraph(
+        document,
+        paragraph,
+        width,
+        tools,
+        (location, fields),
+        (true, false, Some(around)),
     )
 }
 
@@ -123,21 +144,22 @@ pub(crate) fn lay_out_in_cell(
         width,
         tools,
         (location, fields),
-        (true, true),
+        (true, true, None),
     )
 }
 
 /// [`lay_out_with`], laying out the text boxes of the paragraph's objects when `boxes`
 /// holds, as it does but in a text box: no box is laid out in a box, which
 /// `Document::validate` refuses, so that a document that was not validated cannot make the
-/// layout recurse without bound. `cell` says the paragraph is in a table cell.
+/// layout recurse without bound. `cell` says the paragraph is in a table cell, `around`
+/// what floating objects its lines go around.
 fn lay_out_paragraph(
     document: &Document,
     (paragraph, label): (&Paragraph, Option<&Label>),
     width: Pt,
     (fonts, shaper): (&mut Fonts<'_>, &mut Shaper),
     (location, fields): (&Location, Option<&FieldValues>),
-    (boxes, cell): (bool, bool),
+    (boxes, cell, around): (bool, bool, Option<&Around<'_>>),
 ) -> ParagraphLayout {
     let itemized = itemize_with(
         document,
@@ -153,6 +175,7 @@ fn lay_out_paragraph(
         width,
         location,
         cell,
+        around,
     };
     let lines = Breaker::new(input, &itemized, &shaped, fonts, shaper).lines();
     // Word hyphenates only where a line wraps, in a paragraph that does not suppress it, in a
@@ -274,7 +297,7 @@ fn lay_out_box(
             width,
             (fonts, shaper),
             (location, fields),
-            (false, false),
+            (false, false, None),
         );
         if layout
             .itemized
@@ -336,6 +359,7 @@ pub(crate) fn content_widths(
         location,
         // Widths only: no line's height is read.
         cell: true,
+        around: None,
     };
     let mut breaker = Breaker::new(input, &itemized, &shaped, fonts, shaper);
     let min = breaker.min_width();

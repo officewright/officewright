@@ -25,6 +25,7 @@ use crate::paragraph::ParagraphLayout;
 use crate::report::{Location, ReportKind};
 use crate::shape::ShapingFace;
 use crate::tables::border_line;
+use crate::wrap::Exclusion;
 
 /// How far the baseline of a superscript rises, as a fraction of the size its
 /// formatting gives. Hypothesis, like the size superscripts are drawn at, until a Word
@@ -410,6 +411,10 @@ pub(crate) struct Painting<'a, 'f, 'b> {
     pub(crate) page: Option<PageBox>,
     /// The floating objects the painted lines anchor, for the page to stack.
     pub(crate) floats: Vec<Float>,
+    /// What the floating objects the painted lines anchor keep the body's text out of,
+    /// where the paragraph is the body's; `None` elsewhere, where text does not wrap
+    /// around them, which is reported.
+    pub(crate) exclusions: Option<Vec<Exclusion>>,
     /// How far bar tabs reach above the first line painted and below the last: through
     /// the paragraph's space before and after, as far as its page lays them out.
     pub(crate) bar_reach: (f64, f64),
@@ -449,6 +454,7 @@ impl Painting<'_, '_, '_> {
             .settings()
             .has_compat_flag(&CompatFlag::UlTrailSpace);
         for line in lines {
+            top += line.above.0;
             let baseline = top + line.baseline.0;
             let bounds = (top, top + line.height.0);
             for piece in &line.pieces {
@@ -545,13 +551,15 @@ impl Painting<'_, '_, '_> {
             .min(indent.start().0 + indent.first_line().0)
             - SHADING_OUTSET;
         let end = self.layout.width.0 - indent.end().0 + SHADING_OUTSET;
+        // The room above a line that a floating object takes is shaded too: a hypothesis
+        // until a Word render.
         let height: f64 = self
             .layout
             .lines
             .get(lines)
             .unwrap_or(&[])
             .iter()
-            .map(|line| line.height.0)
+            .map(crate::lines::Line::advance)
             .sum();
         if end > start && height > 0.0 {
             out.push(DisplayItem::Rect {
@@ -647,7 +655,9 @@ impl Painting<'_, '_, '_> {
                 format!("only the first {MAX_BAR_TABS} bar tabs of a paragraph are drawn"),
             );
         }
-        let height: f64 = lines.iter().map(|line| line.height.0).sum();
+        // Through the room above a line that a floating object takes too: a hypothesis
+        // until a Word render.
+        let height: f64 = lines.iter().map(crate::lines::Line::advance).sum();
         // The paragraph's shading covers its lines only (`E-para-shading.docx`), so over
         // its spacing a bar takes the colour on what is behind the paragraph.
         let on_lines = text_color(ColorValue::Auto, self.paragraph_background());
@@ -1129,8 +1139,8 @@ impl Painting<'_, '_, '_> {
     }
 
     /// Adds the floating object of item `item`, if it is one, to the page's floats,
-    /// positioned from its anchor (`float_position`). Text does not wrap around it yet,
-    /// and that is reported.
+    /// positioned from its anchor (`float_position`), and what it keeps the body's text
+    /// out of to [`Painting::exclusions`], where text wraps around it.
     fn float(&mut self, item: usize, anchor: (f64, (f64, f64), f64)) {
         let Some(page) = self.page else {
             return;
@@ -1141,15 +1151,29 @@ impl Painting<'_, '_, '_> {
         let Some(Inline::Anchored(object)) = inline_at(self.paragraph.inlines(), path) else {
             return;
         };
-        if object.wrap() != Wrap::None {
-            self.fonts.report_once(
+        let (x, y) = float_position(object, &page, anchor);
+        match (&mut self.exclusions, Exclusion::of(object, (x, y))) {
+            (_, None) => {}
+            (Some(exclusions), Some(exclusion)) => {
+                if matches!(object.wrap(), Wrap::Tight | Wrap::Through) {
+                    self.fonts.report_once(
+                        ReportKind::FeatureUnsupported,
+                        self.location,
+                        "text wrapped tight or through a floating object goes around its \
+                         frame, not its outline"
+                            .to_owned(),
+                    );
+                }
+                exclusions.push(exclusion);
+            }
+            (None, Some(_)) => self.fonts.report_once(
                 ReportKind::FeatureUnsupported,
                 self.location,
-                "text does not wrap around floating objects yet: it runs over or under them"
+                "text does not wrap around the floating objects of headers, footers and notes \
+                 yet: it runs over or under them"
                     .to_owned(),
-            );
+            ),
         }
-        let (x, y) = float_position(object, &page, anchor);
         let mut items = Vec::new();
         let at = Point { x: Pt(x), y: Pt(y) };
         self.content(item, object.content(), (at, object.size()), &mut items);
@@ -1255,6 +1279,7 @@ impl Painting<'_, '_, '_> {
                     // laid out.
                     page: None,
                     floats: Vec::new(),
+                    exclusions: None,
                     // Hypothesis, as no reference shows them: in a text box, bar tabs
                     // reach only through the lines.
                     bar_reach: (0.0, 0.0),
@@ -1961,6 +1986,7 @@ mod tests {
             leaders: &mut leaders,
             page: None,
             floats: Vec::new(),
+            exclusions: None,
             bar_reach: (0.0, 0.0),
         };
         let mut items = Vec::new();

@@ -63,7 +63,11 @@ crates/
                         repeated, and a PAGE field in repeated header rows or in a row cut over
                         pages shows the number of one page only),
                         and draws floating pictures where they are anchored (stacked behind or in
-                        front of the text, which does not wrap around them yet) and text boxes,
+                        front of the text, the body's lines from their paragraph's on wrapped
+                        around those of the body square, tight and through as square around the
+                        frame, or top and bottom, on one side of each; not yet: text on both
+                        sides, wrap polygons, lines above the anchor paragraph, tables, and the
+                        objects of headers, footers and notes) and text boxes,
                         inline or floating, with their paragraphs (insets, anchoring down the box,
                         fill and outline), the numbers of the references of footnotes and
                         endnotes (references in headers and footers show no number), and

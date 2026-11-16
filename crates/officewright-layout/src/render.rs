@@ -1991,6 +1991,7 @@ mod tests {
             fragments: Vec::new(),
             frame_items: 0,
             floats: Vec::new(),
+            exclusions: Vec::new(),
             items: vec![DisplayItem::Rect {
                 at: Point {
                     x: Pt(0.0),

@@ -115,7 +115,7 @@ impl<'d> NoteLayout<'d> {
                     .lines
                     .iter()
                     .take(at.line)
-                    .map(|line| line.height.0)
+                    .map(crate::lines::Line::advance)
                     .sum();
                 top + above
             }
@@ -241,10 +241,10 @@ impl<'d> NoteLayout<'d> {
                     let rest = layout.lines.len().saturating_sub(first);
                     let mut fit = 0;
                     for line in layout.lines.iter().skip(first) {
-                        if y + line.height.0 > room + EPSILON {
+                        if y + line.advance() > room + EPSILON {
                             break;
                         }
-                        y += line.height.0;
+                        y += line.advance();
                         fit += 1;
                     }
                     if fit < rest {
@@ -606,7 +606,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             if closed && !defer && !notes.is_empty() {
                 break;
             }
-            let room = bottom - y - line.height.0;
+            let room = bottom - y - line.advance();
             if let Some((above, waiting)) = &cut {
                 // The note cut gives the line room, as far as its cut keeps a part here.
                 let strict = Rules {
@@ -624,7 +624,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 // until a Word render has both. The notes of the line itself go below all
                 // of it.
                 let end = tail.as_ref().map_or(0.0, |tail| tail.bottom);
-                if y + line.height.0 - line.below_text.0 > bottom - end + EPSILON {
+                if y + line.advance() - line.below_text.0 > bottom - end + EPSILON {
                     break;
                 }
                 if !closed && !notes.is_empty() {
@@ -658,7 +658,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     tail = plan.tail;
                 }
             }
-            y += line.height.0;
+            y += line.advance();
             count += 1;
             if matches!(
                 line.end,
@@ -1154,6 +1154,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         leaders: &mut self.leaders,
                         page: Some(page),
                         floats: Vec::new(),
+                        exclusions: None,
                         // Hypothesis: in notes, as no reference shows them, bar tabs reach
                         // only through the lines.
                         bar_reach: (0.0, 0.0),

@@ -297,10 +297,10 @@ ir_struct! {
 }
 
 ir_struct! {
-    /// A floating object (`wp:anchor`), anchored to the paragraph it appears in. Text
-    /// does not wrap around it yet: it is drawn at its position, and any wrapping is
-    /// reported. A position Word writes as `simplePos` the producer passes as offsets from
-    /// the page on both axes.
+    /// A floating object (`wp:anchor`), anchored to the paragraph it appears in, drawn at
+    /// its position. The body text after its anchor wraps around it as [`Wrap`] and
+    /// [`WrapSide`] say. A position Word writes as `simplePos` the producer passes as
+    /// offsets from the page on both axes.
     ///
     /// ```
     /// use officewright_core::Pt;
@@ -345,6 +345,9 @@ ir_struct! {
         copy vertical: VerticalAnchor => with_vertical;
         /// How text wraps around it.
         copy wrap: Wrap => with_wrap;
+        /// On which of its sides text wrapped square, tight or through goes
+        /// (`wrapText`; VML's `side`).
+        copy wrap_side: WrapSide => with_wrap_side;
         /// Whether it is drawn behind the text instead of in front.
         copy behind_text: bool => with_behind_text;
         /// Whether, anchored in a table cell, it is positioned within the cell.
@@ -362,10 +365,11 @@ ir_struct! {
 
 impl AnchoredObject {
     /// An object with this content, frame size and position, without effects, in front
-    /// of the text, without wrapping, positioned within a table cell when anchored in
-    /// one, allowed to overlap other objects, at the bottom of the stack and with no
-    /// distances. WordprocessingML requires the wrapping, `behindDoc`, `layoutInCell`,
-    /// `allowOverlap` and `relativeHeight`, so the producer passes the document's.
+    /// of the text, without wrapping (text wrapped around it would go on both sides),
+    /// positioned within a table cell when anchored in one, allowed to overlap other
+    /// objects, at the bottom of the stack and with no distances. WordprocessingML requires
+    /// the wrapping, `behindDoc`, `layoutInCell`, `allowOverlap` and `relativeHeight`, so
+    /// the producer passes the document's.
     pub fn new(
         content: ObjectContent,
         size: Size,
@@ -379,6 +383,7 @@ impl AnchoredObject {
             horizontal,
             vertical,
             wrap: Wrap::None,
+            wrap_side: WrapSide::BothSides,
             behind_text: false,
             layout_in_cell: true,
             allow_overlap: true,
@@ -529,8 +534,11 @@ pub enum AnchorVerticalAlign {
     Outside,
 }
 
-/// How text wraps around an anchored object. Only [`None`](Self::None) is laid out yet:
-/// with the others the text runs as if the object were not there, and that is reported.
+/// How text wraps around an anchored object: the lines of its paragraph and of the
+/// paragraphs after it on its page go beside it or below it, its distances away. Lines
+/// above its paragraph, tables, and the text of headers, footers and notes do not wrap
+/// around it yet, nor does text around the floating objects of headers, footers and notes:
+/// they run over or under it, and that is reported.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Wrap {
@@ -541,10 +549,29 @@ pub enum Wrap {
     TopAndBottom,
     /// Text flows around its bounding box.
     Square,
-    /// Text flows around its outline.
+    /// Text flows around its outline. Laid out as [`Square`](Self::Square), around the
+    /// frame, and reported.
     Tight,
-    /// Text flows around its outline and into open parts of it.
+    /// Text flows around its outline and into open parts of it. Laid out as
+    /// [`Square`](Self::Square), around the frame, and reported.
     Through,
+}
+
+/// On which sides of an anchored object text wrapped around it goes (ST_WrapText), where
+/// it has room. Text goes on one side of an object only: where both sides have room for
+/// it, on the side with more, which is reported.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum WrapSide {
+    /// On both sides.
+    #[default]
+    BothSides,
+    /// On the left only.
+    Left,
+    /// On the right only.
+    Right,
+    /// On the side with more room only.
+    Largest,
 }
 
 impl Check for HorizontalPlacement {
@@ -581,5 +608,6 @@ no_rules!(
     AnchorHorizontalAlign,
     AnchorVerticalAlign,
     TextBoxAnchor,
-    Wrap
+    Wrap,
+    WrapSide
 );

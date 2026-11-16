@@ -37,7 +37,7 @@ pub use image::{
     AnchorHorizontalAlign, AnchorVerticalAlign, AnchoredObject, Crop, HorizontalAnchor,
     HorizontalPlacement, HorizontalReference, ImageData, ImageFormat, InlineObject, Insets,
     ObjectContent, Picture, Size, TextBox, TextBoxAnchor, VerticalAnchor, VerticalPlacement,
-    VerticalReference, Wrap,
+    VerticalReference, Wrap, WrapSide,
 };
 pub use inline::{BreakClear, BreakKind, Field, FieldKind, Inline};
 pub use list::{

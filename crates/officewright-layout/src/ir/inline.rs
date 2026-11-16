@@ -292,8 +292,9 @@ pub enum BreakKind {
     Column,
 }
 
-/// Below which floating objects the line after a line break starts (`w:clear`). Text
-/// does not wrap around floating objects yet, so only [`None`](Self::None) is laid out.
+/// Below which floating objects the line after a line break starts (`w:clear`). Only
+/// [`None`](Self::None) is laid out yet: the line after the break starts right below it,
+/// beside the floating objects as any line does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum BreakClear {
