@@ -831,6 +831,13 @@ fn lists_once_that_text_does_not_wrap_around_floating_drawings_left_out() {
             )),
             false,
         ),
+        (
+            pict(&format!(
+                r#"<v:shape style="position:absolute;width:10pt;height:10pt"><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape><v:rect style="position:absolute;width:5pt;height:5pt"><w10:wrap type="tight"/></v:rect>"#,
+                p("x")
+            )),
+            true,
+        ),
         // A hidden picture is not drawn, nor counted: its neighbour that wraps is listed.
         (
             pict(&format!(
