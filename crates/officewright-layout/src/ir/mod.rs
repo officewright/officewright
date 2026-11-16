@@ -39,7 +39,7 @@ pub use image::{
     ObjectContent, Picture, Size, TextBox, TextBoxAnchor, VerticalAnchor, VerticalPlacement,
     VerticalReference, Wrap,
 };
-pub use inline::{BreakClear, BreakKind, Field, FieldKind, Inline};
+pub use inline::{BreakClear, BreakKind, Field, FieldKind, Inline, LinkTarget};
 pub use list::{
     Level, LevelAlignment, LevelOverride, LevelTextPart, ListDefinition, ListInstance, ListItem,
     Restart, Suffix,

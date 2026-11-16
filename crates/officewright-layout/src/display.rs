@@ -7,6 +7,7 @@
 #![cfg_attr(not(any(test, feature = "fuzzing")), allow(dead_code))]
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use officewright_core::{Color, Pt};
 use officewright_font::{FaceId, FontFace, GlyphId};
@@ -14,8 +15,8 @@ use officewright_font::{FaceId, FontFace, GlyphId};
 use crate::fonts::{Choice, Fonts};
 use crate::ir::{
     AnchorHorizontalAlign, AnchorVerticalAlign, AnchoredObject, Block, ColorValue, CompatFlag,
-    Crop, Document, HorizontalPlacement, HorizontalReference, Inline, ObjectContent, Paragraph,
-    RunStyle, Shading, ShadingPattern, Size, TabKind, TabLeader, TextBox, TextBoxAnchor,
+    Crop, Document, HorizontalPlacement, HorizontalReference, Inline, LinkTarget, ObjectContent,
+    Paragraph, RunStyle, Shading, ShadingPattern, Size, TabKind, TabLeader, TextBox, TextBoxAnchor,
     UnderlineKind, VerticalPlacement, VerticalPosition, VerticalReference, Wrap,
 };
 use crate::itemize::{Item, Itemized, TextRun, drawn_size};
@@ -95,6 +96,18 @@ pub(crate) enum DisplayItem {
     },
     /// Ends the clip of the last `PushClip` not yet ended.
     PopClip,
+    /// A link: a click on the rectangle, from its top left corner, goes to `target`.
+    Link {
+        at: Point,
+        width: Pt,
+        height: Pt,
+        target: Arc<LinkTarget>,
+    },
+    /// The place a bookmark marks, which links to its name go to.
+    Destination {
+        at: Point,
+        name: Arc<str>,
+    },
 }
 
 /// Glyphs of one face, size and look, on one baseline.
@@ -440,6 +453,13 @@ impl Painting<'_, '_, '_> {
         let mut front = Vec::new();
         let mut top = origin.y.0;
         let itemized = &self.layout.itemized;
+        crate::links::paint(
+            itemized,
+            &self.layout.lines,
+            lines.clone(),
+            origin,
+            &mut front,
+        );
         let lines = self.layout.lines.get(lines).unwrap_or(&[]);
         self.bars(lines, origin, &mut front);
         let mut tables = SourceTables::default();
@@ -745,6 +765,9 @@ impl Painting<'_, '_, '_> {
         } else {
             clusters(itemized, run, &placed, piece, None)
         };
+        if clusters.is_empty() {
+            return None;
+        }
         Some(GlyphItem {
             face,
             size: run.size,
@@ -1152,6 +1175,16 @@ impl Painting<'_, '_, '_> {
         let (x, y) = float_position(object, &page, anchor);
         let mut items = Vec::new();
         let at = Point { x: Pt(x), y: Pt(y) };
+        // An object in a link takes the link over its frame, before the links of a text
+        // box's own text, which viewers then find over it.
+        if let Some(target) = crate::links::target_of(&self.layout.itemized, item) {
+            items.push(DisplayItem::Link {
+                at,
+                width: object.size().width(),
+                height: object.size().height(),
+                target,
+            });
+        }
         self.content(item, object.content(), (at, object.size()), &mut items);
         self.floats.push(Float {
             behind: object.behind_text(),
@@ -1324,8 +1357,9 @@ fn rise_at(style: &RunStyle, size: Pt, face: Option<&ShapingFace>) -> f64 {
 /// source characters of its drawn characters, each source character with the cluster
 /// that draws the first character drawn for it (`ß` in capitals, `SS`, goes with the
 /// first `S`). A cluster's text runs to the next cluster's start in the text, whichever
-/// order the glyphs are in (right-to-left text has them backwards). `tables` are the run's
-/// when its characters correspond one to one.
+/// order the glyphs are in (right-to-left text has them backwards). Soft hyphens and
+/// zero-width spaces stand for no text, and a cluster of nothing else is left out. `tables`
+/// are the run's when its characters correspond one to one.
 fn clusters(
     itemized: &Itemized,
     run: &TextRun,
@@ -1359,16 +1393,25 @@ fn clusters(
             end += 1;
         }
         let glyphs = placed.get(index..end).unwrap_or(&[]).to_vec();
-        let text = if hyphen {
-            // The hyphen drawn at a soft hyphen stands for no text of its own.
-            String::new()
+        // Word's PDF text has a hyphen-minus where a line breaks at a soft hyphen, and
+        // neither soft hyphens nor zero-width spaces anywhere (E-underline,
+        // E-soft-hyphen-font, E-spacing-condensed).
+        let text: String = if hyphen {
+            "-".to_owned()
         } else if let Some(tables) = tables.filter(|_| run.sources.is_empty()) {
             tables.source_of(itemized, run, first.cluster..text_end(first.cluster))
         } else {
             expanded_source(itemized, run, first.cluster..text_end(first.cluster))
         };
-        out.push((text, glyphs));
+        let invisible = |ch: char| matches!(ch, '\u{AD}' | '\u{200B}');
         index = end;
+        if !text.is_empty() && text.chars().all(invisible) {
+            // Nothing is drawn for them either, as in Word's PDF: glyphs with no text
+            // would cut their word in two for a reader of the PDF's text.
+            continue;
+        }
+        let text = text.chars().filter(|&ch| !invisible(ch)).collect();
+        out.push((text, glyphs));
     }
     out
 }

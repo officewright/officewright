@@ -5080,19 +5080,18 @@ mod tests {
             (0, "AAAAAAAAAA", 56.0),
             (0, "Z", 76.0),
         ];
-        // The soft hyphen's own glyphs, then the hyphen drawn for it, which stands for no
-        // text.
+        // The soft hyphen itself is not drawn, as in Word's PDF, and the hyphen drawn for
+        // it stands for a hyphen-minus.
         const HYPHENATED: &[(usize, &str, f64)] = &[
             (0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 36.0),
-            (0, "\u{ad}", 36.0),
-            (0, "", 36.0),
+            (0, "-", 36.0),
             (0, "AAAAAAAAAA", 56.0),
             (0, "Z", 76.0),
         ];
         const AT_THE_SPACES: &[(usize, &str, f64)] = &[
             (0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 36.0),
             (0, "  ", 36.0),
-            (0, "AA\u{ad}", 56.0),
+            (0, "AA", 56.0),
             (0, "AAAAAAAAAA", 56.0),
             (0, "Z", 76.0),
         ];
@@ -6403,6 +6402,248 @@ mod tests {
                     .with_borders(borders),
             )
             .with_rows(rows)
+    }
+
+    #[test]
+    fn a_floating_picture_in_a_link_takes_the_link_over_its_frame() {
+        use crate::ir::{HorizontalPlacement, HorizontalReference, LinkTarget};
+        use crate::ir::{VerticalPlacement, VerticalReference};
+        // A picture 30 by 10 pt placed 50 pt from the page's left edge and 70 pt down, in a
+        // link between two letters: the link takes the picture's frame, and nothing on the
+        // line, where the picture takes no room.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let picture = anchored_picture(
+            &mut document,
+            (
+                HorizontalReference::Page,
+                HorizontalPlacement::Offset(Pt(50.0)),
+            ),
+            (VerticalReference::Page, VerticalPlacement::Offset(Pt(70.0))),
+        );
+        let paragraph = Paragraph::new(style).with_inlines([
+            Inline::text("A", style),
+            Inline::link_start(LinkTarget::Uri("https://example.com/".into())),
+            picture,
+            Inline::link_end(),
+            Inline::text("A", style),
+        ]);
+        document.add_section(Section::new(setup()).with_blocks([paragraph.into()]));
+        let (laid, _) = laid(&document, 10);
+        let pages = laid.expect("pages").pages;
+        let boxes: Vec<String> = pages[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Image(image) => Some(format!(
+                    "image {} {} {} {}",
+                    image.at.x.0, image.at.y.0, image.width.0, image.height.0
+                )),
+                DisplayItem::Link {
+                    at, width, height, ..
+                } => Some(format!(
+                    "link {} {} {} {}",
+                    at.x.0, at.y.0, width.0, height.0
+                )),
+                _ => None,
+            })
+            .collect();
+        // The link first, before what the object draws, so that a text box's own links
+        // come after it, over it.
+        assert_eq!(boxes, ["link 50 70 30 10", "image 50 70 30 10"]);
+    }
+
+    #[test]
+    fn links_that_a_row_of_exact_height_cuts_off_are_reported() {
+        use crate::ir::{Alignment, Indent, LinkTarget, RowHeight};
+        const CUT: &str =
+            "links of text and pictures that a table row of exact height cuts off are left out";
+        // A row of an exact `height` holding two 20 pt lines, the link over `linked`, spaced
+        // by `letters`, between two `A` on line `on`, its paragraph with `props`: reported
+        // where the row leaves none of the link, below it or beside it, as an overflow; not
+        // where it is inside the row, nor where the row cuts it only in part, nor where the
+        // link is too small to be one anywhere.
+        let reported = |height: f64, on: usize, props: ParagraphProps, (linked, letters)| {
+            let mut document = Document::default();
+            let font = RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0));
+            let style = document.add_run_style(font.clone());
+            let spaced = document.add_run_style(font.with_letter_spacing(Pt(letters)));
+            let link = [
+                Inline::link_start(LinkTarget::Uri("u".into())),
+                Inline::text(linked, spaced),
+                Inline::link_end(),
+            ];
+            let mut inlines = Vec::new();
+            for line in 1..=2 {
+                if line > 1 {
+                    inlines.push(Inline::line_break(BreakClear::None, style));
+                }
+                if line == on {
+                    inlines.push(Inline::text("A", style));
+                    inlines.extend(link.clone());
+                }
+                inlines.push(Inline::text("A", style));
+            }
+            let row = Row::default()
+                .with_height(RowHeight::Exact(Pt(height)))
+                .with_cells([Cell::default().with_blocks([Paragraph::new(style)
+                    .with_props(props)
+                    .with_inlines(inlines)
+                    .into()])]);
+            document.add_section(
+                Section::new(setup()).with_blocks(vec![table_with(vec![row], 0.0).into()]),
+            );
+            let (laid, report) = laid(&document, 10);
+            laid.expect("pages");
+            report
+                .entries()
+                .iter()
+                .find(|entry| entry.message() == CUT)
+                .map(crate::report::ReportEntry::kind)
+        };
+        let plain = || spacing(0.0, 0.0);
+        let a = ("A", 0.0);
+        assert_eq!(reported(20.0, 2, plain(), a), Some(ReportKind::Overflow));
+        assert_eq!(reported(20.0, 1, plain(), a), None);
+        // Line 2, from 20 to 40, in a row of 30: cut in part, and kept as far as the row.
+        assert_eq!(reported(30.0, 2, plain(), a), None);
+        // Line 1 inside a row of 30, but 60 pt left of the cell, which the row clips to,
+        // or right of it.
+        let left = plain().with_indent(Indent::default().with_start(Pt(-60.0)));
+        assert_eq!(reported(30.0, 1, left, a), Some(ReportKind::Overflow));
+        let right = plain()
+            .with_alignment(Alignment::End)
+            .with_indent(Indent::default().with_end(Pt(-60.0)));
+        assert_eq!(reported(30.0, 1, right, a), Some(ReportKind::Overflow));
+        // Line 2 in a row of 20.005 pt: 0.005 pt of it inside the row, less than a link may
+        // be, so the painter leaves the link out.
+        assert_eq!(reported(20.005, 2, plain(), a), Some(ReportKind::Overflow));
+        // Inside the row, a link over a character of no width, and one over an `A` of
+        // 0.005 pt, its letters spaced by -5.995 pt: too small for a link on any page.
+        assert_eq!(reported(30.0, 1, plain(), ("\u{200B}", 0.0)), None);
+        assert_eq!(reported(30.0, 1, plain(), ("A", -5.995)), None);
+        // And one on a line of 0.0004 of a single line of 11.5 pt, too low for a link on
+        // any page, in a row of an exact 30 pt that cuts off the three lines of 20 pt of
+        // the paragraph after it.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let low = Paragraph::new(style)
+            .with_props(
+                ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Multiple(0.0004))),
+            )
+            .with_inlines([
+                Inline::link_start(LinkTarget::Uri("u".into())),
+                Inline::text("A", style),
+                Inline::link_end(),
+            ]);
+        let row = Row::default()
+            .with_height(RowHeight::Exact(Pt(30.0)))
+            .with_cells([
+                Cell::default().with_blocks([low.into(), lines(style, 3, spacing(0.0, 0.0))])
+            ]);
+        document.add_section(
+            Section::new(setup()).with_blocks(vec![table_with(vec![row], 0.0).into()]),
+        );
+        let (laid, report) = laid(&document, 10);
+        laid.expect("pages");
+        let messages = messages(&report);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("exact height")),
+            "{messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|message| message == CUT),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn links_and_bookmarks_in_headers_and_table_cells_are_where_their_text_is() {
+        use crate::ir::LinkTarget;
+
+        let link = |style: RunStyleId, uri: &str| {
+            vec![
+                Inline::link_start(LinkTarget::Uri(uri.to_owned())),
+                Inline::text("A", style),
+                Inline::link_end(),
+            ]
+        };
+        let document = document(|style| {
+            let header = Paragraph::new(style).with_inlines(link(style, "header"));
+            let mut linked = vec![Inline::bookmark("cell")];
+            linked.extend(link(style, "cell"));
+            let row = Row::default().with_cells([
+                Cell::default().with_blocks([lines(style, 1, ParagraphProps::default())]),
+                Cell::default().with_blocks([Paragraph::new(style).with_inlines(linked).into()]),
+            ]);
+            vec![
+                Section::new(setup())
+                    .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                    .with_blocks(vec![
+                        table_with(vec![row], 0.0).into(),
+                        Paragraph::new(style)
+                            .with_inlines([Inline::page_break(style), Inline::text("B", style)])
+                            .into(),
+                    ]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let pages = laid.expect("pages").pages;
+        assert_eq!(pages.len(), 2);
+        // Each link starts where its glyphs do, and its line's box holds their baseline.
+        let marks = |page: &Page| -> Vec<String> {
+            let runs: Vec<(f64, f64)> = page
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    DisplayItem::Glyphs(run) => Some((run.origin.x.0, run.origin.y.0)),
+                    _ => None,
+                })
+                .collect();
+            page.items
+                .iter()
+                .filter_map(|item| match item {
+                    DisplayItem::Link {
+                        at, height, target, ..
+                    } => {
+                        let over = runs.iter().any(|&(x, baseline)| {
+                            x == at.x.0 && (at.y.0..at.y.0 + height.0).contains(&baseline)
+                        });
+                        Some(format!("{target:?} at {} over its text: {over}", at.x.0))
+                    }
+                    DisplayItem::Destination { at, name } => {
+                        let over = runs.iter().any(|&(x, _)| x == at.x.0);
+                        Some(format!("{name} at {} by its text: {over}", at.x.0))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            marks(&pages[0]),
+            [
+                "Uri(\"header\") at 20 over its text: true",
+                "cell at 120 by its text: true",
+                "Uri(\"cell\") at 120 over its text: true",
+            ]
+        );
+        assert_eq!(
+            marks(&pages[1]),
+            ["Uri(\"header\") at 20 over its text: true"]
+        );
     }
 
     /// The baselines of the glyphs of `page` left of `x`, and of those right of it.
@@ -9487,6 +9728,12 @@ mod tests {
                     at, width, height, ..
                 } => format!("clip {} {} {} {}", at.x.0, at.y.0, width.0, height.0),
                 DisplayItem::PopClip => "end clip".to_owned(),
+                DisplayItem::Link {
+                    at, width, height, ..
+                } => format!("link {} {} {} {}", at.x.0, at.y.0, width.0, height.0),
+                DisplayItem::Destination { at, name } => {
+                    format!("destination {name} {} {}", at.x.0, at.y.0)
+                }
             })
             .collect()
     }
