@@ -911,23 +911,25 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// table of section `section`, may take with `flags` ([`Prepared::piece`]) beside the
     /// footnotes its cells' lines reference, and those notes.
     ///
-    /// The piece takes the lines that fit above their notes, as a paragraph does: the row
-    /// is cut where the notes of the lines it takes start on the page, and where one of
-    /// those notes is cut, it takes nothing of that note's cell after its paragraph (a
-    /// later paragraph or a nested table), nor, in Word 2013 and later, a later line that
-    /// references a note after it, which goes wholly to the next page (`pages::footnotes`'
-    /// rules for a paragraph's lines); the line of the cut note keeps the notes it
-    /// references after it, which go wholly to the next page. Where that leaves out a line
-    /// whose note cannot start even right under it, Word 2013 and later cut the row above
-    /// it, and older modes keep it, and the lines after it as far as they fit above the
-    /// notes before, and their notes go wholly to the next page. Word's render of
-    /// `E-footnote-table.docx` (mode 15) shows a row cut three lines higher for a note of
-    /// its third line. Hypotheses until a Word render: the older modes' rule in a table;
-    /// that with notes in more cells of a row the cut comes as high as their notes need in
-    /// every cell; that a note cut keeps nothing of the other cells from the page but, in
-    /// Word 2013 and later, a line of any cell that references a later note, as a later
-    /// line of its own cell; and that a row's least height is filled only as far as the
-    /// room its notes leave.
+    /// The piece takes the lines that fit above their notes, as a paragraph does
+    /// (`pages::footnotes`' rules for a paragraph's lines): the row is cut where the notes
+    /// of the lines it takes start on the page; a note is cut only where it does not fit
+    /// whole under the line that references it, and then the piece takes nothing of that
+    /// note's cell after its paragraph (a later paragraph or a nested table), nor, in Word
+    /// 2013 and later, a line below the cut note's line that references a note after it,
+    /// which goes wholly to the next page; the line of the cut note, and the lines of
+    /// other cells beside it, keep the notes they reference after it, which go wholly to
+    /// the next page. Where that leaves out a line whose note cannot start even right
+    /// under it, Word 2013 and later cut the row above it, and older modes keep it, and
+    /// the lines after it as far as they fit above the notes before, but nothing of its
+    /// cell after its paragraph, and their notes go wholly to the next page. Word's render
+    /// of `E-footnote-table.docx` (mode 15) shows a row cut three lines higher for a note
+    /// of its third line. Hypotheses until a Word render: the older modes' rule in a
+    /// table; that with notes in more cells of a row the cut comes as high as their notes
+    /// need in every cell; that a note cut keeps nothing of the other cells from the page
+    /// but, in Word 2013 and later, a line below the cut note's line that references a
+    /// later note, as a later line of its own cell; and that a row's least height is
+    /// filled only as far as the room its notes leave.
     /// On a page that holds nothing else, where not even the least piece leaves its notes
     /// room to start, the least piece goes on and its notes wholly to the next page. The
     /// room found is the least that puts the piece found, so that a piece filled to a
@@ -982,13 +984,58 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             return Ok((best.room.unwrap_or(low), best.notes));
         }
         // Before Word 2013 the lines after go on as far as they fit above those notes,
-        // their notes, which cannot start, going wholly to the next page.
-        let above = (room - (best.end - self.notes_end())).max(low);
+        // their notes, which cannot start, going wholly to the next page; but nothing of
+        // the cell of the first such line after its paragraph, as a page takes no later
+        // paragraph after a note it sends wholly on.
+        let kept = |pager: &Self, room: f64| {
+            let Some(trial) = prepared.trial(laid, Some(room), flags) else {
+                return true;
+            };
+            let referenced = pager.lines_footnotes(&trial.lines);
+            let first = referenced
+                .iter()
+                .find(|(note, _)| !best.notes.contains(note))
+                .and_then(|&(_, first)| trial.lines.get(first));
+            first.is_none_or(|line| trial.last.get(line.cell).copied().flatten() <= Some(line.part))
+        };
+        let mut above = (room - (best.end - self.notes_end())).max(low);
+        if !kept(self, above) {
+            let mut high = above;
+            above = low;
+            for _ in 0..ROOM_STEPS {
+                let middle = (above + high) / 2.0;
+                if kept(self, middle) {
+                    above = middle;
+                } else {
+                    high = middle;
+                }
+            }
+        }
         Ok(prepared
             .trial(laid, Some(above), flags)
             .map_or((above, Vec::new()), |trial| {
                 (trial.room(), self.note_ids(&trial.lines))
             }))
+    }
+
+    /// How `notes`, footnotes of section `section` that the lines of `trial` reference,
+    /// a piece of a table whose top is at `top`, go on the page under it; `None` where
+    /// one of them cannot start there.
+    fn trial_plan(
+        &mut self,
+        trial: &tables::Trial<'_, 'd>,
+        notes: Vec<NoteId>,
+        top: f64,
+        section: usize,
+    ) -> Result<Option<Plan<'d>>> {
+        let waiting = self.waiting(notes, section)?;
+        let left = self.body()?.bottom.0 - top - trial.room();
+        let tail = self.footnotes.last().and_then(PageNotes::tail);
+        let rules = Rules {
+            defer: false,
+            force: false,
+        };
+        self.plan(tail, waiting, left, section, rules)
     }
 
     /// The footnotes `lines` reference and no page holds yet, in order.
@@ -1008,8 +1055,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     }
 
     /// How the piece of `laid` that `room` below `top` takes goes on the current page with
-    /// its footnotes: `None` where one of them cannot start under the page's notes, or
-    /// where it takes a line that a note it cuts keeps off the page
+    /// its footnotes: `None` where one of them cannot start under the page's notes, where
+    /// it cuts a note that fits whole under the line that references it, or where it
+    /// takes a line or a nested table that a note it cuts keeps off the page
     /// ([`table_room`](Self::table_room)).
     fn table_fits(
         &mut self,
@@ -1037,23 +1085,17 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 cut: false,
             }));
         }
-        let waiting = self.waiting(notes.clone(), section)?;
-        let left = self.body()?.bottom.0 - top - trial.room();
-        let tail = self.footnotes.last().and_then(PageNotes::tail);
-        let rules = Rules {
-            defer: false,
-            force: false,
-        };
-        let Some(plan) = self.plan(tail, waiting, left, section, rules)? else {
+        let Some(plan) = self.trial_plan(&trial, notes.clone(), top, section)? else {
             return Ok(None);
         };
         // The first note that does not end on the page is cut, and those after it go
         // wholly to the next page: the piece takes nothing of the cut note's cell after
-        // its paragraph, nor, in Word 2013 and later, a later line referencing a note
-        // after it.
+        // its paragraph, nor, in Word 2013 and later, a line below the cut note's line
+        // that references a note after it, while the lines of other cells beside it keep
+        // their notes, as the cut note's line does.
         let modern = self.document.settings().compat_mode() >= CompatMode::Word2013;
         if let Some(cut) = plan.notes.iter().position(|placed| !placed.ends()) {
-            let Some(&(_, at)) = referenced.get(cut) else {
+            let Some(&(note, at)) = referenced.get(cut) else {
                 return Ok(None);
             };
             let Some(line) = trial.lines.get(at) else {
@@ -1065,12 +1107,33 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 .copied()
                 .flatten()
                 .is_some_and(|part| part > line.part);
-            let later_note = referenced
-                .iter()
-                .skip(cut + 1)
-                .any(|&(_, first)| first > at);
+            let later_note = referenced.iter().skip(cut + 1).any(|&(_, first)| {
+                trial
+                    .lines
+                    .get(first)
+                    .is_some_and(|other| other.top >= line.bottom - EPSILON)
+            });
             if after || (modern && later_note) {
                 return Ok(None);
+            }
+            // A note is cut only by its own line, where it does not fit whole under it,
+            // as in a paragraph: where the piece ending right under that line puts it
+            // whole, the piece takes no more.
+            if let Some(early) = line.room.filter(|early| *early < room - EPSILON) {
+                if let Some(smaller) = prepared.trial(laid, Some(early), flags) {
+                    if smaller.lines.len() < trial.lines.len() {
+                        let earlier = self.note_ids(&smaller.lines);
+                        let index = earlier.iter().position(|&other| other == note);
+                        if let Some(plan) = self.trial_plan(&smaller, earlier, top, section)? {
+                            let whole = index
+                                .and_then(|index| plan.notes.get(index))
+                                .is_some_and(|placed| placed.ends());
+                            if whole {
+                                return Ok(None);
+                            }
+                        }
+                    }
+                }
             }
         }
         let cut = plan.notes.iter().any(|placed| !placed.ends());

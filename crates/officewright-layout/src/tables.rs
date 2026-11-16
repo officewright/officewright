@@ -715,11 +715,19 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 let mut last = Vec::new();
                 let mut top = 0.0;
                 let mut cell = 0;
+                // A piece may end under a line only in a band of one row.
+                let alone = rows.len() == 1;
                 for ((row, height), cells) in rows.clone().zip(&heights).zip(&laid.cells) {
                     top += self.thickness(row);
                     for laid_cell in cells.iter().flatten() {
                         let units = laid_cell.next..laid_cell.content.units.len();
-                        lines.extend(laid_cell.content.lines(units.clone(), cell));
+                        let frame = LineFrame {
+                            cell,
+                            top: top + laid_cell.margins.top().0,
+                            close: alone
+                                .then(|| laid_cell.margins.bottom().0 + self.thickness(rows.end)),
+                        };
+                        lines.extend(laid_cell.content.lines(units.clone(), frame));
                         last.push(laid_cell.content.last_part(units));
                         cell += 1;
                     }
@@ -753,7 +761,12 @@ impl<'d, 'l> Prepared<'d, 'l> {
                 let cells = laid.cells.first()?.iter().flatten().zip(&takes);
                 for (index, (cell, take)) in cells.enumerate() {
                     let units = cell.next..cell.next + take;
-                    lines.extend(cell.content.lines(units.clone(), index));
+                    let frame = LineFrame {
+                        cell: index,
+                        top: above + cell.margins.top().0,
+                        close: Some(cell.margins.bottom().0 + self.thickness(rows.end)),
+                    };
+                    lines.extend(cell.content.lines(units.clone(), frame));
                     last.push(cell.content.last_part(units));
                 }
                 Some(Trial {
@@ -1682,8 +1695,11 @@ impl Trial<'_, '_> {
 }
 
 /// A line of a paragraph that a piece takes: its paragraph, the paragraph's layout, its
-/// index there, the cell it is in, counted through the piece's cells, and the paragraph's
-/// index among the cell's paragraphs and nested tables.
+/// index there, the cell it is in, counted through the piece's cells, the paragraph's
+/// index among the cell's paragraphs and nested tables, its top and bottom from the
+/// piece's top, and the least room of a piece that ends right under it, its cell's
+/// margin and the border below included (`None` in a band of several rows, which no
+/// piece ends inside).
 #[derive(Clone, Copy)]
 pub(crate) struct TrialLine<'l, 'd> {
     pub(crate) paragraph: &'d Paragraph,
@@ -1691,6 +1707,20 @@ pub(crate) struct TrialLine<'l, 'd> {
     pub(crate) line: usize,
     pub(crate) cell: usize,
     pub(crate) part: usize,
+    pub(crate) top: f64,
+    pub(crate) bottom: f64,
+    pub(crate) room: Option<f64>,
+}
+
+/// Where the content of a cell of a piece sits ([`Stacked::lines`]): the cell, counted
+/// through the piece's cells, the top of the first unit the piece takes, from the
+/// piece's top, and what a piece that ends under one of its units adds below it (its
+/// cell's bottom margin and the border below), `None` where no piece may end there.
+#[derive(Clone, Copy)]
+struct LineFrame {
+    cell: usize,
+    top: f64,
+    close: Option<f64>,
 }
 
 /// A piece of a band, put on a page.
@@ -1850,27 +1880,38 @@ impl<'d> Stacked<'d> {
         any - from
     }
 
-    /// The lines of paragraphs among units `units`, the content of cell `cell` of a piece;
-    /// a nested table's bands are not among them.
+    /// The lines of paragraphs among units `units`, the content of a cell of a piece
+    /// where `frame` puts it; a nested table's bands are not among them.
     fn lines(
         &self,
         units: Range<usize>,
-        cell: usize,
+        frame: LineFrame,
     ) -> impl Iterator<Item = TrialLine<'_, 'd>> + '_ {
+        let from = units.start;
+        let start = self.start(from);
         self.units
             .get(units)
             .unwrap_or(&[])
             .iter()
-            .filter_map(move |unit| match self.parts.get(unit.part)? {
+            .zip(from..)
+            .filter_map(move |(unit, index)| match self.parts.get(unit.part)? {
                 Part::Paragraph {
                     paragraph, layout, ..
-                } => Some(TrialLine {
-                    paragraph,
-                    layout,
-                    line: unit.index,
-                    cell,
-                    part: unit.part,
-                }),
+                } => {
+                    let top = frame.top + unit.top - start;
+                    Some(TrialLine {
+                        paragraph,
+                        layout,
+                        line: unit.index,
+                        cell: frame.cell,
+                        part: unit.part,
+                        top,
+                        bottom: top + unit.height,
+                        room: frame
+                            .close
+                            .map(|close| frame.top + self.extent(from, index + 1) + close),
+                    })
+                }
                 Part::Table { .. } => None,
             })
     }

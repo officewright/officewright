@@ -12158,7 +12158,7 @@ mod tests {
 
     #[test]
     fn a_cell_takes_lines_after_a_note_it_cuts_as_the_body_does() {
-        use crate::ir::NotePosition;
+        use crate::ir::{NoteId, NotePosition};
         // The same blocks in the body and in the one cell of a row without borders or
         // margins put the same on each page (reviews of #577). 1: eight paragraphs of one
         // line, the third referencing a note of six lines, which is cut: page 1 takes no
@@ -12171,7 +12171,19 @@ mod tests {
         // referencing a note of one line after the long one: the line stays with the cut
         // note, the short one going wholly to the next page. 5: two lines, a line
         // referencing a note of seven lines, a table of one line, and a line: the table
-        // goes to the next page.
+        // goes to the next page. 6: case 2 with only line 2 referencing a note, of four
+        // lines, which fits whole under it: page 1 takes three lines and the note whole,
+        // not five lines and a cut note. 7: case 6 with line 7 referencing a note of six
+        // lines: page 2 takes line 7 and the note whole. 8: case 1 with the seventh
+        // paragraph referencing a note of six lines, which cannot start under it: in Word
+        // 2010 the page keeps that line and takes no later paragraph, the note going
+        // wholly to the next page. 9: case 8 with a table of one line for the eighth
+        // paragraph. 10: case 1 with the sixth paragraph referencing a note of two lines,
+        // which widow control keeps from starting under it, and the eighth one of one
+        // line. 11: a paragraph of four lines, the first referencing a note of four
+        // lines: the row would fit whole with the note cut, but the note fits whole under
+        // its line, so page 1 takes three lines and the note. 12: case 2 with the note of
+        // one line referenced by line 4, right under the line of the cut note.
         let lay = |mode: CompatMode, case: usize, cell: bool| {
             let document = with_notes_in(
                 mode,
@@ -12182,50 +12194,64 @@ mod tests {
                     let count = match case {
                         3 => 5,
                         5 => 7,
+                        6 | 11 => 4,
+                        10 => 2,
                         _ => 6,
                     };
                     let long = footnote(document, (style, mark), count, spacing(0.0, 0.0));
                     let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
-                    let line = |notes: &[crate::ir::NoteId]| {
-                        referencing(style, (0, 0), notes, spacing(0.0, 0.0))
-                    };
-                    let blocks: Vec<Block> = match case {
-                        2 => {
-                            let mut inlines = Vec::new();
-                            for line in 1..=8 {
-                                if line > 1 {
-                                    inlines.push(Inline::line_break(BreakClear::None, style));
-                                }
-                                inlines.push(Inline::text("A", style));
-                                let note = match line {
-                                    3 => Some(long),
-                                    5 => Some(short),
-                                    _ => None,
-                                };
-                                inlines
-                                    .extend(note.map(|n| Inline::note_reference(n, false, style)));
+                    let line =
+                        |notes: &[NoteId]| referencing(style, (0, 0), notes, spacing(0.0, 0.0));
+                    // One paragraph of `count` lines without widow control, `notes`
+                    // giving the line of each note it references.
+                    let lines_of = |count: usize, notes: &[(usize, NoteId)]| {
+                        let mut inlines = Vec::new();
+                        for at in 1..=count {
+                            if at > 1 {
+                                inlines.push(Inline::line_break(BreakClear::None, style));
                             }
-                            vec![
-                                Paragraph::new(style)
-                                    .with_props(spacing(0.0, 0.0).with_widow_control(false))
-                                    .with_inlines(inlines)
-                                    .into(),
-                            ]
+                            inlines.push(Inline::text("A", style));
+                            inlines.extend(
+                                notes
+                                    .iter()
+                                    .filter(|(line, _)| *line == at)
+                                    .map(|(_, note)| Inline::note_reference(*note, false, style)),
+                            );
                         }
-                        5 => vec![
-                            line(&[]),
-                            line(&[]),
-                            line(&[long]),
-                            row_holding(vec![line(&[])]),
-                            line(&[]),
-                        ],
-                        _ => (1..=8)
-                            .map(|at| match (at, case) {
-                                (3, 4) => line(&[long, short]),
-                                (3, _) => line(&[long]),
-                                _ => line(&[]),
-                            })
-                            .collect(),
+                        Paragraph::new(style)
+                            .with_props(spacing(0.0, 0.0).with_widow_control(false))
+                            .with_inlines(inlines)
+                            .into()
+                    };
+                    // `count` paragraphs of one line, the notes of `notes` referenced by
+                    // theirs, and a table of one line in place of paragraph `table`.
+                    let paragraphs =
+                        |count: usize, notes: &[(usize, &[NoteId])], table: Option<usize>| {
+                            (1..=count)
+                                .map(|at| {
+                                    if table == Some(at) {
+                                        return row_holding(vec![line(&[])]);
+                                    }
+                                    let referenced = notes
+                                        .iter()
+                                        .find(|(line, _)| *line == at)
+                                        .map_or(&[][..], |(_, notes)| *notes);
+                                    line(referenced)
+                                })
+                                .collect::<Vec<Block>>()
+                        };
+                    let blocks: Vec<Block> = match case {
+                        2 => vec![lines_of(8, &[(3, long), (5, short)])],
+                        4 => paragraphs(8, &[(3, &[long, short])], None),
+                        5 => paragraphs(5, &[(3, &[long])], Some(4)),
+                        6 => vec![lines_of(8, &[(2, long)])],
+                        7 => vec![lines_of(8, &[(7, long)])],
+                        8 => paragraphs(8, &[(7, &[long])], None),
+                        9 => paragraphs(8, &[(7, &[long])], Some(8)),
+                        10 => paragraphs(8, &[(6, &[long]), (8, &[short])], None),
+                        11 => vec![lines_of(4, &[(1, long)])],
+                        12 => vec![lines_of(8, &[(3, long), (4, short)])],
+                        _ => paragraphs(8, &[(3, &[long])], None),
                     };
                     if cell {
                         vec![
@@ -12246,25 +12272,115 @@ mod tests {
             noted_pages(&document).0
         };
         for mode in [CompatMode::Word2013, CompatMode::Word2010] {
-            for case in 1..=5 {
+            for case in 1..=12 {
                 let body = lay(mode, case, false);
                 let cell = lay(mode, case, true);
                 assert_eq!(cell, body, "{mode:?}, case {case}");
             }
         }
-        // The lines of text on page 1 in the cell.
-        let lines = |mode: CompatMode, case: usize| {
-            lay(mode, case, true)[0]
+        // The lines of text on page `page` in the cell.
+        let lines = |mode: CompatMode, case: usize, page: usize| {
+            lay(mode, case, true)[page]
                 .1
                 .iter()
                 .filter(|(text, _)| text.starts_with('A'))
                 .count()
         };
-        assert_eq!(lines(CompatMode::Word2013, 2), 4);
-        assert_eq!(lines(CompatMode::Word2010, 2), 5);
-        assert_eq!(lines(CompatMode::Word2010, 3), 3);
-        assert_eq!(lines(CompatMode::Word2013, 4), 3);
-        assert_eq!(lines(CompatMode::Word2013, 5), 3);
+        assert_eq!(lines(CompatMode::Word2013, 2, 0), 4);
+        assert_eq!(lines(CompatMode::Word2010, 2, 0), 5);
+        assert_eq!(lines(CompatMode::Word2010, 3, 0), 3);
+        assert_eq!(lines(CompatMode::Word2013, 4, 0), 3);
+        assert_eq!(lines(CompatMode::Word2013, 5, 0), 3);
+        for mode in [CompatMode::Word2013, CompatMode::Word2010] {
+            assert_eq!(lines(mode, 6, 0), 3, "{mode:?}");
+        }
+        assert_eq!(lines(CompatMode::Word2013, 7, 1), 1);
+        assert_eq!(lines(CompatMode::Word2010, 8, 0), 7);
+        assert_eq!(lines(CompatMode::Word2010, 9, 0), 7);
+        assert_eq!(lines(CompatMode::Word2010, 10, 0), 6);
+        assert_eq!(lines(CompatMode::Word2013, 11, 0), 3);
+        assert_eq!(lines(CompatMode::Word2013, 12, 0), 3);
+        assert_eq!(lines(CompatMode::Word2010, 12, 0), 5);
+    }
+
+    #[test]
+    fn a_note_that_fits_whole_under_its_line_in_a_row_with_borders_is_not_cut() {
+        use crate::ir::NotePosition;
+        // A table with borders 6 pt thick, of a paragraph of eight lines without widow
+        // control, the second referencing a note of four lines (re-check of #577). Under
+        // the border above, two lines end at 66 and the border below them at 72, above the
+        // note's 100 pt from 80: the note fits whole under its line, so page 1 takes the
+        // two lines and the note whole, and no more lines with the note cut.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 4, spacing(0.0, 0.0));
+                let paragraph = referencing(
+                    style,
+                    (1, 6),
+                    &[note],
+                    spacing(0.0, 0.0).with_widow_control(false),
+                );
+                let row = Row::default().with_cells([Cell::default().with_blocks([paragraph])]);
+                vec![table_with(vec![row], 6.0).into()]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let count = |page: &Separated, start: char| {
+            page.1
+                .iter()
+                .filter(|(text, _)| text.starts_with(start))
+                .count()
+        };
+        assert_eq!(count(&pages[0], 'A'), 2, "{pages:?}");
+        assert_eq!(count(&pages[0], 'N'), 4, "{pages:?}");
+    }
+
+    #[test]
+    fn a_line_of_another_cell_beside_a_cut_note_s_line_keeps_its_note() {
+        use crate::ir::NotePosition;
+        // A line of text, then a row of two cells (re-check of #577): the first holds a
+        // line referencing a note of eight lines and two more lines, without widow
+        // control; the second a line referencing a note of one line. The second cell's
+        // line is beside the first line of the first cell, not below it: in Word 2013 and
+        // later it keeps its note as a line referencing both notes does, the second
+        // going wholly to the next page. Page 1 takes the whole row, under the line of
+        // text, and three lines of the first note.
+        let document = with_notes(
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let long = footnote(document, (style, mark), 8, spacing(0.0, 0.0));
+                let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                let props = || spacing(0.0, 0.0).with_widow_control(false);
+                let row = Row::default().with_cells([
+                    Cell::default().with_blocks([referencing(style, (0, 2), &[long], props())]),
+                    Cell::default().with_blocks([referencing(style, (0, 0), &[short], props())]),
+                ]);
+                vec![
+                    lines(style, 1, spacing(0.0, 0.0)),
+                    table_with(vec![row], 0.0).into(),
+                ]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        let count = |page: &Separated, start: char| {
+            page.1
+                .iter()
+                .filter(|(text, _)| text.starts_with(start))
+                .count()
+        };
+        // `A`, then `A1` and `A2` side by side, then two lines of the first cell.
+        assert_eq!(count(&pages[0], 'A'), 5, "{pages:?}");
+        assert_eq!(count(&pages[0], 'N'), 3, "{pages:?}");
+        assert_eq!(
+            pages[0].1.iter().filter(|(_, y)| *y == 56.0).count(),
+            2,
+            "{pages:?}"
+        );
     }
 
     #[test]
