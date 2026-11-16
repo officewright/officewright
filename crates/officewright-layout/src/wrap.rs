@@ -4,8 +4,11 @@
 //! Word's renders of `E-wrap-square.docx`, `E-wrap-top-bottom.docx`, `E-wrap-textbox.docx`
 //! and `E-wrap-vml.docx` show the rules here. A line meets an object when its box, from its
 //! top to its bottom, overlaps the object's band: from the top of the object's frame less
-//! its distance above (`distT`) to the bottom of the frame and its distance below (`distB`).
-//! The ninth line of case 01 of `E-wrap-square`, whose top is 0.56 pt above the bottom of
+//! the effects it draws above it (`wp:effectExtent`) and its distance above (`distT`) to
+//! the bottom of the frame, the effects below it and its distance below (`distB`). On page
+//! 8 of `business/letter-dol-cobra-election-notice`, the form's first line goes 1.5 pt
+//! below the frame of the instruction box above it, as far as the box's effects reach,
+//! with no distance. The ninth line of case 01 of `E-wrap-square`, whose top is 0.56 pt above the bottom of
 //! the picture, goes beside it, the tenth starts at the margin; in case 09, 36 pt below the
 //! paragraph's top, the third line, whose bottom reaches 4.3 pt into the band, goes beside
 //! it. A line beside an object wrapped square starts its distance at the right (`distR`)
@@ -28,7 +31,8 @@
 //! wrapping keep text from the frame, as square wrapping does (the polygon of a whole
 //! picture gives the same lines, `E-wrap-tight` case 01 and `E-wrap-textbox` case 03, but
 //! other polygons do not, which is reported); and the effects an object draws beyond its
-//! frame (`wp:effectExtent`) do not widen its band.
+//! frame at the left and right keep text out as far as they reach, as those above and below
+//! do.
 
 use officewright_core::Pt;
 
@@ -62,9 +66,9 @@ pub(crate) const LEAST_ROOM: f64 = 18.0;
 pub(crate) const MAX_EXCLUSIONS: usize = 32;
 
 /// What a floating object keeps text out of, in points from the page's top left corner: the
-/// band down the page from the top of its frame less its distance above to the bottom of its
-/// frame and its distance below, and across it the frame with its distances at the left and
-/// right.
+/// band down the page from the top of its frame less its effects and its distance above to
+/// the bottom of its frame, its effects and its distance below, and across it the frame with
+/// its effects and its distances at the left and right.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Exclusion {
     pub(crate) top: f64,
@@ -84,12 +88,13 @@ impl Exclusion {
             Wrap::TopAndBottom => None,
             Wrap::Square | Wrap::Tight | Wrap::Through => Some(object.wrap_side()),
         };
-        let (size, distances) = (object.size(), object.distances());
+        let (size, effects, distances) =
+            (object.size(), object.effect_extent(), object.distances());
         Some(Self {
-            top: y - distances.top().0,
-            bottom: y + size.height().0 + distances.bottom().0,
-            left: x - distances.left().0,
-            right: x + size.width().0 + distances.right().0,
+            top: y - effects.top().0 - distances.top().0,
+            bottom: y + size.height().0 + effects.bottom().0 + distances.bottom().0,
+            left: x - effects.left().0 - distances.left().0,
+            right: x + size.width().0 + effects.right().0 + distances.right().0,
             side,
         })
     }
@@ -204,6 +209,51 @@ mod tests {
             right,
             side: Some(side),
         }
+    }
+
+    #[test]
+    fn an_object_keeps_text_out_of_its_frame_its_effects_and_its_distances() {
+        use crate::ir::{
+            Document, HorizontalAnchor, ImageData, ImageFormat, Insets, ObjectContent, Picture,
+            Size, VerticalAnchor,
+        };
+
+        // A frame of 100 by 50 at (100, 200), with effects of 1, 2, 3 and 4 pt and distances
+        // of 10, 20, 30 and 40 pt at the left, top, right and bottom.
+        let mut document = Document::default();
+        let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+        let insets = |left: f64, top: f64, right: f64, bottom: f64| {
+            Insets::default()
+                .with_left(Pt(left))
+                .with_top(Pt(top))
+                .with_right(Pt(right))
+                .with_bottom(Pt(bottom))
+        };
+        let object = AnchoredObject::new(
+            ObjectContent::Picture(Picture::new(image)),
+            Size::new(Pt(100.0), Pt(50.0)),
+            HorizontalAnchor::default(),
+            VerticalAnchor::default(),
+        )
+        .with_effect_extent(insets(1.0, 2.0, 3.0, 4.0))
+        .with_distances(insets(10.0, 20.0, 30.0, 40.0));
+        assert_eq!(Exclusion::of(&object, (100.0, 200.0)), None);
+        let square = object.clone().with_wrap(Wrap::Square);
+        assert_eq!(
+            Exclusion::of(&square, (100.0, 200.0)),
+            Some(Exclusion {
+                top: 178.0,
+                bottom: 294.0,
+                left: 89.0,
+                right: 233.0,
+                side: Some(WrapSide::BothSides),
+            })
+        );
+        let top_and_bottom = object.with_wrap(Wrap::TopAndBottom);
+        assert_eq!(
+            Exclusion::of(&top_and_bottom, (100.0, 200.0)).map(|exclusion| exclusion.side),
+            Some(None)
+        );
     }
 
     #[test]

@@ -337,7 +337,8 @@ ir_struct! {
         /// The size of its frame (`wp:extent`).
         copy size: Size => with_size;
         /// How far effects reach beyond the frame on each side (`wp:effectExtent`, read as
-        /// in [`InlineObject::effect_extent`]).
+        /// in [`InlineObject::effect_extent`]); text wrapped around the object stays out of
+        /// them too.
         copy effect_extent: Insets => with_effect_extent;
         /// Where it is across the page.
         copy horizontal: HorizontalAnchor => with_horizontal;
