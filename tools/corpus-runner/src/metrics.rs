@@ -1,6 +1,7 @@
 //! The render metrics of one document, our PDF against Word's reference: page counts, text,
 //! line endings, word positions, page breaks and the SSIM of every page.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -66,13 +67,14 @@ pub struct Scores {
     /// as not complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub word_fonts_complete: Option<bool>,
-    /// The fonts of Word's text: those of its runs of two or more characters, paragraph
+    /// The fonts of Word's text, by the story they are in (`main`, `footnotes`,
+    /// `primary-header`, ...): those of its runs of two or more characters, paragraph
     /// marks left out, or without the runs, of each first character of a paragraph with
     /// text. A run of one character can name a font Word does not draw it in, for it
     /// gives the characters of a `w:sym` their run's font, and a character that shows
     /// nothing (a soft hyphen inside a line) draws no font.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub word_text_fonts: Option<Vec<String>>,
+    pub word_text_fonts: Option<BTreeMap<String, Vec<String>>>,
     /// The fonts our PDF embeds, as `pdffonts` names them, without their subset tags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pdf_fonts: Option<Vec<String>>,
@@ -449,8 +451,9 @@ pub struct WordFonts {
     /// Whether they are all of them: true only when the export holds the runs of
     /// formatting and is complete.
     pub complete: bool,
-    /// The fonts of the text, as [`Scores::word_text_fonts`] says, sorted, each once.
-    pub text: Vec<String>,
+    /// The fonts of the text by story, as [`Scores::word_text_fonts`] says, sorted, each
+    /// once.
+    pub text: BTreeMap<String, Vec<String>>,
 }
 
 /// The fonts Word used for the document, from its reference's `formatting.json` (written
@@ -474,12 +477,16 @@ pub fn word_fonts(reference: &Path) -> Result<Option<WordFonts>, String> {
         .collect();
     all.sort();
     all.dedup();
-    let mut text: Vec<String> = text_font_indices(&value)
-        .into_iter()
-        .filter_map(|index| fonts.get(index).and_then(font_name).map(str::to_owned))
-        .collect();
-    text.sort();
-    text.dedup();
+    let mut text: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (story, index) in text_font_indices(&value) {
+        if let Some(name) = fonts.get(index).and_then(font_name) {
+            text.entry(story).or_default().push(name.to_owned());
+        }
+    }
+    for names in text.values_mut() {
+        names.sort();
+        names.dedup();
+    }
     let flag = |key: &str| value.get(key).and_then(serde_json::Value::as_bool) == Some(true);
     Ok(Some(WordFonts {
         all,
@@ -488,10 +495,11 @@ pub fn word_fonts(reference: &Path) -> Result<Option<WordFonts>, String> {
     }))
 }
 
-/// The indices into the fonts table of the fonts of Word's text: of each run of a
-/// paragraph that has two or more characters, without the paragraph's mark, which is its
-/// last character; for a paragraph without runs, of its first character when it has text.
-fn text_font_indices(export: &serde_json::Value) -> Vec<usize> {
+/// The indices into the fonts table of the fonts of Word's text, with the stories they are
+/// in: of each run of a paragraph that has two or more characters, without the paragraph's
+/// mark, which is its last character; for a paragraph without runs, of its first character
+/// when it has text.
+fn text_font_indices(export: &serde_json::Value) -> Vec<(String, usize)> {
     let as_index =
         |value: &serde_json::Value| value.as_u64().and_then(|index| usize::try_from(index).ok());
     let paragraphs = export
@@ -500,13 +508,15 @@ fn text_font_indices(export: &serde_json::Value) -> Vec<usize> {
         .into_iter()
         .flatten()
         .filter_map(|story| {
-            story
+            let name = story.get("story").and_then(serde_json::Value::as_str)?;
+            let paragraphs = story
                 .get("paragraphs")
-                .and_then(serde_json::Value::as_array)
+                .and_then(serde_json::Value::as_array)?;
+            Some(paragraphs.iter().map(move |paragraph| (name, paragraph)))
         })
         .flatten();
     let mut indices = Vec::new();
-    for paragraph in paragraphs {
+    for (story, paragraph) in paragraphs {
         let runs = paragraph.get("runs").and_then(serde_json::Value::as_array);
         match runs {
             Some(runs) if !runs.is_empty() => {
@@ -524,7 +534,7 @@ fn text_font_indices(export: &serde_json::Value) -> Vec<usize> {
                         length
                     };
                     if characters >= 2 {
-                        indices.push(font);
+                        indices.push((story.to_owned(), font));
                     }
                 }
             }
@@ -535,7 +545,7 @@ fn text_font_indices(export: &serde_json::Value) -> Vec<usize> {
                     .is_some_and(|text| !text.is_empty());
                 if let Some(font) = paragraph.get("font").and_then(as_index) {
                     if has_text {
-                        indices.push(font);
+                        indices.push((story.to_owned(), font));
                     }
                 }
             }
@@ -918,7 +928,7 @@ ABC+Short CID TrueType Identity-H yes yes yes 15 0\n";
             Some(WordFonts {
                 all: vec!["(unresolved)".to_owned(), "Calibri".to_owned()],
                 complete: false,
-                text: Vec::new(),
+                text: BTreeMap::new(),
             }),
             "without runs, the table has only the first characters' fonts"
         );
@@ -977,9 +987,21 @@ ABC+Short CID TrueType Identity-H yes yes yes 15 0\n";
         )
         .unwrap();
         let fonts = word_fonts(&scratch.path).unwrap().unwrap();
+        let by_story = |story: &str, names: &[&str]| {
+            (
+                story.to_owned(),
+                names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        };
         assert_eq!(
             fonts.text,
-            ["Liberation Mono", "Liberation Sans", "Noto Sans"],
+            BTreeMap::from([
+                by_story("main", &["Liberation Sans", "Noto Sans"]),
+                by_story("primary-footer", &["Liberation Mono"]),
+            ]),
             "Calibri only for one-character runs and marks, Carlito for one character and \
              the mark, Liberation Serif for an empty paragraph's mark, a font without a name \
              left out; Liberation Mono from a paragraph without runs"

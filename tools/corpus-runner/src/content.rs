@@ -3,45 +3,91 @@
 //! markup. Gate row 11 asks the layout's report of every rendered document to name each
 //! kind it holds, so that a user knows why our PDF differs from Word's.
 //!
-//! Only the stories are read (the body, headers, footers, footnotes and endnotes), not the
-//! styles: content a style gives is not found. Deleted text, the formatting a revision
-//! replaced and the fallbacks of Markup Compatibility are left out, as the layout leaves
-//! them out.
+//! Only the stories Word shows are read: the body, the headers and footers its sections
+//! show (first-page ones with a title page in the document, even-page ones with
+//! `w:evenAndOddHeaders`), the footnotes and the endnotes; not the styles, so content a style
+//! gives is not found. Deleted text, the formatting a revision replaced, the fallbacks of
+//! Markup Compatibility and what groups of shapes hold, which the translation leaves out
+//! whole, are skipped. Transitional and Strict names are read alike.
 
 use std::collections::BTreeSet;
 
-use officewright_opc::xml::{Event, Input, NsId, Reader, StartTag};
-use officewright_opc::{Limits, Package, Part};
+use officewright_opc::xml::{Event, Input, Name, NsId, Reader, StartTag};
+use officewright_opc::{Limits, Package, Part, PartName};
 
 /// The kinds of content, each with the words of which an entry of the layout's report
-/// about it names one, in lower case.
+/// about it names one, in lower case: words of the messages the layout and the translation
+/// write for it, specific enough not to be found in a message about something else.
 pub const KINDS: [(&str, &[&str]); 21] = [
-    ("chart", &["chart"]),
-    ("SmartArt", &["smartart", "diagram", "drawing"]),
-    ("shape", &["shape", "group", "drawing"]),
-    ("embedded object", &["embedded object"]),
-    ("equation", &["equation"]),
+    (
+        "chart",
+        &["a chart is left out", "a drawing that shows no picture"],
+    ),
+    ("SmartArt", &["a drawing that shows no picture"]),
+    (
+        "shape",
+        &[
+            "a drawing that shows no picture",
+            "a vml drawing",
+            "a group of vml shapes",
+        ],
+    ),
+    ("embedded object", &["an embedded object"]),
+    ("equation", &["an equation is left out"]),
     // Formats other than PNG and JPEG are drawn as same-size placeholders (phase 1).
-    ("picture format", &["format", "grey box"]),
-    ("columns", &["column"]),
-    ("document grid", &["grid"]),
-    ("line numbers", &["line number"]),
-    ("page borders", &["page border"]),
+    ("picture format", &["format are drawn as grey boxes"]),
+    ("columns", &["text in columns"]),
+    (
+        "document grid",
+        &["the document grid", "on a document grid"],
+    ),
+    ("line numbers", &["line numbers (w:lnnumtype)"]),
+    ("page borders", &["page borders (w:pgborders)"]),
     // Phase 1 lays out text frames as ordinary paragraphs and floating tables in the text
     // flow, and reports both.
-    ("text frame", &["text frame", "drop cap"]),
-    ("floating table", &["floating table"]),
-    ("vertical alignment", &["vertical alignment"]),
+    (
+        "text frame",
+        &["a text frame (w:framepr)", "a drop cap (w:framepr)"],
+    ),
+    (
+        "floating table",
+        &["floating tables are laid out in the text"],
+    ),
+    ("vertical alignment", &["whatever its vertical alignment"]),
     // An entry may say instead that the object is not drawn at all.
-    ("text wrapping", &["wrap", "floating object"]),
-    ("vertical text", &["vertical"]),
-    ("rotated text box", &["rotate", "rotation", "turned"]),
-    ("linked text box", &["linked"]),
+    (
+        "text wrapping",
+        &[
+            "text does not wrap around floating objects",
+            "floating objects in table cells are not drawn",
+            "floating objects in text boxes are not drawn",
+        ],
+    ),
+    (
+        "vertical text",
+        &[
+            "vertical text in table cells",
+            "vertical text (w:textdirection)",
+            "vertical text in a text box",
+        ],
+    ),
+    ("rotated text box", &["a turned text box"]),
+    ("linked text box", &["a chain of linked text boxes"]),
     // Tables and floating objects in a text box: basic text boxes hold paragraphs only.
-    ("text box content", &["text box"]),
-    ("right-to-left text", &["right-to-left", "bidirectional"]),
+    (
+        "text box content",
+        &["tables in text boxes", "floating objects in text boxes"],
+    ),
+    (
+        "right-to-left text",
+        &[
+            "right-to-left text is laid out",
+            "a right-to-left paragraph",
+            "right-to-left tables",
+        ],
+    ),
     ("ruby", &["ruby"]),
-    ("text fitting", &["fitting", "fit text"]),
+    ("text fitting", &["text fitting"]),
 ];
 
 /// The words of which an entry about content of `kind` names one; `None` for a kind this
@@ -65,32 +111,67 @@ pub fn scan(path: &std::path::Path) -> Result<Vec<String>, String> {
     scan_bytes(bytes)
 }
 
-/// The content types of the stories, without parameters.
-const STORIES: [&str; 8] = [
+/// The content types of the main document part, without parameters.
+const MAIN: [&str; 4] = [
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
     "application/vnd.ms-word.document.macroEnabled.main+xml",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml",
     "application/vnd.ms-word.template.macroEnabledTemplate.main+xml",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
+];
+
+/// The content types of the notes parts.
+const NOTES: [&str; 2] = [
     "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml",
 ];
+
+/// The content type of a part, without parameters.
+fn content_type<'p>(part: &Part<'p>) -> Option<&'p str> {
+    part.content_type()
+        .and_then(|kind| kind.split(';').next())
+        .map(str::trim)
+}
 
 /// The kinds of content of a package's stories.
 pub fn scan_bytes(bytes: Vec<u8>) -> Result<Vec<String>, String> {
     let limits = Limits::new();
     let package = Package::from_bytes(bytes, &limits).map_err(|error| error.to_string())?;
+    let main = package
+        .parts()
+        .find(|part| content_type(part).is_some_and(|kind| MAIN.contains(&kind)))
+        .ok_or("the package has no main document part")?;
     let mut found = BTreeSet::new();
-    for part in package.parts() {
-        let story = part
-            .content_type()
-            .and_then(|kind| kind.split(';').next())
-            .is_some_and(|kind| STORIES.contains(&kind.trim()));
-        if story {
-            scan_part(&part, &limits, &mut found)
-                .map_err(|error| format!("{}: {error}", part.name()))?;
+    let mut sections = Sections::default();
+    scan_part(&main, &limits, &mut found, Some(&mut sections))
+        .map_err(|error| format!("{}: {error}", main.name()))?;
+    let even = even_and_odd_headers(&main, &limits)?;
+    let mut shown: Vec<PartName> = Vec::new();
+    for (kind, id) in &sections.references {
+        let shows = match kind.as_str() {
+            "first" => sections.title_page,
+            "even" => even,
+            _ => true,
+        };
+        let target = main
+            .relationships()
+            .get(id)
+            .and_then(|rel| rel.target_part());
+        if let Some(target) = target.filter(|_| shows) {
+            if !shown.contains(&target) {
+                shown.push(target);
+            }
         }
+    }
+    let notes = package
+        .parts()
+        .filter(|part| content_type(part).is_some_and(|kind| NOTES.contains(&kind)));
+    let stories = shown
+        .iter()
+        .filter_map(|name| package.part(name))
+        .chain(notes);
+    for part in stories {
+        scan_part(&part, &limits, &mut found, None)
+            .map_err(|error| format!("{}: {error}", part.name()))?;
     }
     Ok(KINDS
         .iter()
@@ -99,24 +180,81 @@ pub fn scan_bytes(bytes: Vec<u8>) -> Result<Vec<String>, String> {
         .collect())
 }
 
-const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-const W_STRICT: &str = "http://purl.oclc.org/ooxml/wordprocessingml/main";
-const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
-const WP: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+/// The headers and footers the body's sections name, as (`w:type`, relationship id), and
+/// whether a section has a title page.
+#[derive(Default)]
+struct Sections {
+    references: Vec<(String, String)>,
+    title_page: bool,
+}
+
+/// The relationship types of the settings part.
+const SETTINGS: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/settings",
+];
+
+/// Whether the settings turn on even-page headers and footers (`w:evenAndOddHeaders`).
+fn even_and_odd_headers(main: &Part, limits: &Limits) -> Result<bool, String> {
+    let Some(settings) = main
+        .relationships()
+        .iter()
+        .filter(|rel| SETTINGS.contains(&rel.relationship_type()))
+        .find_map(|rel| rel.target_part())
+        .and_then(|name| main.package().part(&name))
+    else {
+        return Ok(false);
+    };
+    let bytes = settings.read().map_err(|error| error.to_string())?;
+    let input = Input::decode(&bytes).map_err(|error| error.to_string())?;
+    let mut reader = input.reader(limits);
+    let names = Names::new(&mut reader);
+    while let Some(event) = reader.read_event().map_err(|error| error.to_string())? {
+        if let Event::Start(tag) = event {
+            if names.is_w(&tag.name()) && tag.name().local() == "evenAndOddHeaders" {
+                return Ok(on(w_value(&tag, &names, "val")));
+            }
+        }
+    }
+    Ok(false)
+}
+
+const W: [&str; 2] = [
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    "http://purl.oclc.org/ooxml/wordprocessingml/main",
+];
+const A: [&str; 2] = [
+    "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "http://purl.oclc.org/ooxml/drawingml/main",
+];
+const WP: [&str; 2] = [
+    "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+    "http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing",
+];
+const M: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/math",
+    "http://purl.oclc.org/ooxml/officeDocument/math",
+];
+const R: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships",
+];
 const WPS: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
 const WPG: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup";
 const WPC: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas";
 const V: &str = "urn:schemas-microsoft-com:vml";
 const W10: &str = "urn:schemas-microsoft-com:office:word";
-const M: &str = "http://schemas.openxmlformats.org/officeDocument/2006/math";
 const MC: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
-const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const O: &str = "urn:schemas-microsoft-com:office:office";
-const CHARTS: [&str; 2] = [
+const CHARTS: [&str; 3] = [
     "http://schemas.openxmlformats.org/drawingml/2006/chart",
+    "http://purl.oclc.org/ooxml/drawingml/chart",
     "http://schemas.microsoft.com/office/drawing/2014/chartex",
 ];
-const DIAGRAM: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
+const DIAGRAMS: [&str; 2] = [
+    "http://schemas.openxmlformats.org/drawingml/2006/diagram",
+    "http://purl.oclc.org/ooxml/drawingml/diagram",
+];
 
 /// The VML elements that draw a shape.
 const VML_SHAPES: [&str; 8] = [
@@ -139,39 +277,61 @@ const DRAWN: [&str; 5] = [
     "image/pjpeg",
 ];
 
-/// The namespaces a part's names are compared with.
+/// The text directions of horizontal lines (`w:textDirection`): Transitional `lrTb`, Strict
+/// `tb`, and those with East Asian characters turned, `lrTbV` and `tbV`.
+const HORIZONTAL: [&str; 4] = ["lrTb", "tb", "lrTbV", "tbV"];
+
+/// The namespaces a part's names are compared with, Transitional and Strict.
 struct Names {
     w: [NsId; 2],
-    a: NsId,
-    wp: NsId,
+    a: [NsId; 2],
+    wp: [NsId; 2],
+    m: [NsId; 2],
+    r: [NsId; 2],
     wps: NsId,
     wpg: NsId,
     wpc: NsId,
     v: NsId,
     w10: NsId,
-    m: NsId,
     mc: NsId,
-    r: NsId,
     o: NsId,
 }
 
 impl Names {
     fn new(reader: &mut Reader) -> Self {
+        let mut both = |uris: [&str; 2]| [reader.intern(uris[0]), reader.intern(uris[1])];
+        let (w, a, wp, m, r) = (both(W), both(A), both(WP), both(M), both(R));
         Names {
-            w: [reader.intern(W), reader.intern(W_STRICT)],
-            a: reader.intern(A),
-            wp: reader.intern(WP),
+            w,
+            a,
+            wp,
+            m,
+            r,
             wps: reader.intern(WPS),
             wpg: reader.intern(WPG),
             wpc: reader.intern(WPC),
             v: reader.intern(V),
             w10: reader.intern(W10),
-            m: reader.intern(M),
             mc: reader.intern(MC),
-            r: reader.intern(R),
             o: reader.intern(O),
         }
     }
+
+    fn is_w(&self, name: &Name) -> bool {
+        in_any(name, &self.w)
+    }
+}
+
+/// Whether a name is in one of the namespaces.
+fn in_any(name: &Name, namespaces: &[NsId]) -> bool {
+    namespaces.iter().any(|ns| name.namespace() == Some(*ns))
+}
+
+/// An attribute of a tag in one of the namespaces.
+fn attribute<'t>(tag: &'t StartTag, namespaces: &[NsId], local: &str) -> Option<&'t str> {
+    namespaces
+        .iter()
+        .find_map(|ns| tag.attribute(Some(*ns), local))
 }
 
 /// An open element the scan keeps: what the kinds that depend on its content need.
@@ -201,10 +361,19 @@ enum Open {
     Other,
 }
 
+/// What a start tag tells the scan to do.
+enum Step {
+    /// Keep the element open.
+    Open(Open),
+    /// Skip it with all it holds.
+    Skip,
+}
+
 fn scan_part(
     part: &Part,
     limits: &Limits,
     found: &mut BTreeSet<&'static str>,
+    mut sections: Option<&mut Sections>,
 ) -> Result<(), String> {
     let bytes = part.read().map_err(|error| error.to_string())?;
     let input = Input::decode(&bytes).map_err(|error| error.to_string())?;
@@ -214,12 +383,22 @@ fn scan_part(
     while let Some(event) = reader.read_event().map_err(|error| error.to_string())? {
         match event {
             Event::Start(tag) => {
-                if skipped(&tag, &names) {
-                    reader.skip_element().map_err(|error| error.to_string())?;
-                    continue;
+                let step = if skipped(&tag, &names) {
+                    Step::Skip
+                } else {
+                    start(
+                        &tag,
+                        &names,
+                        part,
+                        &mut open,
+                        found,
+                        sections.as_deref_mut(),
+                    )
+                };
+                match step {
+                    Step::Open(element) => open.push(element),
+                    Step::Skip => reader.skip_element().map_err(|error| error.to_string())?,
                 }
-                let element = start(&tag, &names, part, &mut open, found);
-                open.push(element);
             }
             Event::End(_) => {
                 if let Some(element) = open.pop() {
@@ -238,7 +417,7 @@ fn scan_part(
 fn skipped(tag: &StartTag, names: &Names) -> bool {
     let name = tag.name();
     let local = name.local();
-    if names.w.iter().any(|w| name.namespace() == Some(*w)) {
+    if names.is_w(&name) {
         matches!(local, "del" | "moveFrom") || local.ends_with("Change")
     } else {
         name.is(names.mc, "Fallback") || name.is(names.v, "shapetype")
@@ -252,7 +431,7 @@ fn on(value: Option<&str>) -> bool {
 
 /// The value of attribute `local` of `tag` in WordprocessingML's namespace.
 fn w_value<'t>(tag: &'t StartTag, names: &Names, local: &str) -> Option<&'t str> {
-    names.w.iter().find_map(|w| tag.attribute(Some(*w), local))
+    attribute(tag, &names.w, local)
 }
 
 /// The value of a property of a VML style (`rotation:90;mso-next-textbox:#t2`).
@@ -302,23 +481,36 @@ fn start(
     part: &Part,
     open: &mut [Open],
     found: &mut BTreeSet<&'static str>,
-) -> Open {
+    sections: Option<&mut Sections>,
+) -> Step {
     let name = tag.name();
     let local = name.local();
     let in_object = open
         .iter()
         .any(|element| matches!(element, Open::Object { .. }));
     let in_text_box = open.iter().any(|element| matches!(element, Open::TextBox));
-    if names.w.iter().any(|w| name.namespace() == Some(*w)) {
+    if names.is_w(&name) {
         let parent_section = matches!(open.last(), Some(Open::Section));
         match local {
-            "sectPr" => return Open::Section,
+            "sectPr" => return Step::Open(Open::Section),
+            "headerReference" | "footerReference" if parent_section => {
+                let id = attribute(tag, &names.r, "id");
+                if let (Some(sections), Some(id)) = (sections, id) {
+                    let kind = w_value(tag, names, "type").unwrap_or("default");
+                    sections.references.push((kind.to_owned(), id.to_owned()));
+                }
+            }
+            "titlePg" if parent_section => {
+                if let Some(sections) = sections.filter(|_| on(w_value(tag, names, "val"))) {
+                    sections.title_page = true;
+                }
+            }
             "cols" if parent_section => {
                 let num = w_value(tag, names, "num").and_then(|num| num.parse::<u32>().ok());
                 if num.is_some_and(|num| num > 1) {
                     found.insert("columns");
                 }
-                return Open::Columns(0);
+                return Step::Open(Open::Columns(0));
             }
             "col" => {
                 if let Some(Open::Columns(count)) = open.last_mut() {
@@ -333,12 +525,14 @@ fn start(
                     found.insert("document grid");
                 }
             }
+            // As the translation: what Word does without w:countBy is not known.
             "lnNumType" if parent_section => {
-                if w_value(tag, names, "countBy") != Some("0") {
+                let count = w_value(tag, names, "countBy").and_then(|n| n.parse::<u32>().ok());
+                if count.is_some_and(|count| count > 0) {
                     found.insert("line numbers");
                 }
             }
-            "pgBorders" if parent_section => return Open::PageBorders,
+            "pgBorders" if parent_section => return Step::Open(Open::PageBorders),
             "top" | "left" | "bottom" | "right" | "start" | "end"
                 if matches!(open.last(), Some(Open::PageBorders)) =>
             {
@@ -361,11 +555,12 @@ fn start(
                 found.insert("floating table");
             }
             "textDirection" => {
-                if !matches!(w_value(tag, names, "val"), Some("lrTb" | "lr") | None) {
+                if w_value(tag, names, "val").is_some_and(|value| !HORIZONTAL.contains(&value)) {
                     found.insert("vertical text");
                 }
             }
-            "bidi" | "rtl" | "bidiVisual" => {
+            // A section's w:bidi turns its page setup, not its text.
+            "bidi" | "rtl" | "bidiVisual" if !parent_section => {
                 if on(w_value(tag, names, "val")) {
                     found.insert("right-to-left text");
                 }
@@ -382,10 +577,10 @@ fn start(
                 }
             }
             "object" => {
-                return Open::Object {
+                return Step::Open(Open::Object {
                     preview: false,
                     drawing: false,
-                };
+                });
             }
             "drawing" => {
                 if let Some(Open::Object { drawing, .. }) = open
@@ -396,28 +591,25 @@ fn start(
                     *drawing = true;
                 }
             }
-            "txbxContent" => return Open::TextBox,
+            "txbxContent" => return Step::Open(Open::TextBox),
             "tbl" if in_text_box => {
                 found.insert("text box content");
             }
             _ => {}
         }
-    } else if name.namespace() == Some(names.a) {
+    } else if in_any(&name, &names.a) {
         match local {
             "graphicData" => match tag.attribute(None, "uri") {
                 Some(uri) if CHARTS.contains(&uri) => {
                     found.insert("chart");
                 }
-                Some(DIAGRAM) => {
+                Some(uri) if DIAGRAMS.contains(&uri) => {
                     found.insert("SmartArt");
                 }
                 _ => {}
             },
             "blip" => {
-                if tag
-                    .attribute(Some(names.r), "embed")
-                    .is_some_and(|id| undrawn_picture(part, id))
-                {
+                if attribute(tag, &names.r, "embed").is_some_and(|id| undrawn_picture(part, id)) {
                     found.insert("picture format");
                 }
             }
@@ -435,10 +627,10 @@ fn start(
     } else if name.namespace() == Some(names.wps) {
         match local {
             "wsp" => {
-                return Open::Shape {
+                return Step::Open(Open::Shape {
                     text: false,
                     turned: false,
-                };
+                });
             }
             "txbx" | "linkedTxbx" => {
                 if local == "linkedTxbx" {
@@ -458,8 +650,10 @@ fn start(
             _ => {}
         }
     } else if name.is(names.wpg, "wgp") || name.is(names.wpc, "wpc") {
+        // The translation leaves a group or a canvas out whole, with what it holds.
         found.insert("shape");
-    } else if name.namespace() == Some(names.wp) {
+        return Step::Skip;
+    } else if in_any(&name, &names.wp) {
         match local {
             "wrapSquare" | "wrapTight" | "wrapThrough" | "wrapTopAndBottom" => {
                 found.insert("text wrapping");
@@ -476,19 +670,20 @@ fn start(
         ) {
             found.insert("text wrapping");
         }
-    } else if name.namespace() == Some(names.m) {
+    } else if in_any(&name, &names.m) {
         if matches!(local, "oMath" | "oMathPara") {
             found.insert("equation");
         }
     } else if name.namespace() == Some(names.v) {
         if local == "group" {
             found.insert("shape");
+            return Step::Skip;
         } else if VML_SHAPES.contains(&local) {
             if in_object {
-                return Open::Other;
+                return Step::Open(Open::Other);
             }
             let style = tag.attribute(None, "style").unwrap_or_default();
-            return Open::Vml {
+            return Step::Open(Open::Vml {
                 text: false,
                 picture: false,
                 turned: style_property(style, "rotation").is_some_and(turns),
@@ -496,7 +691,7 @@ fn start(
                     tag.attribute(None, "id").map(str::to_owned),
                     tag.attribute(Some(names.o), "spid").map(str::to_owned),
                 ],
-            };
+            });
         } else if local == "textbox" {
             let style = tag.attribute(None, "style").unwrap_or_default();
             // A box that names itself as the next is in no chain, as Word writes some
@@ -525,10 +720,7 @@ fn start(
                 *text = true;
             }
         } else if local == "imagedata" {
-            if tag
-                .attribute(Some(names.r), "id")
-                .is_some_and(|id| undrawn_picture(part, id))
-            {
+            if attribute(tag, &names.r, "id").is_some_and(|id| undrawn_picture(part, id)) {
                 found.insert("picture format");
             }
             for element in open.iter_mut().rev() {
@@ -546,7 +738,7 @@ fn start(
             }
         }
     }
-    Open::Other
+    Step::Open(Open::Other)
 }
 
 /// What an element shows once its content is read.
@@ -661,9 +853,11 @@ mod tests {
         r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#,
     );
 
-    /// A Word document whose body is `body`, with a header `header`, a styles part
-    /// `styles` and pictures rId1 (EMF) and rId2 (PNG).
-    fn document(body: &str, header: &str, styles: &str) -> Vec<u8> {
+    /// A Word document whose body is `body`, with three headers (header1 to header3.xml,
+    /// relationships rId3 to rId5) holding `headers`, settings `settings`, a styles part
+    /// `styles` and pictures rId1 (EMF) and rId2 (PNG). The body's sections name the headers
+    /// they show.
+    fn package(body: &str, headers: [&str; 3], settings: &str, styles: &str) -> Vec<u8> {
         let main = "application/vnd.openxmlformats-officedocument.wordprocessingml";
         let types = format!(
             r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -673,12 +867,15 @@ mod tests {
 <Default Extension="png" ContentType="image/png"/>
 <Override PartName="/word/document.xml" ContentType="{main}.document.main+xml"/>
 <Override PartName="/word/header1.xml" ContentType="{main}.header+xml"/>
+<Override PartName="/word/header2.xml" ContentType="{main}.header+xml"/>
+<Override PartName="/word/header3.xml" ContentType="{main}.header+xml"/>
+<Override PartName="/word/settings.xml" ContentType="{main}.settings+xml"/>
 <Override PartName="/word/styles.xml" ContentType="{main}.styles+xml"/></Types>"#
         );
         let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
-        let image = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+        let rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
         let document_rels = format!(
-            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{image}" Target="media/image1.emf"/><Relationship Id="rId2" Type="{image}" Target="media/image2.png"/></Relationships>"#
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{rel}/image" Target="media/image1.emf"/><Relationship Id="rId2" Type="{rel}/image" Target="media/image2.png"/><Relationship Id="rId3" Type="{rel}/header" Target="header1.xml"/><Relationship Id="rId4" Type="{rel}/header" Target="header2.xml"/><Relationship Id="rId5" Type="{rel}/header" Target="header3.xml"/><Relationship Id="rId6" Type="{rel}/settings" Target="settings.xml"/></Relationships>"#
         );
         let story = |root: &str, content: &str| {
             format!(
@@ -686,18 +883,31 @@ mod tests {
             )
         };
         let body = story("document", &format!("<w:body>{body}</w:body>"));
-        let header = story("hdr", header);
+        let [one, two, three] = headers.map(|content| story("hdr", content));
+        let settings = story("settings", settings);
         let styles = story("styles", styles);
         zip(&[
             ("[Content_Types].xml", types.as_bytes()),
             ("_rels/.rels", rels.as_bytes()),
             ("word/document.xml", body.as_bytes()),
             ("word/_rels/document.xml.rels", document_rels.as_bytes()),
-            ("word/header1.xml", header.as_bytes()),
+            ("word/header1.xml", one.as_bytes()),
+            ("word/header2.xml", two.as_bytes()),
+            ("word/header3.xml", three.as_bytes()),
+            ("word/settings.xml", settings.as_bytes()),
             ("word/styles.xml", styles.as_bytes()),
             ("word/media/image1.emf", b"EMF"),
             ("word/media/image2.png", b"PNG"),
         ])
+    }
+
+    /// A document whose body is `body`, its section showing header1.xml, which holds
+    /// `header`.
+    fn document(body: &str, header: &str, styles: &str) -> Vec<u8> {
+        let body = format!(
+            r#"{body}<w:sectPr><w:headerReference w:type="default" r:id="rId3"/></w:sectPr>"#
+        );
+        package(&body, [header, "", ""], "", styles)
     }
 
     fn kinds(body: &str) -> Vec<String> {
@@ -883,6 +1093,12 @@ mod tests {
             // One column, the default grid and line numbering off, page borders of none.
             section(r#"<w:cols w:num="1" w:space="720"/><w:docGrid w:type="default"/><w:lnNumType w:countBy="0"/><w:pgBorders><w:top w:val="none"/><w:left w:val="nil"/></w:pgBorders><w:vAlign w:val="top"/>"#),
             section(r#"<w:cols><w:col w:w="10"/></w:cols>"#),
+            // Line numbers without w:countBy, which the translation does not report either,
+            // a section's right-to-left page setup, and borders of paragraphs and tables.
+            section(r#"<w:lnNumType w:restart="newPage"/><w:bidi/>"#),
+            r#"<w:p><w:pPr><w:pBdr><w:top w:val="single"/></w:pBdr></w:pPr></w:p>"#.to_owned(),
+            r#"<w:tbl><w:tblPr><w:tblBorders><w:top w:val="single"/><w:left w:val="single"/></w:tblBorders></w:tblPr></w:tbl>"#.to_owned(),
+            r#"<w:tbl><w:tr><w:tc><w:tcPr><w:textDirection w:val="lrTbV"/></w:tcPr></w:tc></w:tr></w:tbl>"#.to_owned(),
             // A cell's vertical alignment; text from left to right.
             r#"<w:tbl><w:tr><w:tc><w:tcPr><w:vAlign w:val="center"/><w:textDirection w:val="lrTb"/><w:tcFitText w:val="0"/></w:tcPr></w:tc></w:tr></w:tbl>"#.to_owned(),
             r#"<w:p><w:pPr><w:bidi w:val="0"/></w:pPr><w:r><w:rPr><w:rtl w:val="false"/></w:rPr></w:r></w:p>"#.to_owned(),
@@ -920,12 +1136,263 @@ mod tests {
         assert_eq!(kinds(&both), ["chart", "columns"]);
     }
 
+    /// Headers of a type Word does not show are not read: first-page ones without a title
+    /// page, even-page ones without w:evenAndOddHeaders, and those no section names.
+    #[test]
+    fn only_the_headers_word_shows_are_read() {
+        let chart = graphic("http://schemas.openxmlformats.org/drawingml/2006/chart", "");
+        let equation = "<w:p><m:oMath/></w:p>";
+        let ruby = "<w:p><w:r><w:ruby/></w:r></w:p>";
+        let headers = [chart.as_str(), equation, ruby];
+        let body = |title: bool| {
+            format!(
+                r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="rId3"/><w:headerReference w:type="first" r:id="rId4"/><w:headerReference w:type="even" r:id="rId5"/>{}</w:sectPr>"#,
+                if title { "<w:titlePg/>" } else { "" }
+            )
+        };
+        let scan = |title: bool, settings: &str| {
+            scan_bytes(package(&body(title), headers, settings, "")).unwrap()
+        };
+        assert_eq!(scan(false, ""), ["chart"]);
+        assert_eq!(scan(true, ""), ["chart", "equation"]);
+        let off = body(false).replace("</w:sectPr>", r#"<w:titlePg w:val="0"/></w:sectPr>"#);
+        assert_eq!(
+            scan_bytes(package(&off, headers, "", "")).unwrap(),
+            ["chart"],
+            "a title page turned off"
+        );
+        assert_eq!(scan(false, "<w:evenAndOddHeaders/>"), ["chart", "ruby"]);
+        assert_eq!(
+            scan(false, r#"<w:evenAndOddHeaders w:val="0"/>"#),
+            ["chart"]
+        );
+        assert_eq!(
+            scan(false, r#"<w:titlePg/><w:evenAndOddHeaders w:val="false"/>"#),
+            ["chart"],
+            "a title page is a section's"
+        );
+        // A title page of a later section shows the first-page header too.
+        let two = r#"<w:p><w:pPr><w:sectPr><w:headerReference w:type="first" r:id="rId4"/></w:sectPr></w:pPr></w:p><w:p/><w:sectPr><w:titlePg/></w:sectPr>"#;
+        assert_eq!(
+            scan_bytes(package(two, headers, "", "")).unwrap(),
+            ["equation"]
+        );
+        // No section names a header: none is read.
+        assert!(
+            scan_bytes(package("<w:p/>", headers, "", ""))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Strict documents name the same content in other namespaces.
+    #[test]
+    fn strict_names_are_read_as_transitional_ones() {
+        let strict = r#"xmlns:sw="http://purl.oclc.org/ooxml/wordprocessingml/main" xmlns:sa="http://purl.oclc.org/ooxml/drawingml/main" xmlns:swp="http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing" xmlns:sm="http://purl.oclc.org/ooxml/officeDocument/math" xmlns:sr="http://purl.oclc.org/ooxml/officeDocument/relationships""#;
+        let cases = [
+            (
+                r#"<sw:p><sw:r><sw:drawing><swp:inline><sa:graphic><sa:graphicData uri="http://purl.oclc.org/ooxml/drawingml/chart"/></sa:graphic></swp:inline></sw:drawing></sw:r></sw:p>"#,
+                vec!["chart"],
+            ),
+            (
+                r#"<sw:p><sw:r><sw:drawing><swp:inline><sa:graphic><sa:graphicData uri="http://purl.oclc.org/ooxml/drawingml/diagram"/></sa:graphic></swp:inline></sw:drawing></sw:r></sw:p>"#,
+                vec!["SmartArt"],
+            ),
+            (
+                r#"<sw:p><sw:r><sw:drawing><swp:anchor><swp:wrapSquare/><sa:graphic><sa:graphicData uri="x"><sa:blip sr:embed="rId1"/></sa:graphicData></sa:graphic></swp:anchor></sw:drawing></sw:r></sw:p>"#,
+                vec!["picture format", "text wrapping"],
+            ),
+            (r#"<sw:p><sm:oMath/></sw:p>"#, vec!["equation"]),
+            (
+                r#"<sw:tbl><sw:tr><sw:tc><sw:tcPr><sw:textDirection sw:val="tb"/></sw:tcPr></sw:tc></sw:tr></sw:tbl>"#,
+                vec![],
+            ),
+            (
+                r#"<sw:tbl><sw:tr><sw:tc><sw:tcPr><sw:textDirection sw:val="rl"/></sw:tcPr></sw:tc></sw:tr></sw:tbl>"#,
+                vec!["vertical text"],
+            ),
+            (
+                r#"<sw:tbl><sw:tr><sw:tc><sw:tcPr><sw:textDirection sw:val="lr"/></sw:tcPr></sw:tc></sw:tr></sw:tbl>"#,
+                vec!["vertical text"],
+            ),
+        ];
+        for (content, expected) in cases {
+            let body = format!(r#"<w:p {strict}>{content}</w:p>"#);
+            assert_eq!(kinds(&body), expected, "{content}");
+        }
+    }
+
+    /// What a group of shapes holds is left out with it: only the group is found.
+    #[test]
+    fn the_content_of_groups_is_not_read() {
+        let in_group = shape("<wps:txbx><w:txbxContent><w:tbl/></w:txbxContent></wps:txbx>")
+            .replace("<wps:wsp>", "<wpg:wgp><wps:wsp>")
+            .replace("</wps:wsp>", "</wps:wsp></wpg:wgp>");
+        assert_eq!(kinds(&in_group), ["shape"]);
+        let vml = pict(
+            r#"<v:group><v:shape><v:imagedata r:id="rId1"/><v:textbox style="mso-next-textbox:#b"/></v:shape></v:group>"#,
+        );
+        assert_eq!(kinds(&vml), ["shape"]);
+    }
+
     #[test]
     fn damaged_markup_is_an_error() {
         let error = scan_bytes(document("<w:p>", "", "")).unwrap_err();
         assert!(error.starts_with("/word/document.xml: "), "{error}");
         assert!(scan_bytes(b"not a zip".to_vec()).is_err());
         assert!(scan(std::path::Path::new("/nonexistent/a.docx")).is_err());
+    }
+
+    /// Each kind is named by the messages the layout and the translation write for it at
+    /// the time of writing, and not by messages about something else that share a word.
+    #[test]
+    fn each_kind_is_named_by_its_own_messages_only() {
+        let named = [
+            (
+                "chart",
+                "a drawing that shows no picture (a shape, chart or group) is left out",
+            ),
+            (
+                "SmartArt",
+                "a drawing that shows no picture (a shape, chart or group) is left out",
+            ),
+            (
+                "shape",
+                "a VML drawing that shows no picture or text box (a shape or group) is left out (w:pict)",
+            ),
+            (
+                "shape",
+                "a group of VML shapes is left out, with the text boxes in it (w:pict)",
+            ),
+            (
+                "embedded object",
+                "an embedded object without a preview picture is left out (w:object)",
+            ),
+            ("equation", "an equation is left out"),
+            (
+                "picture format",
+                "pictures in emf format are drawn as grey boxes",
+            ),
+            ("columns", "text in columns is laid out in one column"),
+            (
+                "document grid",
+                "the document grid (w:docGrid) is not followed, here and in every other section that has one",
+            ),
+            (
+                "document grid",
+                "spacing in line units on a document grid keeps its value in points",
+            ),
+            (
+                "line numbers",
+                "line numbers (w:lnNumType) are not drawn, here and in every other section that has them",
+            ),
+            (
+                "page borders",
+                "page borders (w:pgBorders) are not drawn, here and in every other section that has them",
+            ),
+            (
+                "text frame",
+                "a text frame (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one",
+            ),
+            (
+                "text frame",
+                "a drop cap (w:framePr) is laid out as an ordinary paragraph, here and wherever else the document has one",
+            ),
+            (
+                "floating table",
+                "floating tables are laid out in the text where they are anchored",
+            ),
+            (
+                "vertical alignment",
+                "the body text of a section is laid out from the top of its pages, whatever its vertical alignment",
+            ),
+            (
+                "text wrapping",
+                "text does not wrap around floating objects yet: it runs over or under them",
+            ),
+            (
+                "text wrapping",
+                "floating objects in table cells are not drawn yet",
+            ),
+            (
+                "vertical text",
+                "vertical text in table cells is laid out horizontally",
+            ),
+            (
+                "vertical text",
+                "vertical text (w:textDirection) is laid out horizontally, here and in every other section that has it",
+            ),
+            (
+                "vertical text",
+                "vertical text in a text box (wps:bodyPr vert, or layout-flow in VML) is drawn across, here and wherever else the document has some",
+            ),
+            (
+                "rotated text box",
+                "a turned text box (a:xfrm rot, or rotation in VML) is drawn upright, here and wherever else the document has one",
+            ),
+            (
+                "linked text box",
+                "a chain of linked text boxes (wps:linkedTxbx, or mso-next-textbox in VML) is drawn with all its text in its first box",
+            ),
+            ("text box content", "tables in text boxes are not drawn yet"),
+            (
+                "text box content",
+                "floating objects in text boxes are not drawn",
+            ),
+            (
+                "right-to-left text",
+                "right-to-left text is laid out from left to right, its characters in the order they are stored",
+            ),
+            (
+                "right-to-left text",
+                "a right-to-left paragraph (w:bidi) is laid out left to right, here and wherever else the document has one",
+            ),
+            (
+                "right-to-left text",
+                "right-to-left tables are laid out left to right",
+            ),
+            (
+                "text fitting",
+                "the cell's text fitting (w:tcFitText) is not applied",
+            ),
+        ];
+        for (kind, message) in named {
+            assert!(names(message, words(kind).unwrap()), "{kind}: {message}");
+        }
+        let others = [
+            (
+                "vertical text",
+                "rows that a vertically merged cell ties together are not split across pages",
+            ),
+            (
+                "rotated text box",
+                "cropped, turned or mirrored pictures are drawn whole and upright",
+            ),
+            (
+                "picture format",
+                "a picture is drawn as a grey box: the PNG data is damaged",
+            ),
+            (
+                "columns",
+                "the columns of a text box (numCol) are drawn as one, here and wherever else the document has them",
+            ),
+            (
+                "text box content",
+                "a text box shaped other than as a rectangle (a:prstGeom other than rect) is drawn as a rectangle",
+            ),
+            ("text wrapping", "paragraph borders are not drawn yet"),
+            (
+                "shape",
+                "a text box shaped other than as a rectangle (a:prstGeom other than rect) is drawn as a rectangle",
+            ),
+            (
+                "line numbers",
+                "list numbers in a format the layout does not write are written in decimal",
+            ),
+        ];
+        for (kind, message) in others {
+            assert!(!names(message, words(kind).unwrap()), "{kind}: {message}");
+        }
     }
 
     #[test]

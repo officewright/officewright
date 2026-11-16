@@ -757,7 +757,7 @@ fn squeezed(name: &str) -> String {
 
 /// Whether our PDF embeds a font of `family`: one whose PostScript name, before its style
 /// (`LiberationSans-Bold`), is the family's name without spaces, or that with Microsoft's
-/// `PSMT` or `MT` after it (`TimesNewRomanPSMT`).
+/// `PSMT`, `MT` or `PS` after it (`TimesNewRomanPSMT`, `TimesNewRomanPS-BoldMT`).
 fn embeds(pdf_fonts: &[String], family: &str) -> bool {
     let family = squeezed(family);
     !family.is_empty()
@@ -767,7 +767,7 @@ fn embeds(pdf_fonts: &[String], family: &str) -> bool {
                 name == &family
                     || name
                         .strip_prefix(family.as_str())
-                        .is_some_and(|rest| matches!(rest, "psmt" | "mt"))
+                        .is_some_and(|rest| matches!(rest, "psmt" | "mt" | "ps"))
             })
         })
 }
@@ -779,6 +779,30 @@ fn substituted(message: &str) -> Option<&str> {
     let rest = message.strip_prefix('"')?;
     rest.split_once('"').map(|(family, _)| family)
 }
+
+/// The stories of Word's formatting export whose fonts row 11 does not check, with the
+/// words of an entry that says the layout leaves their text out: comments, which Word's
+/// references do not show either, and stories the report says are not laid out.
+const STORIES_LEFT_OUT: [(&str, &[&str]); 4] = [
+    ("comments", &[]),
+    ("endnotes", &["endnotes are not laid out"]),
+    (
+        "footnotes",
+        &[
+            "footnotes referenced in table cells are not laid out",
+            "their notes are left out",
+        ],
+    ),
+    (
+        "text-boxes",
+        &[
+            "a group of vml shapes is left out",
+            "a vml picture's text (v:textbox) is left out",
+            "a drawing that shows no picture",
+            "floating objects in text boxes are not drawn",
+        ],
+    ),
+];
 
 /// Row 11 over a report.
 pub fn silences(report: &Report) -> Silences {
@@ -799,7 +823,24 @@ pub fn silences(report: &Report) -> Silences {
                 .filter_map(|entry| substituted(&entry.message))
                 .map(str::to_lowercase)
                 .collect();
-            for font in word_fonts {
+            let left_out = |story: &str| {
+                STORIES_LEFT_OUT
+                    .iter()
+                    .find(|(name, _)| *name == story)
+                    .is_some_and(|(_, words)| {
+                        words.is_empty()
+                            || entries.iter().any(|entry| {
+                                entry.kind == "feature-unsupported"
+                                    && content::names(&entry.message, words)
+                            })
+                    })
+            };
+            let shown: BTreeSet<&String> = word_fonts
+                .iter()
+                .filter(|(story, _)| !left_out(story))
+                .flat_map(|(_, fonts)| fonts)
+                .collect();
+            for font in shown {
                 if !reported.contains(&font.to_lowercase()) && !embeds(pdf_fonts, font) {
                     out.found.push(Silence {
                         path: file.path.clone(),
@@ -1047,7 +1088,10 @@ mod tests {
             fonts_not_embedded: Some(Vec::new()),
             word_fonts: Some(fonts.iter().map(|font| (*font).to_owned()).collect()),
             word_fonts_complete: Some(true),
-            word_text_fonts: Some(fonts.iter().map(|font| (*font).to_owned()).collect()),
+            word_text_fonts: Some(BTreeMap::from([(
+                "main".to_owned(),
+                fonts.iter().map(|font| (*font).to_owned()).collect(),
+            )])),
             // Every font of the text embedded, under its PostScript name.
             pdf_fonts: Some(fonts.iter().map(|font| font.replace(' ', "")).collect()),
         }
@@ -1760,6 +1804,92 @@ mod tests {
         assert_eq!(unchecked.pass, Some(true));
     }
 
+    /// The fonts of a story the layout leaves out, by the report's own entry, or of the
+    /// comments, which Word's references do not show, are not checked.
+    #[test]
+    fn fonts_of_stories_left_out_are_not_checked() {
+        let row = |stories: &[(&str, &[&str])], entries: &[(&str, &str)]| {
+            let mut file = rendered("c/notes.docx", &[], &["Carlito-Regular"], &[], entries);
+            file.scores.as_mut().unwrap().word_text_fonts = Some(
+                stories
+                    .iter()
+                    .map(|(story, fonts)| {
+                        (
+                            (*story).to_owned(),
+                            fonts.iter().map(|font| (*font).to_owned()).collect(),
+                        )
+                    })
+                    .collect(),
+            );
+            silences(&Report::new(vec![file])).found
+        };
+        let endnotes: &[(&str, &[&str])] = &[("main", &["Carlito"]), ("endnotes", &["Cambria"])];
+        assert_eq!(
+            row(endnotes, &[]),
+            [Silence {
+                path: "c/notes.docx".to_owned(),
+                what: Unreported::Font("Cambria".to_owned()),
+            }]
+        );
+        let left_out = (
+            "feature-unsupported",
+            "endnotes are not laid out yet: their texts are left out",
+        );
+        assert!(row(endnotes, &[left_out]).is_empty());
+        // Only an unsupported feature's entry says so.
+        assert_eq!(
+            row(endnotes, &[("overflow", "endnotes are not laid out yet")]).len(),
+            1
+        );
+        assert!(row(&[("main", &["Carlito"]), ("comments", &["Cambria"])], &[]).is_empty());
+        // A font of a story that is laid out is checked even when another story has it.
+        assert_eq!(
+            row(
+                &[("main", &["Cambria"]), ("endnotes", &["Cambria"])],
+                &[left_out]
+            )
+            .len(),
+            1
+        );
+    }
+
+    /// A finding counts as new only where main checked the same thing: fonts where main
+    /// checked fonts, content where it checked content.
+    #[test]
+    fn findings_are_new_only_where_main_checked_them() {
+        let finding = |what: Unreported| Silence {
+            path: "c/a.docx".to_owned(),
+            what,
+        };
+        let branch = Silences {
+            found: vec![
+                finding(Unreported::Font("Calibri".to_owned())),
+                finding(Unreported::Content("chart".to_owned())),
+            ],
+            ..Silences::default()
+        };
+        let fonts_only = Silences {
+            fonts_of: BTreeSet::from(["c/a.docx".to_owned()]),
+            ..Silences::default()
+        };
+        let content_only = Silences {
+            content_of: BTreeSet::from(["c/a.docx".to_owned()]),
+            ..Silences::default()
+        };
+        assert_eq!(branch.new_against(&fonts_only), 1);
+        assert_eq!(branch.new_against(&content_only), 1);
+        assert_eq!(branch.new_against(&Silences::default()), 0);
+    }
+
+    #[test]
+    fn long_lists_are_cut_at_twenty() {
+        let items: Vec<String> = (1..=23).map(|n| format!("d{n}")).collect();
+        let line = listed(&items);
+        assert!(line.starts_with("d1, d2, "), "{line}");
+        assert!(line.ends_with("d20 and 3 more"), "{line}");
+        assert_eq!(listed(&items[..20]), items[..20].join(", "));
+    }
+
     #[test]
     fn a_pdf_font_is_matched_to_its_family() {
         let fonts = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
@@ -1772,6 +1902,18 @@ mod tests {
             &fonts(&["LibreBarcode128-Regular"]),
             "Libre Barcode 128"
         ));
+        // Microsoft's bold and italic faces put PS before the style.
+        assert!(embeds(
+            &fonts(&["TimesNewRomanPS-BoldMT"]),
+            "Times New Roman"
+        ));
+        assert!(embeds(
+            &fonts(&["TimesNewRomanPS-ItalicMT"]),
+            "Times New Roman"
+        ));
+        assert!(embeds(&fonts(&["CourierNewPS-BoldMT"]), "Courier New"));
+        assert!(embeds(&fonts(&["Arial-BoldMT"]), "Arial"));
+        assert!(!embeds(&fonts(&["TimesNewRomanPS-BoldMT"]), "Times"));
         assert!(!embeds(&fonts(&["NotoSansSymbols-Regular"]), "Noto Sans"));
         assert!(!embeds(&fonts(&["ArialNarrow"]), "Arial"));
         assert!(!embeds(&fonts(&["Carlito-Regular"]), "Calibri"));

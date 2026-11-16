@@ -7,7 +7,12 @@
 //!
 //! An entry is told by its kind, `feature-unsupported`, and by words of its message. An
 //! entry of that kind that no line below names is counted as degrading a required feature
-//! until a line classes it, so that a new or reworded message cannot pass unseen.
+//! until a line classes it, so that a new or reworded message cannot pass unseen. Every
+//! message the layout and the translation into its IR wrote when these lines were made is
+//! classed, but for those that name markup the translation does not know ("a block-level
+//! w:… is left out", "an inline … element is left out", "an element in a run is left out")
+//! and the note that more entries are not listed: text may be lost there, so they stay
+//! unclassed on purpose.
 
 /// What an entry of the layout's report does to the required features.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -23,7 +28,7 @@ pub enum Class {
 /// Words of the messages of `feature-unsupported` entries, each with the required feature
 /// it degrades, or `None` for an entry that degrades none. The first line whose words the
 /// message contains classes it.
-pub const MESSAGES: [(&str, Option<&str>); 92] = [
+pub const MESSAGES: [(&str, Option<&str>); 123] = [
     // Paragraphs: borders and shading (phase 1).
     ("paragraph borders are not drawn", Some("paragraph borders")),
     ("a shading pattern of stripes or crosses", Some("shading")),
@@ -55,8 +60,40 @@ pub const MESSAGES: [(&str, Option<&str>); 92] = [
         "the table style's conditional formats are not applied",
         Some("tables"),
     ),
+    // A limit of the layout, before the line it would match below.
+    ("table header rows are not repeated past", None),
     ("table header rows are not repeated", Some("tables")),
     ("a page field in table header rows", Some("tables")),
+    ("a page field in a table row cut over pages", Some("tables")),
+    (
+        "header rows of a table in a table cell are not repeated",
+        Some("tables"),
+    ),
+    (
+        "spacing between table cells is laid out as none",
+        Some("tables"),
+    ),
+    // Fields: PAGE, NUMPAGES and SECTIONPAGES (phase 1), and the formats of numbers;
+    // list and note numbers in words first, before the line that matches them all.
+    (
+        "list numbers in words and ordinals in languages",
+        Some("lists"),
+    ),
+    (
+        "note numbers in words and ordinals in languages",
+        Some("notes"),
+    ),
+    ("numbers in words and ordinals in languages", Some("fields")),
+    (
+        "a page field in the body text shows the number",
+        Some("fields"),
+    ),
+    (
+        "a page field of a paragraph split over pages",
+        Some("fields"),
+    ),
+    ("the number of pages changed in each of", Some("fields")),
+    ("a continuation notice that does not fit", Some("notes")),
     // Basic text boxes (decision 15): their paragraphs, inside the box.
     ("a vml picture's text", Some("text boxes")),
     (
@@ -91,6 +128,8 @@ pub const MESSAGES: [(&str, Option<&str>); 92] = [
     ("page borders (w:pgborders)", None),
     ("a right-to-left paragraph", None),
     ("a drop cap (w:framepr)", None),
+    ("right-to-left text is laid out", None),
+    ("right-to-left tables", None),
     // Not required: tracked changes are laid out as accepted (plan 1.3).
     ("as a tracked change", None),
     // Not required: effects on text and pictures the plan does not name.
@@ -127,6 +166,10 @@ pub const MESSAGES: [(&str, Option<&str>); 92] = [
     ("a text box's ", None),
     ("the cell's diagonal borders", None),
     ("list numbers in a format the layout does not write", None),
+    ("numbers in a format the layout does not write", None),
+    ("numbers that their format cannot represent", None),
+    // Markup Word itself never writes.
+    ("the content of a cell merged into the cell above it", None),
     ("a picture bullet is left out", None),
     ("chapter numbers before page numbers", None),
     ("a page number (w:pgnum) inside a field", None),
@@ -152,6 +195,23 @@ pub const MESSAGES: [(&str, Option<&str>); 92] = [
     ("a symbol beyond u+ffff", None),
     ("a reference to ", None),
     ("a font name of more than", None),
+    ("a language tag of more than", None),
+    ("table rows of more than 63 cells", None),
+    ("table columns wider than", None),
+    ("cells past the columns of their table's grid", None),
+    ("a line or table of a footnote taller than the body", None),
+    ("headers and footers are left out past", None),
+    ("embedded font program", None),
+    ("lines thicker than", None),
+    ("pages narrower or shorter than", None),
+    ("has no height; the lines are single", None),
+    ("a cell that does not end with a paragraph", None),
+    // Not required: fonts the layout cannot use or embed, which rows 3 and 11 look at.
+    ("the layout tables of", None),
+    ("is not drawn: ", None),
+    ("is not installed: its symbols are drawn", None),
+    // Not required: fields shown with their stored result, as phase 1 lays them out.
+    ("fields other than page, numpages and sectionpages", None),
 ];
 
 /// The class of a report entry.
@@ -249,6 +309,31 @@ mod tests {
             ),
             (
                 "a table row deleted or moved away as a tracked change (w:del) is kept",
+                Class::NotRequired,
+            ),
+            (
+                "table header rows are not repeated past 4000 shapes and glyphs that table \
+                 rows draw again on later pages",
+                Class::NotRequired,
+            ),
+            (
+                "table header rows are not repeated on a page where they leave no room for \
+                 the row after them",
+                Class::Required("tables"),
+            ),
+            (
+                "list numbers in words and ordinals in languages other than English and \
+                 German are written in English",
+                Class::Required("lists"),
+            ),
+            (
+                "numbers in words and ordinals in languages other than English and German \
+                 are written in English",
+                Class::Required("fields"),
+            ),
+            (
+                "right-to-left text is laid out from left to right, its characters in the \
+                 order they are stored",
                 Class::NotRequired,
             ),
             // Markup the translation does not know: possibly text that is lost.
