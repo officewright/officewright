@@ -999,6 +999,23 @@ impl<'d, 'l> Prepared<'d, 'l> {
                         width: Pt(right - left),
                         height: Pt((below - clip_top).max(0.0)),
                     });
+                    // A link of what the row cuts off goes with it: of text, which is not
+                    // drawn, and of a picture, which is drawn whole while its link, the box
+                    // of its line, is cut to the row like the line's text. The painter
+                    // leaves out a link the row leaves less of than a link may be; one
+                    // smaller than that in itself, which it leaves out wherever it is, the
+                    // row does not cut off.
+                    let cut_off = rest.iter().any(|item| match item {
+                        DisplayItem::Link {
+                            at, width, height, ..
+                        } => {
+                            let across = (at.x.0 + width.0).min(right) - at.x.0.max(left);
+                            let down = (at.y.0 + height.0).min(below) - at.y.0.max(clip_top);
+                            width.0.min(height.0) >= crate::links::MIN_LINK
+                                && across.min(down) < crate::links::MIN_LINK
+                        }
+                        _ => false,
+                    });
                     items.extend(rest);
                     items.push(DisplayItem::PopClip);
                     items.extend(pictures);
@@ -1009,6 +1026,15 @@ impl<'d, 'l> Prepared<'d, 'l> {
                          row's bottom, as Word cuts it, and pictures there are drawn whole"
                             .to_owned(),
                     );
+                    if cut_off {
+                        context.fonts.report_once(
+                            ReportKind::Overflow,
+                            &self.location,
+                            "links of text and pictures that a table row of exact height cuts \
+                             off are left out"
+                                .to_owned(),
+                        );
+                    }
                 } else {
                     items.extend(content);
                 }
@@ -2436,7 +2462,9 @@ pub(crate) fn shift(items: &mut [DisplayItem], dx: f64, dy: f64) {
                 moved(&mut line.to);
             }
             DisplayItem::Image(image) => moved(&mut image.at),
-            DisplayItem::PushClip { at, .. } => moved(at),
+            DisplayItem::PushClip { at, .. }
+            | DisplayItem::Link { at, .. }
+            | DisplayItem::Destination { at, .. } => moved(at),
             DisplayItem::PopClip => {}
         }
     }

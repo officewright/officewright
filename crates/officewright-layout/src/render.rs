@@ -13,7 +13,7 @@ use officewright_pdf as pdf;
 use crate::display::{DisplayItem, DrawnGlyph, GlyphItem, ImageItem, LineItem, LineStyle, Point};
 use crate::error::{Error, Result};
 use crate::fonts::Fonts;
-use crate::ir::{Document, ImageFormat, ImageId};
+use crate::ir::{Document, ImageFormat, ImageId, LinkTarget};
 use crate::pages::{self, Page, PageSink};
 use crate::report::{LayoutReport, Location, ReportKind};
 use crate::shape::Shaper;
@@ -253,13 +253,14 @@ fn render(
     let mut layout_fonts = Fonts::new(fonts);
     let mut shaper = Shaper::new();
     // Each page is painted as soon as it is laid out, and dropped (#332).
-    let painted = pages::paginate_into(
+    let mut painted = pages::paginate_into(
         &document,
         &mut layout_fonts,
         &mut shaper,
         options.max_pages,
         || PdfPages::new(&document, options.compression),
     )?;
+    painted.add_links();
     // Only the last pass's painting is reported, after what the layout reported, as when
     // the pages were painted once they were all laid out.
     for (kind, location, message) in painted.notes.entries {
@@ -285,9 +286,78 @@ struct PdfPages<'a> {
     pdf: pdf::Document,
     /// What painting reported, for the report of the layout pass whose PDF this is.
     notes: Notes,
+    links: Links,
     /// The pages painted, and the most pages laid out and not yet painted at once.
     painted: usize,
     most_waiting: usize,
+}
+
+/// The bookmarks painted so far, and the links, which wait for the last page: a page may
+/// link to a bookmark that a later page shows, or that no page shows, as it is in content
+/// that is left out or cut off.
+#[derive(Default)]
+struct Links {
+    /// The names of the bookmarks given a destination: the first of each name.
+    bookmarks: HashSet<Arc<str>>,
+    /// The names of the bookmarks left out, as a PDF cannot hold them.
+    refused: HashSet<Arc<str>>,
+    /// Each link: its page's index, its box and where it goes, in the order the pages
+    /// paint them.
+    waiting: Vec<(usize, Bounds, Arc<LinkTarget>)>,
+}
+
+/// The most characters of a name that a message of the report quotes.
+const QUOTED_NAME: usize = 64;
+
+impl Links {
+    /// Adds the links to the pages of `pdf`, once every page is painted, each page's in the
+    /// order it paints them, which viewers move through them in: those to a URI, and
+    /// those to a bookmark that a page shows, to the first destination of its name. The
+    /// others are left out, and noted in `notes`.
+    fn add_to(&mut self, pdf: &mut pdf::Document, notes: &mut Notes) {
+        // The boxes of one link share its target: it is made for the PDF once, and the
+        // PDF keeps and writes it once (#581).
+        let mut last: Option<(Arc<LinkTarget>, pdf::LinkTarget)> = None;
+        for (page, (x, y, width, height), target) in std::mem::take(&mut self.waiting) {
+            let same = last
+                .take()
+                .filter(|(previous, _)| Arc::ptr_eq(previous, &target));
+            let made = if let Some((_, made)) = same {
+                made
+            } else {
+                match &*target {
+                    LinkTarget::Uri(uri) => pdf::LinkTarget::Uri(uri.clone()),
+                    LinkTarget::Bookmark(name) if self.bookmarks.contains(name.as_str()) => {
+                        pdf::LinkTarget::Destination(name.clone())
+                    }
+                    LinkTarget::Bookmark(name) => {
+                        let (kind, why) = if self.refused.contains(name.as_str()) {
+                            (ReportKind::ValueClamped, "which a PDF cannot hold")
+                        } else {
+                            (ReportKind::FeatureUnsupported, "which no page shows")
+                        };
+                        let mut quoted: String = name.chars().take(QUOTED_NAME).collect();
+                        if quoted.len() < name.len() {
+                            quoted.push('…');
+                        }
+                        notes.add(
+                            kind,
+                            &Location::default(),
+                            format!("a link to the bookmark {quoted:?}, {why}, is left out"),
+                        );
+                        continue;
+                    }
+                }
+            };
+            if let Some(Err(error)) = pdf
+                .page_mut(page)
+                .map(|pdf_page| pdf_page.add_link(x, y, width, height, &made))
+            {
+                notes.link_left_out(&error);
+            }
+            last = Some((target, made));
+        }
+    }
 }
 
 /// An entry of the report: its kind, where, and what.
@@ -311,9 +381,15 @@ impl<'a> PdfPages<'a> {
             images: HashMap::new(),
             pdf,
             notes: Notes::default(),
+            links: Links::default(),
             painted: 0,
             most_waiting: 0,
         }
+    }
+
+    /// Adds the links, once every page is painted ([`Links::add_to`]).
+    fn add_links(&mut self) {
+        self.links.add_to(&mut self.pdf, &mut self.notes);
     }
 }
 
@@ -328,12 +404,14 @@ impl PageSink for PdfPages<'_> {
             images: std::mem::take(&mut self.images),
             pdf: std::mem::take(&mut self.pdf),
             notes: std::mem::take(&mut self.notes),
+            links: std::mem::take(&mut self.links),
         };
         let painted = painter.page(&page);
         self.pdf_fonts = painter.pdf_fonts;
         self.images = painter.images;
         self.pdf = painter.pdf;
         self.notes = painter.notes;
+        self.links = painter.links;
         painted
     }
 }
@@ -349,15 +427,33 @@ struct Painter<'a, 'f, 'b> {
     pdf: pdf::Document,
     /// What painting reported.
     notes: Notes,
+    links: Links,
+}
+
+impl Notes {
+    /// Notes `message` for the report, kept with the PDF of its layout pass, so that a
+    /// pass whose PDF is dropped leaves nothing in the report.
+    fn add(&mut self, kind: ReportKind, location: &Location, message: String) {
+        if self.messages.insert(message.clone()) {
+            self.entries.push((kind, location.clone(), message));
+        }
+    }
+
+    /// Notes a link that the PDF does not take, such as one to a URI longer than a PDF
+    /// holds, or past the most links a page holds.
+    fn link_left_out(&mut self, error: &pdf::Error) {
+        self.add(
+            ReportKind::ValueClamped,
+            &Location::default(),
+            format!("a link is left out, as a PDF cannot hold it: {error}"),
+        );
+    }
 }
 
 impl Painter<'_, '_, '_> {
-    /// Notes `message` for the report, kept with the PDF of its layout pass, so that a
-    /// pass whose PDF is dropped leaves nothing in the report.
+    /// Notes `message` for the report, as [`Notes::add`] does.
     fn note(&mut self, kind: ReportKind, location: &Location, message: String) {
-        if self.notes.messages.insert(message.clone()) {
-            self.notes.entries.push((kind, location.clone(), message));
-        }
+        self.notes.add(kind, location, message);
     }
 
     /// Adds a page of the size of `page`, at least [`MIN_PAGE_SIDE`] each way, and paints
@@ -378,19 +474,42 @@ impl Painter<'_, '_, '_> {
         self.paint(width, height, &page.items)
     }
 
-    /// Adds a page `width` by `height` and paints `items` on it.
+    /// Adds a page `width` by `height` and paints `items` on it. Its links are added once
+    /// every page is painted ([`Links::add_to`]); a bookmark's destination is added where
+    /// the first bookmark of its name is.
     fn paint(&mut self, width: Pt, height: Pt, items: &[DisplayItem]) -> Result<()> {
         let items = self.drawn(width, height, items);
+        let index = self.pdf.page_count();
         let pdf_page = self.pdf.add_page(PageSize::new(width, height))?;
-        for item in &items {
+        let (notes, links) = (&mut self.notes, &mut self.links);
+        for item in items {
             match item {
-                Drawn::Glyphs(run) => pdf_page.draw_glyphs(run)?,
-                Drawn::Fill(path, color) => pdf_page.fill_path(path, *color)?,
-                Drawn::Stroke(path, stroke) => pdf_page.stroke_path(path, stroke)?,
-                Drawn::Image(image, at) => {
-                    pdf_page.draw_image(image, at.0, at.1, at.2, at.3)?;
+                Drawn::Link(bounds, target) => links.waiting.push((index, bounds, target)),
+                Drawn::Destination(x, y, name) => {
+                    if links.bookmarks.contains(&name) {
+                        continue;
+                    }
+                    match pdf_page.add_destination(&name, x, y) {
+                        Ok(()) => {
+                            links.bookmarks.insert(name);
+                        }
+                        Err(error) => {
+                            notes.add(
+                                ReportKind::ValueClamped,
+                                &Location::default(),
+                                format!("a bookmark is left out, as a PDF cannot hold it: {error}"),
+                            );
+                            links.refused.insert(name);
+                        }
+                    }
                 }
-                Drawn::PushClip(path) => pdf_page.push_clip(path)?,
+                Drawn::Glyphs(run) => pdf_page.draw_glyphs(&run)?,
+                Drawn::Fill(path, color) => pdf_page.fill_path(&path, color)?,
+                Drawn::Stroke(path, stroke) => pdf_page.stroke_path(&path, &stroke)?,
+                Drawn::Image(image, at) => {
+                    pdf_page.draw_image(&image, at.0, at.1, at.2, at.3)?;
+                }
+                Drawn::PushClip(path) => pdf_page.push_clip(&path)?,
                 Drawn::PopClip => pdf_page.pop_clip()?,
             }
         }
@@ -467,6 +586,35 @@ impl Painter<'_, '_, '_> {
                     }
                 }
                 DisplayItem::Image(image) => drawn.extend(self.image(image, flip, page)),
+                DisplayItem::Link {
+                    at,
+                    width,
+                    height,
+                    target,
+                } => {
+                    let bottom = flip(Pt(at.y.0 + height.0));
+                    let mut area = page.clip(at.x.0, bottom.0, width.0, height.0);
+                    if let Some(Some(clip)) = clips.last() {
+                        area = area.and_then(|area| overlap(area, *clip));
+                    }
+                    // A box smaller than a PDF's link would be too small to click.
+                    if let Some(area) =
+                        area.filter(|area| area.2.0.min(area.3.0) >= crate::links::MIN_LINK)
+                    {
+                        drawn.push(Drawn::Link(area, target.clone()));
+                    }
+                }
+                DisplayItem::Destination { at, name } => {
+                    let (x, y) = (at.x.0, flip(at.y).0);
+                    let inside = |(left, bottom, w, h): Bounds| {
+                        (left.0..=left.0 + w.0).contains(&x)
+                            && (bottom.0..=bottom.0 + h.0).contains(&y)
+                    };
+                    let whole = (Pt(0.0), Pt(0.0), Pt(page.width), Pt(page.height));
+                    if inside(whole) && clips.last().is_none_or(|clip| clip.is_some_and(inside)) {
+                        drawn.push(Drawn::Destination(Pt(x), Pt(y), name.clone()));
+                    }
+                }
             }
         }
         drawn
@@ -755,6 +903,10 @@ enum Drawn {
     /// Keeps what follows, up to the next `PopClip`, to a path.
     PushClip(pdf::GraphicsPath),
     PopClip,
+    /// A link, with its box: left, bottom, width and height.
+    Link(Bounds, Arc<LinkTarget>),
+    /// A bookmark's destination: its point and name.
+    Destination(Pt, Pt, Arc<str>),
 }
 
 /// A box on the page: left, bottom, width and height.
@@ -965,6 +1117,360 @@ mod tests {
         assert_eq!(rendered.pdf().page_count(), 3);
     }
 
+    /// The report and the uncompressed PDF of a document of the test font with one
+    /// paragraph on each page: the indent and the inlines `make` gives for each, for the
+    /// paragraphs' style.
+    fn paged(
+        make: impl Fn(crate::ir::RunStyleId) -> Vec<(f64, Vec<crate::ir::Inline>)>,
+    ) -> (LayoutReport, String) {
+        use crate::ir::{
+            Indent, PageSetup, Paragraph, ParagraphProps, RunFonts, RunStyle, Section,
+        };
+
+        let book = crate::testing::book(vec![crate::testing::minimal()]);
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let blocks: Vec<crate::ir::Block> = make(style)
+            .into_iter()
+            .enumerate()
+            .map(|(index, (indent, inlines))| {
+                let props = ParagraphProps::default()
+                    .with_page_break_before(index > 0)
+                    .with_indent(Indent::default().with_start(Pt(indent)));
+                Paragraph::new(style)
+                    .with_props(props)
+                    .with_inlines(inlines)
+                    .into()
+            })
+            .collect();
+        document.add_section(Section::new(PageSetup::new(PageSize::A4)).with_blocks(blocks));
+        let options = RenderOptions::new().with_compression(pdf::Compression::None);
+        let (pdf, report) = render_pdf(&document, &book, &options)
+            .expect("a PDF")
+            .into_parts();
+        let text = String::from_utf8_lossy(&pdf.to_bytes().expect("the bytes")).into_owned();
+        (report, text)
+    }
+
+    #[test]
+    fn links_go_to_uris_and_to_the_first_bookmark_of_a_name_that_a_page_shows() {
+        use crate::ir::{Inline, LinkTarget};
+
+        // The bookmark comes after the link to it, and twice: the first, at the margin of
+        // page 2, is where the link goes, not the second, 30 pt further in on page 3.
+        let (report, text) = paged(|style| {
+            let link = |target: LinkTarget| {
+                [
+                    Inline::link_start(target),
+                    Inline::text("A", style),
+                    Inline::link_end(),
+                ]
+            };
+            let first: Vec<Inline> = [
+                link(LinkTarget::Uri("https://example.com/a b".into())),
+                link(LinkTarget::Bookmark("Later".into())),
+                link(LinkTarget::Bookmark("Missing".into())),
+            ]
+            .concat();
+            let marked = |name: &str| vec![Inline::bookmark(name), Inline::text("A", style)];
+            // Page 3 links back to the bookmark of page 2 too.
+            let mut last = marked("Later");
+            last.extend(link(LinkTarget::Bookmark("Later".into())));
+            vec![(0.0, first), (0.0, marked("Later")), (30.0, last)]
+        });
+        assert_eq!(text.matches("/Subtype /Link").count(), 3, "{text}");
+        // The two links to "Later" share their action, which the file writes once.
+        assert_eq!(
+            text.matches("<< /S /URI /URI (https://example.com/a%20b) >>")
+                .count(),
+            1
+        );
+        assert_eq!(text.matches("<< /S /GoTo /D (Later) >>").count(), 1);
+        // Each link is on its page: two on the first, none on the second, one on the third.
+        let annotations: Vec<usize> = text
+            .split("<< /Type /Page ")
+            .skip(1)
+            .map(|page| {
+                let dictionary = page.split(">>\n").next().unwrap_or("");
+                dictionary.split("/Annots [").nth(1).map_or(0, |links| {
+                    links.split(']').next().unwrap_or("").matches(" R").count()
+                })
+            })
+            .collect();
+        assert_eq!(annotations, [2, 0, 1]);
+        assert!(!text.contains("Missing"));
+        let names = text.split("/Names [").nth(1).expect("the name tree");
+        assert!(
+            names.starts_with("\n(Later) [") && names.contains("/XYZ 72 "),
+            "{names}"
+        );
+        assert_eq!(names.matches("(Later)").count(), 1);
+        let messages: Vec<&str> = report
+            .entries()
+            .iter()
+            .map(|entry| entry.message())
+            .collect();
+        assert!(
+            messages
+                .contains(&"a link to the bookmark \"Missing\", which no page shows, is left out"),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn bookmarks_a_pdf_cannot_hold_are_left_out_and_so_are_the_links_to_them() {
+        use crate::ir::{Inline, LinkTarget};
+
+        // An empty name, and one of 40,000 bytes, more than a PDF string holds: the
+        // bookmarks are left out, and the links to them; the report says why, quoting at
+        // most 64 characters of a name.
+        let long = "x".repeat(40_000);
+        let (report, text) = paged(|style| {
+            let link = |name: &str| {
+                [
+                    Inline::link_start(LinkTarget::Bookmark(name.to_owned())),
+                    Inline::text("A", style),
+                    Inline::link_end(),
+                ]
+            };
+            let mut first: Vec<Inline> = [link(""), link(&long)].concat();
+            first.extend([
+                Inline::bookmark(""),
+                Inline::bookmark(long.as_str()),
+                Inline::text("A", style),
+            ]);
+            vec![(0.0, first)]
+        });
+        assert!(!text.contains("/Subtype /Link"), "{text}");
+        assert!(!text.contains("/Names"));
+        let messages: Vec<&str> = report
+            .entries()
+            .iter()
+            .map(|entry| entry.message())
+            .collect();
+        let refused = messages
+            .iter()
+            .filter(|m| m.starts_with("a bookmark is left out, as a PDF cannot hold it: "))
+            .count();
+        assert_eq!(refused, 2, "{messages:?}");
+        assert!(
+            messages.contains(&"a link to the bookmark \"\", which a PDF cannot hold, is left out")
+        );
+        let quoted = format!(
+            "a link to the bookmark \"{}…\", which a PDF cannot hold, is left out",
+            "x".repeat(64)
+        );
+        assert!(messages.contains(&quoted.as_str()), "{messages:?}");
+        // As values beyond what a PDF holds.
+        assert!(report.entries().iter().all(|entry| {
+            !entry.message().starts_with("a link to the bookmark")
+                || entry.kind() == ReportKind::ValueClamped
+        }));
+    }
+
+    #[test]
+    fn a_page_s_links_are_in_the_order_it_paints_them() {
+        use crate::ir::{Inline, LinkTarget};
+
+        // A link to a bookmark of the next page, then one to a URI: the page lists them in
+        // that order, which viewers move through them in.
+        let (_, text) = paged(|style| {
+            let link = |target: LinkTarget| {
+                [
+                    Inline::link_start(target),
+                    Inline::text("A", style),
+                    Inline::link_end(),
+                ]
+            };
+            let first = [
+                link(LinkTarget::Bookmark("Next".into())),
+                link(LinkTarget::Uri("https://example.com/".into())),
+            ]
+            .concat();
+            vec![
+                (0.0, first),
+                (
+                    0.0,
+                    vec![Inline::bookmark("Next"), Inline::text("A", style)],
+                ),
+            ]
+        });
+        let page = text.split("<< /Type /Page ").nth(1).expect("a page");
+        let annotations = page
+            .split("/Annots [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("the page's links");
+        let objects: Vec<&str> = annotations
+            .split(" 0 R")
+            .map(str::trim)
+            .filter(|number| !number.is_empty())
+            .collect();
+        let kinds: Vec<&str> = objects
+            .iter()
+            .map(|number| {
+                let object = |number: &str| {
+                    let start = format!("\n{number} 0 obj\n");
+                    let object = text.split(start.as_str()).nth(1).expect("the object");
+                    object.split("endobj").next().unwrap_or("").to_owned()
+                };
+                let link = object(number);
+                assert!(link.starts_with("<< /Type /Annot /Subtype /Link"), "{link}");
+                let action = link
+                    .split("/A ")
+                    .nth(1)
+                    .and_then(|rest| rest.split(" 0 R").next())
+                    .expect("the action");
+                if object(action).contains("/S /GoTo /D (Next)") {
+                    "bookmark"
+                } else {
+                    "uri"
+                }
+            })
+            .collect();
+        assert_eq!(kinds, ["bookmark", "uri"]);
+    }
+
+    #[test]
+    fn links_to_bookmarks_wait_for_the_pass_whose_pdf_is_kept() {
+        use crate::ir::{Field, FieldKind, Inline, LinkTarget};
+
+        // A NUMPAGES field lays the pages out twice (#332): the links of the first pass,
+        // whose PDF is dropped, are not added to the second's.
+        let (report, text) = paged(|style| {
+            let first = vec![
+                Inline::Field(Field::new(FieldKind::NumPages, style)),
+                Inline::link_start(LinkTarget::Bookmark("End".into())),
+                Inline::text("A", style),
+            ];
+            vec![
+                (0.0, first),
+                (0.0, vec![Inline::text("A", style)]),
+                (0.0, vec![Inline::bookmark("End"), Inline::text("A", style)]),
+            ]
+        });
+        assert_eq!(text.matches("/Subtype /Link").count(), 1, "{text}");
+        assert_eq!(text.matches("<< /S /GoTo /D (End) >>").count(), 1);
+        assert!(
+            report
+                .entries()
+                .iter()
+                .all(|entry| !entry.message().contains("bookmark")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn links_and_bookmarks_are_kept_to_the_page_and_the_clips_they_are_in() {
+        let target = Arc::new(LinkTarget::Uri("u".into()));
+        let link = |x: f64, y: f64, width: f64, height: f64| DisplayItem::Link {
+            at: Point { x: Pt(x), y: Pt(y) },
+            width: Pt(width),
+            height: Pt(height),
+            target: target.clone(),
+        };
+        let mark = |x: f64, y: f64, name: &str| DisplayItem::Destination {
+            at: Point { x: Pt(x), y: Pt(y) },
+            name: Arc::from(name),
+        };
+        let items = [
+            DisplayItem::PushClip {
+                at: Point {
+                    x: Pt(0.0),
+                    y: Pt(0.0),
+                },
+                width: Pt(100.0),
+                height: Pt(50.0),
+            },
+            // 40 to 60 pt down: cut at the clip's bottom, 50 pt down (150 pt up).
+            link(10.0, 40.0, 20.0, 20.0),
+            // Below the clip.
+            link(10.0, 60.0, 20.0, 20.0),
+            mark(10.0, 40.0, "inside"),
+            mark(10.0, 60.0, "below"),
+            DisplayItem::PopClip,
+            mark(10.0, 60.0, "unclipped"),
+            // Cut at the page's right edge; past it; too narrow to click once cut.
+            link(90.0, 100.0, 20.0, 10.0),
+            link(150.0, 100.0, 20.0, 10.0),
+            link(99.995, 100.0, 20.0, 10.0),
+            mark(150.0, 100.0, "off the page"),
+        ];
+        let book = crate::testing::book(vec![crate::testing::minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let document = Document::default();
+        let mut painter = Painter {
+            document: &document,
+            fonts: &mut fonts,
+            pdf_fonts: HashMap::new(),
+            images: HashMap::new(),
+            pdf: pdf::Document::new(),
+            notes: Notes::default(),
+            links: Links::default(),
+        };
+        let drawn: Vec<String> = painter
+            .drawn(Pt(100.0), Pt(200.0), &items)
+            .iter()
+            .filter_map(|drawn| match drawn {
+                Drawn::Link((x, y, w, h), _) => {
+                    Some(format!("link {} {} {} {}", x.0, y.0, w.0, h.0))
+                }
+                Drawn::Destination(x, y, name) => Some(format!("{name} {} {}", x.0, y.0)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                "link 10 150 20 10",
+                "inside 10 160",
+                "unclipped 10 140",
+                "link 90 90 10 10",
+            ]
+        );
+    }
+
+    #[test]
+    fn links_past_the_most_a_page_holds_are_left_out_and_reported() {
+        let link = DisplayItem::Link {
+            at: Point {
+                x: Pt(10.0),
+                y: Pt(10.0),
+            },
+            width: Pt(5.0),
+            height: Pt(5.0),
+            target: Arc::new(LinkTarget::Uri("u".into())),
+        };
+        let book = crate::testing::book(vec![crate::testing::minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let document = Document::default();
+        let mut painter = Painter {
+            document: &document,
+            fonts: &mut fonts,
+            pdf_fonts: HashMap::new(),
+            images: HashMap::new(),
+            pdf: pdf::Document::new(),
+            notes: Notes::default(),
+            links: Links::default(),
+        };
+        painter
+            .paint(Pt(100.0), Pt(200.0), &vec![link; 8193])
+            .expect("a page");
+        painter.links.add_to(&mut painter.pdf, &mut painter.notes);
+        painter.pdf.set_compression(pdf::Compression::None);
+        let text = String::from_utf8_lossy(&painter.pdf.to_bytes().expect("a PDF")).into_owned();
+        assert_eq!(text.matches("/Subtype /Link").count(), 8191);
+        let messages: Vec<&str> = painter
+            .notes
+            .entries
+            .iter()
+            .map(|(_, _, message)| message.as_str())
+            .collect();
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(messages[0].starts_with("a link is left out, as a PDF cannot hold it: "));
+    }
+
     #[test]
     fn the_painter_notes_each_message_once() {
         // A note can come once for every item drawn: 2,000 lines too thick are noted once,
@@ -983,6 +1489,7 @@ mod tests {
             images: HashMap::new(),
             pdf: pdf::Document::new(),
             notes: Notes::default(),
+            links: Links::default(),
         };
         let items = vec![DisplayItem::Line(thick); 2_000];
         let drawn = painter.drawn(Pt(100.0), Pt(200.0), &items);
@@ -1119,6 +1626,7 @@ mod tests {
             images: HashMap::new(),
             pdf: pdf::Document::new(),
             notes: Notes::default(),
+            links: Links::default(),
         };
         let drawn = painter.drawn(Pt(100.0), Pt(200.0), items);
         // What the painter notes goes into the report, as render_pdf puts it.
@@ -1294,6 +1802,7 @@ mod tests {
             images: HashMap::new(),
             pdf: pdf::Document::new(),
             notes: Notes::default(),
+            links: Links::default(),
         };
         painter.paint(Pt(100.0), Pt(200.0), &items).expect("a page");
         painter.pdf.set_compression(pdf::Compression::None);
@@ -1586,6 +2095,7 @@ mod tests {
             images: HashMap::new(),
             pdf: pdf::Document::new(),
             notes: Notes::default(),
+            links: Links::default(),
         };
         let drawn = painter.drawn(Pt(100.0), Pt(200.0), items);
         (drawn, painter.paint(Pt(100.0), Pt(200.0), items))
@@ -1975,6 +2485,7 @@ mod tests {
             images: HashMap::new(),
             pdf: pdf::Document::new(),
             notes: Notes::default(),
+            links: Links::default(),
         };
         painter.pdf.set_compression(pdf::Compression::None);
         let page = Page {

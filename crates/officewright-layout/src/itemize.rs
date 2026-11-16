@@ -15,8 +15,8 @@ use unicode_script::{Script, UnicodeScript};
 
 use crate::fonts::{Choice, Fonts};
 use crate::ir::{
-    BreakKind, Document, Field, FieldKind, Inline, LevelAlignment, NoteId, NoteKind, NumberFormat,
-    RunFonts, RunStyle, RunStyleId, Suffix, VerticalPosition,
+    BreakKind, Document, Field, FieldKind, Inline, LevelAlignment, LinkTarget, NoteId, NoteKind,
+    NumberFormat, RunFonts, RunStyle, RunStyleId, Suffix, VerticalPosition,
 };
 use crate::lists::Label;
 use crate::notes::NoteNumbers;
@@ -53,6 +53,28 @@ pub(crate) struct Itemized {
     pub(crate) page_fields: Vec<Range<usize>>,
     /// The list label the paragraph starts with, if it is a list item.
     pub(crate) label: Option<LabelItems>,
+    /// The links, in order: none overlaps another, none is empty.
+    pub(crate) links: Vec<LinkSpan>,
+    /// The bookmarks the paragraph starts, in order, each where it starts.
+    pub(crate) bookmarks: Vec<(Mark, Arc<str>)>,
+}
+
+/// A place between the pieces of a paragraph: after `item` items and `text` bytes of the
+/// drawn text. A run of text may go on past it, as a link or bookmark does not cut the
+/// text into runs: a text item is before or after it by the bytes of its text, any other
+/// item by its index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Mark {
+    pub(crate) item: usize,
+    pub(crate) text: usize,
+}
+
+/// A link of a paragraph: what lies between its start and its end goes to its target.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LinkSpan {
+    pub(crate) start: Mark,
+    pub(crate) end: Mark,
+    pub(crate) target: Arc<LinkTarget>,
 }
 
 /// Where a paragraph's list label is among its items.
@@ -204,12 +226,14 @@ pub(crate) fn itemize_with(
         path: Vec::new(),
         languages: Vec::new(),
         shaper: Shaper::with_capacity(0),
+        link: None,
     };
     if let Some(label) = label {
         builder.label(label);
     }
     builder.inlines(inlines);
     builder.flush();
+    builder.end_link();
     builder.out
 }
 
@@ -228,6 +252,8 @@ struct Builder<'d, 'f, 'a> {
     languages: Vec<Arc<str>>,
     /// Shapes the text of a run cut for its length, to find where its clusters start.
     shaper: Shaper,
+    /// The link open, where it started.
+    link: Option<(Mark, Arc<LinkTarget>)>,
 }
 
 /// Whether `ch` is written from right to left. The layout shapes every run from left to right
@@ -310,10 +336,11 @@ fn right_to_left(ch: char) -> bool {
 }
 
 /// Characters that stay with the character before them, in its run and face: joiners,
-/// variation selectors, the soft hyphen, bidirectional controls, marks of the Inherited
-/// script and every mark with a canonical combining class (Hebrew points, Arabic
-/// harakat, viramas). Spacing marks of combining class 0, such as Devanagari vowel
-/// signs, take the font chosen for them.
+/// variation selectors, the soft hyphen (in text, of the same run style only, see
+/// `Builder::character`; as a symbol, of any), bidirectional controls, marks of the
+/// Inherited script and every mark with a canonical combining class (Hebrew points, Arabic
+/// harakat, viramas). Spacing marks of combining class 0, such as Devanagari vowel signs,
+/// take the font chosen for them.
 pub(crate) fn attaches(ch: char) -> bool {
     matches!(
         ch,
@@ -401,12 +428,40 @@ impl Builder<'_, '_, '_> {
             Inline::ContinuationSeparator { style, .. } => {
                 self.item(Item::Separator(true, *style));
             }
+            Inline::LinkStart { target, .. } => {
+                self.end_link();
+                self.link = Some((self.mark(), Arc::new(target.clone())));
+            }
+            Inline::LinkEnd => self.end_link(),
+            Inline::Bookmark { name, .. } => {
+                let mark = self.mark();
+                self.out.bookmarks.push((mark, Arc::from(name.as_str())));
+            }
         }
     }
 
     fn item(&mut self, item: Item) {
         self.flush();
         self.out.items.push(item);
+    }
+
+    /// Where the paragraph is: after the items so far and the text so far, which the
+    /// characters waiting for a run are part of.
+    fn mark(&self) -> Mark {
+        Mark {
+            item: self.out.items.len(),
+            text: self.out.text.len(),
+        }
+    }
+
+    /// Ends the link open, if there is one, here; one that holds nothing is left out.
+    fn end_link(&mut self) {
+        if let Some((start, target)) = self.link.take() {
+            let end = self.mark();
+            if end != start {
+                self.out.links.push(LinkSpan { start, end, target });
+            }
+        }
     }
 
     /// Reports, once in the document, a feature the layout leaves out or shows otherwise.
@@ -574,7 +629,8 @@ impl Builder<'_, '_, '_> {
             for ch in codes.into_iter().flatten().filter_map(char::from_u32) {
                 if self.fonts.has_glyph(face, ch) {
                     // A soft hyphen of a font that is not a symbol font stays with the
-                    // character before it, as in text.
+                    // character before it, whatever the symbol's run style: no reference
+                    // shows one of another size than the text before it.
                     if !self.attach(ch, &source) {
                         let size = drawn_size(&style, style.size(), false);
                         let look = self.look(id, &style, choice, size, style.size(), Slot::Ascii);
@@ -678,7 +734,15 @@ impl Builder<'_, '_, '_> {
         style: &RunStyle,
         small: bool,
     ) {
-        if self.attach(ch, &source) {
+        // A soft hyphen of another run than the character before it keeps its own font
+        // and size, which the hyphen drawn at a break there takes (E-soft-hyphen-font:
+        // Word draws it in Noto Sans 20 pt after letters in Calibri 11 pt).
+        let own_run = ch == '\u{00AD}'
+            && self
+                .pending
+                .last()
+                .is_some_and(|previous| previous.look.style != id);
+        if !own_run && self.attach(ch, &source) {
             return;
         }
         let slot = slot(ch, style);
@@ -1010,8 +1074,13 @@ fn inline_style(inline: &Inline) -> Option<RunStyleId> {
         | Inline::NoteNumber { style, .. }
         | Inline::Separator { style, .. }
         | Inline::ContinuationSeparator { style, .. } => Some(*style),
-        // A field's result has styles of its own; objects have none.
-        Inline::Field(_) | Inline::Object(_) | Inline::Anchored(_) => None,
+        // A field's result has styles of its own; objects and marks have none.
+        Inline::Field(_)
+        | Inline::Object(_)
+        | Inline::Anchored(_)
+        | Inline::LinkStart { .. }
+        | Inline::LinkEnd
+        | Inline::Bookmark { .. } => None,
     }
 }
 
@@ -1572,15 +1641,62 @@ mod tests {
         let (itemized, _, _) = setup.run(&[
             Inline::text("A", style),
             Inline::text("\u{301}\u{200D}", other),
-            Inline::soft_hyphen(other),
             Inline::text("A", other),
         ]);
         assert_eq!(
             runs(&itemized),
             [
-                ("A\u{301}\u{200D}\u{AD}", "A\u{301}\u{200D}\u{AD}", 10.0),
+                ("A\u{301}\u{200D}", "A\u{301}\u{200D}", 10.0),
                 ("A", "A", 20.0)
             ]
+        );
+    }
+
+    #[test]
+    fn a_soft_hyphen_of_the_same_run_style_stays_in_the_fallback_face_before_it() {
+        // Lite lacks Á, which Zzzz draws; the soft hyphen after it goes with it.
+        let mut setup = Setup::new(vec![
+            renamed(minimal(), "Officewright Zzzz"),
+            without_a_acute("Officewright Lite"),
+        ]);
+        let lite = setup.style(plain("Officewright Lite"));
+        let (itemized, _, families) = setup.run(&[
+            Inline::text("\u{C1}", lite),
+            Inline::soft_hyphen(lite),
+            Inline::text("A", lite),
+        ]);
+        assert_eq!(
+            runs(&itemized),
+            [("\u{C1}\u{AD}", "\u{C1}\u{AD}", 10.0), ("A", "A", 10.0)]
+        );
+        assert_eq!(families, ["Officewright Zzzz", "Officewright Lite"]);
+    }
+
+    #[test]
+    fn keeps_a_soft_hyphen_with_the_character_before_it_only_in_the_same_run_style() {
+        let mut setup = Setup::new(vec![minimal()]);
+        let style = setup.style(plain(TEST));
+        let other = setup.style(plain(TEST).with_size(Pt(20.0)));
+        // Of the style of the A before it: in its run.
+        let (itemized, _, _) = setup.run(&[
+            Inline::text("A", style),
+            Inline::soft_hyphen(style),
+            Inline::text("A", other),
+        ]);
+        assert_eq!(
+            runs(&itemized),
+            [("A\u{AD}", "A\u{AD}", 10.0), ("A", "A", 20.0)]
+        );
+        // Of another style, after a mark that goes with the A: in its own size, as Word
+        // draws the hyphen of E-soft-hyphen-font, and here with the A after it.
+        let (itemized, _, _) = setup.run(&[
+            Inline::text("A\u{301}", style),
+            Inline::soft_hyphen(other),
+            Inline::text("A", other),
+        ]);
+        assert_eq!(
+            runs(&itemized),
+            [("A\u{301}", "A\u{301}", 10.0), ("\u{AD}A", "\u{AD}A", 20.0)]
         );
     }
 
@@ -1879,7 +1995,7 @@ mod tests {
             Inline::symbol("Officewright Hyph", 0x00AD, other),
             Inline::text("A", style),
         ]);
-        // In the run, face and size of the A before it, as a soft hyphen of text is.
+        // In the run, face and size of the A before it, whatever the symbol's size.
         assert_eq!(runs(&itemized), [("A\u{AD}A", "A\u{AD}A", 10.0)]);
         assert_eq!(families, [TEST]);
         assert!(report.is_empty(), "{report:?}");
