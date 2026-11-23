@@ -535,39 +535,50 @@ impl Formats<'_> {
 
     /// Whether, in a cell, the left justification that the default paragraph style gives
     /// gives way to the table style's: when the setting
-    /// `overrideTableStyleFontSizeAndJustification` ([MS-DOCX] 2.3.1) is off, written so or,
-    /// below compatibility mode 15, not written.
+    /// `overrideTableStyleFontSizeAndJustification` ([MS-DOCX] 2.3.1) is off.
     fn table_style_wins(&mut self) -> bool {
         self.table_style_override() != TableStyleWins::Never
     }
 
     /// The sizes that, in a cell, the default paragraph style gives way with to the table
-    /// style's. None with the setting `overrideTableStyleFontSizeAndJustification` on.
+    /// style's: none with the setting `overrideTableStyleFontSizeAndJustification` on,
+    /// which it is from compatibility mode 15 when it is not written.
     ///
-    /// Not written below compatibility mode 15, only 12 pt. Word deviates here from
-    /// [MS-DOCX] 2.3.1, which makes off the default and lets 11 or 12 pt give way: Word
-    /// draws the cells of word-rules/E-table-style-size-12pt-14.docx and
+    /// With the setting off, only 12 pt. Word deviates here from [MS-DOCX] 2.3.1, which
+    /// lets 11 or 12 pt give way with the setting off: in mode 14, Word draws the cells of
+    /// word-rules/E-table-style-size-12pt-14.docx and
     /// E-table-style-defaults-size-13-12-14.docx in the table style's 14 pt over Normal's
     /// 12 pt, and those of E-table-style-defaults-size-14.docx,
-    /// E-table-style-defaults-size-10-11-14.docx and
-    /// E-table-style-defaults-size-right-14.docx in Normal's 11 pt (#506).
-    ///
-    /// Written off, 11 and 12 pt, as [MS-DOCX] 2.3.1 says. That is our choice: no render
-    /// of Word shows the setting written off yet (#532), and the renders without it
-    /// already depart from the specification's 11 pt.
+    /// E-table-style-defaults-size-10-11-14.docx, E-table-style-defaults-size-right-14.docx
+    /// and E-table-style-override-off-11pt-14.docx, the last with the setting written 0,
+    /// in Normal's 11 pt (#506, #595). From mode 15, with the setting written off, no
+    /// render shows what Word does (see [`table_style_override`](Self::table_style_override)):
+    /// the same, our choice.
     fn sizes_giving_way(&mut self) -> &'static [Pt] {
         match self.table_style_override() {
             TableStyleWins::Never => &[],
-            TableStyleWins::Off => &[Pt(11.0), Pt(12.0)],
-            TableStyleWins::NotWritten => &[Pt(12.0)],
+            TableStyleWins::Off => &[Pt(12.0)],
         }
     }
 
     /// What the setting `overrideTableStyleFontSizeAndJustification` gives, once worked
-    /// out: on, off, or not written below compatibility mode 15, a state of its own
-    /// ([`sizes_giving_way`](Self::sizes_giving_way)). Not written from mode 15, it is on:
-    /// Word writes it on when it saves such a document (E-table-style-size-12pt-none.docx
-    /// and the copy Word saved of it), and draws Normal's 12 pt.
+    /// out: on or off. Written, it is on with an on value and off with any other; of
+    /// several, the last counts. Not written, it is on from compatibility mode 15 and off
+    /// below. Written without the value it requires, it counts as not written: our choice,
+    /// no render shows one.
+    ///
+    /// Word writes this setting, like the other settings of its group
+    /// (`enableOpenTypeFeatures`, `doNotFlipMirrorIndents`,
+    /// `differentiateMultirowTableHeaders`), only as 1: no copy Word saved in
+    /// tests/corpus/resaved writes one of them 0, and Word left written 0s of
+    /// `enableOpenTypeFeatures` and `differentiateMultirowTableHeaders` out of its copies
+    /// too (#344). It writes this one on when it saves a document of mode 15 that does not
+    /// write it (word-rules/E-table-style-size-12pt-none.docx and the copy Word saved of
+    /// it), and it left the setting written 0 out of the copies it saved of
+    /// E-table-style-override-off-11pt.docx and -12pt.docx, also of mode 15: Word reads
+    /// the 0 as off, not as not written (#595). Those copies, and so Word's references of
+    /// the two documents, which are exported from them, read as on, so they do not show
+    /// how Word lays out a setting written off from mode 15.
     fn table_style_override(&mut self) -> TableStyleWins {
         if let Some(wins) = self.table_style_wins {
             return wins;
@@ -578,17 +589,15 @@ impl Formats<'_> {
             .iter()
             .rev()
             .find(|setting| setting.name() == "overrideTableStyleFontSizeAndJustification")
-            .and_then(|setting| setting.value())
-            .map(|value| matches!(value.trim(), "1" | "true" | "on"));
-        let wins = match written {
-            Some(true) => TableStyleWins::Never,
-            Some(false) => TableStyleWins::Off,
-            None if settings.effective_compatibility_mode()
-                >= super::CompatibilityMode::WORD_2013 =>
-            {
-                TableStyleWins::Never
-            }
-            None => TableStyleWins::NotWritten,
+            .and_then(|setting| setting.value());
+        let on = match written {
+            Some(value) => matches!(value.trim(), "1" | "true" | "on"),
+            None => settings.effective_compatibility_mode() >= super::CompatibilityMode::WORD_2013,
+        };
+        let wins = if on {
+            TableStyleWins::Never
+        } else {
+            TableStyleWins::Off
         };
         self.table_style_wins = Some(wins);
         wins
@@ -599,12 +608,10 @@ impl Formats<'_> {
 /// `overrideTableStyleFontSizeAndJustification`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TableStyleWins {
-    /// Nothing: the setting is on, written so or, from compatibility mode 15, not written.
+    /// Nothing: the setting is on.
     Never,
-    /// The setting is written off.
+    /// Normal's 12 pt and left justification: the setting is off.
     Off,
-    /// The setting is not written, below compatibility mode 15.
-    NotWritten,
 }
 
 /// How many combinations of a paragraph style and a list level the resolver keeps at a

@@ -112,7 +112,7 @@ fn walk(document: &Document, children: &[u32], out: &mut String) {
                     run(content, out);
                 }
             }
-            Kind::Other(_) => {}
+            Kind::Other(_) | Kind::BookmarkStart(_) | Kind::BookmarkEnd(_) => {}
             Kind::Table { .. }
             | Kind::Cell
             | Kind::ContentControl { .. }

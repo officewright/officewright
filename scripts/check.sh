@@ -235,8 +235,9 @@ if [ "$os" != windows ]; then
 		OW_EMBED_REPORT=${CARGO_TARGET_DIR:-target}/debug/examples/embed_report \
 		"$python" -B -m unittest discover -s tests/pdf-output -v
 
-	step "reference font embedding (qpdf, pdffonts, pdftoppm)"
-	# corpus-import.py embeds the fonts Word did not embed before rasterizing its PDFs.
+	step "reference font embedding and links (qpdf, pdffonts, pdftoppm)"
+	# corpus-import.py embeds the fonts Word did not embed before rasterizing its PDFs, and
+	# reads their links from qpdf's JSON.
 	"$python" -B -m unittest discover -s tests/corpus-tools/poppler -v
 fi
 

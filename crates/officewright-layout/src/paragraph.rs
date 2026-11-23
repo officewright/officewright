@@ -176,6 +176,8 @@ fn lay_out_paragraph(
         location,
         cell,
         around,
+        // Only a text box's paragraphs are laid out without their boxes.
+        in_box: !boxes,
     };
     let lines = Breaker::new(input, &itemized, &shaped, fonts, shaper).lines();
     // Word hyphenates only where a line wraps, in a paragraph that does not suppress it, in a
@@ -360,6 +362,7 @@ pub(crate) fn content_widths(
         // Widths only: no line's height is read.
         cell: true,
         around: None,
+        in_box: false,
     };
     let mut breaker = Breaker::new(input, &itemized, &shaped, fonts, shaper);
     let min = breaker.min_width();
@@ -499,6 +502,46 @@ mod tests {
         let long = " ".repeat(5000);
         assert!(lay_out_text("A") > 0);
         assert_eq!(lay_out_text(&long), 0);
+    }
+
+    #[test]
+    fn a_text_box_s_paragraph_takes_no_stop_past_the_end_before_mode_15() {
+        use crate::ir::{CompatMode, Inline, RunFonts, RunStyle, TabStop};
+        use crate::testing::{book, minimal};
+        // In mode 14 the text after a tab to the paragraph's own stop past the end goes to
+        // the stop in the body, and wraps in a text box (`Breaker::past_end`): a box's
+        // paragraphs are those laid out without their boxes.
+        let book = book(vec![minimal()]);
+        let mut document =
+            Document::new(DocumentSettings::default().with_compat_mode(CompatMode::Word2010));
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let paragraph = Paragraph::new(style)
+            .with_props(
+                ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(50.0))]),
+            )
+            .with_inlines([
+                Inline::text("A", style),
+                Inline::tab(style),
+                Inline::text("A", style),
+            ]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let location = Location::default();
+        for (boxes, lines) in [(true, 1), (false, 2)] {
+            let layout = lay_out_paragraph(
+                &document,
+                (&paragraph, None),
+                Pt(30.0),
+                (&mut fonts, &mut shaper),
+                (&location, None),
+                (boxes, false, None),
+            );
+            assert_eq!(layout.lines.len(), lines, "boxes {boxes}");
+        }
     }
 
     #[test]

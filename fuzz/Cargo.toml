@@ -35,6 +35,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "field_instruction"
+path = "fuzz_targets/field_instruction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "font_parse"
 path = "fuzz_targets/font_parse.rs"
 test = false
