@@ -85,7 +85,7 @@ The main things not laid out yet:
   rows of such a table are not repeated);
 - list numbers in formats such as Hebrew letters or Chinese counting, which are written in
   decimal, and picture bullets, for which the level's text stands in;
-- endnotes and the notes of references in table cells;
+- endnotes, and the notes of references in tables nested in table cells;
 - text wrapping around floating pictures and text boxes (it runs over or under them),
   floating pictures and text boxes in table cells, and shapes, charts, SmartArt, VML
   shapes other than pictures and text boxes, and equations;
