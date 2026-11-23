@@ -60,7 +60,9 @@ impl BreakMap {
         // whole, form-ec-state-aid-notification-de its URLs). Before Chinese, Japanese and
         // the other scripts `spaced` leaves out, UAX #14's breaks stay, as no reference shows
         // them. That no line ends after a solidus before an inline object or a dash either,
-        // nor with word wrap off, is a hypothesis until a Word render (#616).
+        // nor with word wrap off, nor before the characters `spaced` counts by their script
+        // though they stand among CJK text (brackets such as «「», fullwidth letters, Hangul),
+        // is a hypothesis until a Word render (#616).
         breaks.retain(|&(at, opportunity)| {
             let after_solidus = text.get(..at).is_some_and(|before| before.ends_with('/'));
             let next = text.get(at..).and_then(|after| after.chars().next());
