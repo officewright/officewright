@@ -12921,6 +12921,69 @@ mod tests {
     }
 
     #[test]
+    fn a_note_is_weighed_against_no_note_of_a_line_widow_control_keeps_off_the_piece() {
+        use crate::ir::NotePosition;
+        // A row of two cells at the top of the page (re-check of #577): the first of three
+        // lines, its line 2 referencing a note of one line; the second of five lines, its
+        // line 2 referencing a note of five. The first cell's widow control (or its lines
+        // kept together) lets no page end inside its three lines, so a piece ending under
+        // the second cell's line 2 takes nothing of it, and leaves the second note room to
+        // fit whole: page 1 takes the second cell's lines 1 and 2 and the second note
+        // whole, page 2 the rest and the first note. So with widow control in both cells.
+        let off = || spacing(0.0, 0.0).with_widow_control(false);
+        let cases = [
+            ("widow control", spacing(0.0, 0.0), off()),
+            ("lines kept together", off().with_keep_lines(true), off()),
+            (
+                "widow control in both",
+                spacing(0.0, 0.0),
+                spacing(0.0, 0.0),
+            ),
+        ];
+        for (case, first, second) in cases {
+            for mode in [CompatMode::Word2013, CompatMode::Word2010] {
+                let document = with_notes_in(
+                    mode,
+                    setup(),
+                    NotePosition::PageBottom,
+                    Inline::separator,
+                    |document, style, mark| {
+                        let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                        let long = footnote(document, (style, mark), 5, spacing(0.0, 0.0));
+                        let row = Row::default().with_cells([
+                            Cell::default().with_blocks([referencing(
+                                style,
+                                (1, 1),
+                                &[short],
+                                first.clone(),
+                            )]),
+                            Cell::default().with_blocks([referencing(
+                                style,
+                                (1, 3),
+                                &[long],
+                                second.clone(),
+                            )]),
+                        ]);
+                        vec![table_with(vec![row], 0.0).into()]
+                    },
+                );
+                let (pages, _) = noted_pages(&document);
+                assert_eq!(pages.len(), 2, "{case}, {mode:?}: {pages:?}");
+                assert_eq!(
+                    texts_and_notes(&pages, 0),
+                    (2, 5),
+                    "{case}, {mode:?}: {pages:?}"
+                );
+                assert_eq!(
+                    texts_and_notes(&pages, 1),
+                    (6, 1),
+                    "{case}, {mode:?}: {pages:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_row_word_could_not_hold_goes_whole_with_its_note_cut() {
         use crate::ir::NotePosition;
         // A line, then a row of 64 cells, more than Word holds, which no page cuts: its
@@ -13577,19 +13640,22 @@ mod tests {
         use crate::ir::{Note, NoteKind};
         const NUMBERED: &str = "notes that start their numbers again on each page but that no \
                                 page lays out are numbered through their section";
-        // A footnote of a table cell, which no page lays out yet, beside one of the body
-        // (review of #603): the cell's keeps its number through the section, and that is
-        // reported.
+        // A footnote of a table nested in a table cell, which no page lays out yet, beside
+        // one of the body (review of #603): the nested table's keeps its number through
+        // the section, and that is reported.
         let document = numbered_on_each_page(false, |document, style, mark| {
             let notes = [(); 2].map(|()| footnote(document, (style, mark), 1, spacing(0.0, 0.0)));
-            let row = Row::default().with_cells([Cell::default().with_blocks([referencing(
-                style,
-                (0, 0),
-                &[notes[0]],
-                spacing(0.0, 0.0),
-            )])]);
+            let cell = |block: Block| -> Block {
+                let row = Row::default().with_cells([Cell::default().with_blocks([block])]);
+                table_with(vec![row], 0.0).into()
+            };
             vec![
-                table_with(vec![row], 0.0).into(),
+                cell(cell(referencing(
+                    style,
+                    (0, 0),
+                    &[notes[0]],
+                    spacing(0.0, 0.0),
+                ))),
                 referencing(style, (0, 0), &[notes[1]], spacing(0.0, 0.0)),
             ]
         });

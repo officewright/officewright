@@ -914,12 +914,14 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// The piece takes the lines that fit above their notes, as a paragraph does
     /// (`pages::footnotes`' rules for a paragraph's lines): the row is cut where the notes
     /// of the lines it takes start on the page; a note is cut only where it does not fit
-    /// whole under the line that references it, after the notes of the lines of every cell
-    /// that end above that line's bottom (a band no page cuts under a line, of several
-    /// rows, a row of exact height or a row Word could not hold, `Prepared::cuts`, goes
-    /// whole, its notes cut where they do not fit under it), and then the piece takes
-    /// nothing of that note's cell after its paragraph (a later paragraph or a nested
-    /// table), nor, in Word 2013 and later, a line below the cut note's line that
+    /// whole under the line that references it, after the notes of the lines that a piece
+    /// ending right under that line takes in every cell: those that need no more room,
+    /// their cells' margins and the borders below included, where a page may end in their
+    /// paragraphs (widow control, lines kept together); a band no page cuts under a line
+    /// (of several rows, a row of exact height or a row Word could not hold,
+    /// `Prepared::cuts`) goes whole, its notes cut where they do not fit under it; and
+    /// then the piece takes nothing of that note's cell after its paragraph (a later
+    /// paragraph or a nested table), nor, in Word 2013 and later, a line below the cut note's line that
     /// references a note after it, which goes wholly to the next page; the line of the cut
     /// note, and the lines of other cells beside it, keep the notes they reference after
     /// it, which go wholly to the next page. Where that leaves out a line whose note
@@ -1141,18 +1143,20 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             // as in a paragraph: where it would end whole in the room under that line, the
             // piece takes no more, wherever a page may end and whatever height the row has.
             if let Some(under) = line.room {
-                // The notes up to the cut one of the lines a piece ending under that line
-                // takes: those that end above its bottom, in every cell, their cells'
-                // margins and the borders below included, as the piece's own room does.
+                // The notes up to the cut one of the lines that the piece ending right
+                // under that line takes, in every cell: the piece of that room, which takes
+                // a cell's lines only where a page may end in its paragraphs (widow control,
+                // lines kept together), with the cut note.
+                let cut_note = referenced.get(cut).map(|&(note, _)| note);
+                let taken: HashSet<NoteId> = prepared
+                    .trial(laid, Some(under), flags)
+                    .map(|piece| self.note_ids(&piece.lines).into_iter().collect())
+                    .unwrap_or_default();
                 let earlier = referenced
                     .iter()
                     .take(cut + 1)
-                    .filter(|&&(_, first)| {
-                        trial.lines.get(first).is_some_and(|other| {
-                            other.room.is_some_and(|own| own <= under + EPSILON)
-                        })
-                    })
-                    .map(|&(note, _)| note);
+                    .map(|&(note, _)| note)
+                    .filter(|note| Some(*note) == cut_note || taken.contains(note));
                 if let Some(plan) = self.notes_plan(earlier.collect(), bottom - under, section)? {
                     if plan.notes.last().is_some_and(|placed| placed.ends()) {
                         return Ok(None);
