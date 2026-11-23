@@ -11,7 +11,7 @@ use crate::ir::{
     Block, CompatFlag, Document, Inline, ObjectContent, Paragraph, ParagraphProps, Size, TextBox,
 };
 use crate::itemize::{FieldValues, Item, Itemized, itemize_with, shape_runs};
-use crate::lines::{Breaker, Input, Line, LineEnd, inline_at};
+use crate::lines::{Breaker, Input, Line, inline_at};
 use crate::lists::{Counters, Label};
 use crate::pages::report_list_formats;
 use crate::report::{Location, ReportKind};
@@ -184,7 +184,7 @@ fn lay_out_paragraph(
     // whose lines all end otherwise, gets none.
     if document.settings().hyphenation().auto()
         && !paragraph.props().suppress_auto_hyphens()
-        && lines.iter().any(|line| line.end == LineEnd::Wrap)
+        && lines.iter().any(Line::wraps)
     {
         fonts.report_once(
             ReportKind::FeatureUnsupported,

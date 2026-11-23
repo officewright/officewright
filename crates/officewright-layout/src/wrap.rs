@@ -22,17 +22,39 @@
 //! top, where the first two lines stay above it, and 06 from the page's top), even where
 //! the object leaves room beside it (case 03, a picture of 72 pt centred).
 //!
-//! Hypotheses until Word renders rule documents for them: text goes on one side of an
-//! object only (Word fills both, case 03 of `E-wrap-square`, which is reported), the larger
-//! one, the left where both are as large; a side narrower than [`LEAST_ROOM`] takes no
-//! text, and a line with no wider room goes below the band that ends first, as below an
-//! object wrapped top and bottom; the paragraph's indents still hold beside an object, the
-//! object's edge narrowing a line only where it is past the indent; tight and through
-//! wrapping keep text from the frame, as square wrapping does (the polygon of a whole
-//! picture gives the same lines, `E-wrap-tight` case 01 and `E-wrap-textbox` case 03, but
-//! other polygons do not, which is reported); and the effects an object draws beyond its
-//! frame at the left and right keep text out as far as they reach, as those above and below
-//! do.
+//! Where an object lets text go on both sides and both leave it room, a line takes both, at
+//! the same height: its text fills the part left of the object, goes on in the part right of
+//! it, and from there on to the next line's left part. On page 2 of `E-wrap-square`, case
+//! 03 centres a picture of 108 pt in the column from 72 to 523.3 pt, its frame from 243.65
+//! to 351.65: the first line is "Text 01 of case 03 wraps around the", from 72 to 234.2,
+//! ending before 234.65, `distL` (9 pt) before the frame, and "object. Text 02 of case 03
+//! wraps", from 360.7, `distR` past it, the tops of the words of both at 87.6 and their
+//! text at the start, as the paragraph aligns it; the next line starts with "around the
+//! object." on the left. `E-wrap-tight` case 07 (tight around a U open at the top, whose
+//! outline is as wide as the frame), `E-wrap-vml` case 02 and `E-wrap-textbox` case 02 (a
+//! box of 180 pt, the parts from 72 and from 396.7) do the same, and so do cases 03 and 05
+//! of `E-vml-pictures`, pictures of 72 pt whatever side has more room: 144 pt from the
+//! margin, more on the right (the right part from 297.1), and 300 pt from the page's edge,
+//! more on the left (the right part from 381.1).
+//!
+//! Hypotheses until Word renders rule documents for them: the parts of a line are one line,
+//! with one top, baseline and height, those of all their text (Word's references have text
+//! of one size only), and widow and orphan control count it as one; each part is aligned
+//! and justified as a line of its own, the paragraph's last part not justified, the first
+//! line's indent and list label going in its first part, and tab stops measured from the
+//! column's start edge as on any line; a part is filled by first fit as a line is, so that
+//! a word wider than it is cut between its characters and goes on in the next part, and a
+//! character wider than it reaches past its end, which is reported; a break of any kind or
+//! the paragraph's end ends the line in the part it is in, and the parts after it stay
+//! empty; where several objects meet a line, it takes every part they leave it, from
+//! left to right; a side narrower than [`LEAST_ROOM`] takes no text, and a line with no
+//! wider room goes below the band that ends first, as below an object wrapped top and
+//! bottom; the paragraph's indents still hold beside an object, the object's edge narrowing
+//! a line only where it is past the indent; tight and through wrapping keep text from the
+//! frame, as square wrapping does (the polygon of a whole picture gives the same lines,
+//! `E-wrap-tight` case 01 and `E-wrap-textbox` case 03, but other polygons do not, which is
+//! reported); and the effects an object draws beyond its frame at the left and right keep
+//! text out as far as they reach, as those above and below do.
 
 use officewright_core::Pt;
 
@@ -45,8 +67,8 @@ const EPSILON: f64 = 1e-6;
 /// What the lines of a paragraph go around: the floating objects of its page.
 pub(crate) struct Around<'a> {
     /// The first lines as laid out before, which stay as they are: the room above each,
-    /// and the part of the column it had (`Line::above`, `Line::room`).
-    pub(crate) kept: Vec<(Pt, Option<(Pt, Pt)>)>,
+    /// and the parts of the column it had (`Line::above`, `Line::parts`).
+    pub(crate) kept: Vec<(Pt, Vec<(Pt, Pt)>)>,
     /// What the floating objects keep text out of.
     pub(crate) exclusions: &'a [Exclusion],
     /// Where the column's start edge is across the page, and the top of the first line
@@ -105,8 +127,8 @@ impl Exclusion {
     }
 
     /// The parts of `span`, from the start of a line to its end across the page, where text
-    /// may go beside the object, given the line's `edges`, by which the larger side is
-    /// measured.
+    /// may go beside the object, from left to right, given the line's `edges`, by which the
+    /// larger side is measured.
     fn beside(&self, span: (f64, f64), (start, end): (f64, f64), out: &mut Vec<(f64, f64)>) {
         let (left, right) = match self.side {
             None => (false, false),
@@ -129,19 +151,18 @@ impl Exclusion {
 }
 
 /// Where a line goes around floating objects: how far below the place it would start it
-/// goes, the part of the page across it takes where that is narrower than its edges, and
-/// whether text had room on more than one side.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// goes, and the parts of the page across it takes, from left to right, where they are
+/// narrower than its edges; none where it keeps its edges.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Room {
     pub(crate) above: f64,
-    pub(crate) span: Option<(f64, f64)>,
-    pub(crate) sides: bool,
+    pub(crate) spans: Vec<(f64, f64)>,
 }
 
 /// The room of a line `height` high whose top would be at `y` down the page, between
-/// `edges`, its start and end across the page, beside `exclusions`. Where the objects it
-/// meets leave it no side at least [`LEAST_ROOM`] wide, it goes below the band that ends
-/// first among them, and is measured there again.
+/// `edges`, its start and end across the page, beside `exclusions`: every part at least
+/// [`LEAST_ROOM`] wide that the objects it meets leave it. Where they leave it none, it
+/// goes below the band that ends first among them, and is measured there again.
 pub(crate) fn room(exclusions: &[Exclusion], y: f64, height: f64, edges: (f64, f64)) -> Room {
     let mut top = y;
     let mut spans = Vec::new();
@@ -165,18 +186,13 @@ pub(crate) fn room(exclusions: &[Exclusion], y: f64, height: f64, edges: (f64, f
             spans = next;
         }
         spans.retain(|&(from, to)| to - from >= LEAST_ROOM);
-        // The widest, the first of those as wide.
-        let mut widest: Option<(f64, f64)> = None;
-        for &(from, to) in &spans {
-            if widest.is_none_or(|(a, b)| to - from > b - a) {
-                widest = Some((from, to));
+        if !spans.is_empty() {
+            if spans == [edges] {
+                spans.clear();
             }
-        }
-        if let Some(span) = widest {
             return Room {
                 above: top - y,
-                span: (span != edges).then_some(span),
-                sides: spans.len() > 1,
+                spans,
             };
         }
         let below = met
@@ -192,8 +208,7 @@ pub(crate) fn room(exclusions: &[Exclusion], y: f64, height: f64, edges: (f64, f
     }
     Room {
         above: top - y,
-        span: None,
-        sides: false,
+        spans: Vec::new(),
     }
 }
 
@@ -266,6 +281,22 @@ mod tests {
         assert!(!band.meets(200.0 - 1e-9, 210.0));
     }
 
+    /// The room of a line that keeps its edges.
+    fn free() -> Room {
+        Room {
+            above: 0.0,
+            spans: Vec::new(),
+        }
+    }
+
+    /// The room of a line that takes `spans` where it would start.
+    fn beside(spans: &[(f64, f64)]) -> Room {
+        Room {
+            above: 0.0,
+            spans: spans.to_vec(),
+        }
+    }
+
     #[test]
     fn a_line_goes_on_the_side_its_object_allows_with_room_for_it() {
         // A column from 72 to 523, an object from 263 to 389 with its distances.
@@ -278,66 +309,62 @@ mod tests {
                 edges,
             )
         };
-        let left = Room {
-            above: 0.0,
-            span: Some((72.0, 263.0)),
-            sides: false,
-        };
-        let right = Room {
-            span: Some((389.0, 523.0)),
-            ..left
-        };
-        assert_eq!(at(WrapSide::Left), left);
-        assert_eq!(at(WrapSide::Right), right);
-        assert_eq!(at(WrapSide::Largest), left);
-        assert_eq!(
-            at(WrapSide::BothSides),
-            Room {
-                sides: true,
-                ..left
-            }
-        );
+        let (left, right) = ((72.0, 263.0), (389.0, 523.0));
+        assert_eq!(at(WrapSide::Left), beside(&[left]));
+        assert_eq!(at(WrapSide::Right), beside(&[right]));
+        assert_eq!(at(WrapSide::Largest), beside(&[left]));
+        assert_eq!(at(WrapSide::BothSides), beside(&[left, right]));
         // Below the band, or above it, the line keeps its edges.
-        let free = Room {
-            above: 0.0,
-            span: None,
-            sides: false,
-        };
         let band = [square(WrapSide::Left, (263.0, 389.0), (0.0, 100.0))];
-        assert_eq!(room(&band, 100.0, 12.0, edges), free);
-        assert_eq!(room(&band, -12.0, 12.0, edges), free);
+        assert_eq!(room(&band, 100.0, 12.0, edges), free());
+        assert_eq!(room(&band, -12.0, 12.0, edges), free());
         // An object outside the line's edges narrows nothing.
         let margin = [square(WrapSide::BothSides, (0.0, 60.0), (0.0, 100.0))];
-        assert_eq!(room(&margin, 10.0, 12.0, edges), free);
+        assert_eq!(room(&margin, 10.0, 12.0, edges), free());
     }
 
     #[test]
-    fn a_line_beside_an_object_with_two_sides_as_wide_goes_on_the_left() {
-        // A column from 72 to 524, an object from 248 to 348 with its distances: 176 pt on
-        // each side. Where the larger side is taken, or both sides allow text, the left
-        // goes first.
-        let edges = (72.0, 524.0);
-        let at = |side| {
-            room(
-                &[square(side, (248.0, 348.0), (0.0, 100.0))],
-                10.0,
-                12.0,
-                edges,
-            )
-        };
-        let left = Room {
-            above: 0.0,
-            span: Some((72.0, 248.0)),
-            sides: false,
-        };
-        assert_eq!(at(WrapSide::Largest), left);
-        assert_eq!(
-            at(WrapSide::BothSides),
-            Room {
-                sides: true,
-                ..left
-            }
+    fn a_line_beside_an_object_with_room_on_both_sides_takes_both() {
+        // E-wrap-square case 03: a picture of 108 pt centred in the column from 72 to
+        // 523.3, its frame from 243.65 to 351.65, 9 pt from the text on each side. Word's
+        // lines beside it have a part from 72 that ends at 234.17, before 234.65, and one
+        // from 360.67.
+        let edges = (72.0, 523.3);
+        let picture = square(WrapSide::BothSides, (234.65, 360.65), (85.44, 193.44));
+        let parts = room(&[picture], 85.44, 13.44, edges);
+        assert_eq!(parts, beside(&[(72.0, 234.65), (360.65, 523.3)]));
+        // A side narrower than the least room takes no text: the line takes the other.
+        let near = square(
+            WrapSide::BothSides,
+            (72.0 + LEAST_ROOM - 1.0, 360.65),
+            (85.44, 193.44),
         );
+        assert_eq!(
+            room(&[near], 85.44, 13.44, edges),
+            beside(&[(360.65, 523.3)])
+        );
+        // Two objects leave three parts, from left to right; the one only on the left of
+        // the second leaves none right of it.
+        let first = square(WrapSide::BothSides, (150.0, 200.0), (0.0, 100.0));
+        let second = square(WrapSide::BothSides, (300.0, 350.0), (0.0, 100.0));
+        assert_eq!(
+            room(&[second, first], 10.0, 12.0, edges),
+            beside(&[(72.0, 150.0), (200.0, 300.0), (350.0, 523.3)])
+        );
+        let left_only = square(WrapSide::Left, (300.0, 350.0), (0.0, 100.0));
+        assert_eq!(
+            room(&[first, left_only], 10.0, 12.0, edges),
+            beside(&[(72.0, 150.0), (200.0, 300.0)])
+        );
+    }
+
+    #[test]
+    fn the_larger_of_two_sides_as_wide_is_the_left() {
+        // A column from 72 to 524, an object from 248 to 348 with its distances: 176 pt on
+        // each side. Where the larger side is taken, the left goes first.
+        let edges = (72.0, 524.0);
+        let object = [square(WrapSide::Largest, (248.0, 348.0), (0.0, 100.0))];
+        assert_eq!(room(&object, 10.0, 12.0, edges), beside(&[(72.0, 248.0)]));
     }
 
     #[test]
@@ -353,8 +380,7 @@ mod tests {
             below,
             Room {
                 above: 82.0,
-                span: None,
-                sides: false
+                spans: Vec::new(),
             }
         );
         // Square, with less than the least room on each side.
@@ -370,8 +396,7 @@ mod tests {
             room(&[wide, lower], 0.0, 13.0, edges),
             Room {
                 above: 30.0,
-                span: Some((200.0, 523.0)),
-                sides: false
+                spans: vec![(200.0, 523.0)],
             }
         );
     }

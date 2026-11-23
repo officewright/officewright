@@ -182,6 +182,60 @@ fn words_per_line(page: &Page) -> Vec<usize> {
     lines.into_iter().map(|(_, count)| count).collect()
 }
 
+/// The parts of the lines of the body of `page`, top to bottom and from left to right:
+/// where each starts across, its baseline, and its text. A part ends where the next glyph
+/// on its baseline is more than 20 pt further on, as no glyph and space of the test font
+/// are.
+fn parts(page: &Page) -> Vec<(f64, f64, String)> {
+    let mut clusters: Vec<(f64, f64, &str)> = Vec::new();
+    for item in page.items.iter().skip(page.frame_items) {
+        let DisplayItem::Glyphs(run) = item else {
+            continue;
+        };
+        for cluster in &run.clusters {
+            let x = run.origin.x.0 + cluster.glyphs.first().map_or(0.0, |glyph| glyph.x.0);
+            clusters.push((run.origin.y.0, x, &cluster.text));
+        }
+    }
+    clusters.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let mut parts: Vec<(f64, f64, String)> = Vec::new();
+    let mut last_x = f64::NEG_INFINITY;
+    for (y, x, text) in clusters {
+        match parts.last_mut() {
+            Some(part) if (part.1 - y).abs() < 1e-9 && x - last_x <= 20.0 => part.2.push_str(text),
+            _ => parts.push((x, y, text.to_owned())),
+        }
+        last_x = x;
+    }
+    for part in &mut parts {
+        part.2 = part.2.trim().to_owned();
+    }
+    parts
+}
+
+/// The words of each of `parts`.
+fn words_per_part(parts: &[(f64, f64, String)]) -> Vec<usize> {
+    parts
+        .iter()
+        .map(|part| part.2.split_whitespace().count())
+        .collect()
+}
+
+/// A picture 60 by 50 centred between the margins, from 120 to 180, at its paragraph's
+/// top, 10 pt from the text on its left and right: the room beside it is from 20 to 110
+/// and from 190 to 280, 90 pt each, which takes 3 words.
+fn centred(document: &mut Document) -> Inline {
+    let center = HorizontalPlacement::Align(AnchorHorizontalAlign::Center);
+    let wrapping = Wrapping::square([10.0, 0.0, 10.0, 0.0]);
+    picture(
+        document,
+        (60.0, 50.0),
+        center,
+        from_paragraph(0.0),
+        wrapping,
+    )
+}
+
 #[test]
 fn lines_beside_an_object_wrapped_square_start_its_distance_past_it() {
     // E-wrap-square case 01: a picture at the margin, at its paragraph's top, 9 pt from the
@@ -236,8 +290,7 @@ fn lines_beside_an_object_wrapped_square_start_its_distance_past_it() {
 fn text_goes_on_the_side_of_an_object_that_its_wrap_side_allows() {
     // A picture 40 wide 100 pt from the margin, from 120 to 160, with no distances: 100 pt
     // on its left (3 words), 120 on its right (4 words). E-wrap-square cases 04 (largest),
-    // 05 (left) and 06 (right); on both sides, text goes on the larger side only, and that
-    // is reported.
+    // 05 (left) and 06 (right); on both sides, a line takes both, as in case 03.
     let case = |side: WrapSide| {
         let document = document(|style, document| {
             let wrapping = Wrapping {
@@ -255,35 +308,18 @@ fn text_goes_on_the_side_of_an_object_that_its_wrap_side_allows() {
         });
         let (laid, report) = lay(&document);
         let page = &laid.pages[0];
-        (lines(page), words_per_line(page), messages(&report))
+        assert!(messages(&report).is_empty(), "{:?}", messages(&report));
+        let parts = parts(page);
+        let starts: Vec<(f64, f64)> = parts.iter().map(|part| (part.0, part.1)).collect();
+        (starts, words_per_part(&parts))
     };
     let left = [(20.0, 36.0), (20.0, 56.0), (20.0, 76.0), (20.0, 96.0)];
     let right = [(160.0, 36.0), (160.0, 56.0), (160.0, 76.0)];
-    let none: Vec<String> = Vec::new();
-    assert_eq!(
-        case(WrapSide::Left),
-        (left.to_vec(), vec![3, 3, 3, 3], none.clone())
-    );
-    assert_eq!(
-        case(WrapSide::Right),
-        (right.to_vec(), vec![4, 4, 4], none.clone())
-    );
-    assert_eq!(
-        case(WrapSide::Largest),
-        (right.to_vec(), vec![4, 4, 4], none)
-    );
-    assert_eq!(
-        case(WrapSide::BothSides),
-        (
-            right.to_vec(),
-            vec![4, 4, 4],
-            vec![
-                "text with room on both sides of a floating object goes on the side with more \
-                 room only"
-                    .to_owned()
-            ]
-        )
-    );
+    assert_eq!(case(WrapSide::Left), (left.to_vec(), vec![3, 3, 3, 3]));
+    assert_eq!(case(WrapSide::Right), (right.to_vec(), vec![4, 4, 4]));
+    assert_eq!(case(WrapSide::Largest), (right.to_vec(), vec![4, 4, 4]));
+    let both = [(20.0, 36.0), (160.0, 36.0), (20.0, 56.0), (160.0, 56.0)];
+    assert_eq!(case(WrapSide::BothSides), (both.to_vec(), vec![3, 4, 3, 2]));
 }
 
 #[test]
@@ -732,4 +768,303 @@ fn links_and_bookmarks_on_a_line_below_an_object_are_where_its_text_is() {
         })
         .collect();
     assert_eq!(marks, ["bookmark Below 20 80", "link 20 80 50.5 20"]);
+}
+
+#[test]
+fn a_line_beside_an_object_with_room_on_both_sides_takes_both() {
+    // E-wrap-square case 03: a picture centred between the margins, at its paragraph's
+    // top; each line beside it has a part on its left, from the margin, and one on its
+    // right, its distance past it, at the same height. The text fills the left part, goes
+    // on in the right one and on to the next line's left part: the fourth and seventh
+    // words, `ÁÁÁÁ`, start the first line's right part and the second line's left part.
+    // Three lines from 20, 40 and 60 meet the picture's band, to 70; the 7 words left
+    // take the line from 80, and the next paragraph starts below it.
+    let document = document(|style, document| {
+        let object = centred(document);
+        let words: Vec<&str> = (1..=25)
+            .map(|word| {
+                if word == 4 || word == 7 {
+                    "ÁÁÁÁ"
+                } else {
+                    "AAAA"
+                }
+            })
+            .collect();
+        let text = Inline::text(words.join(" "), style);
+        vec![
+            Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines([object, text])
+                .into(),
+            paragraph(style, Vec::new(), 1),
+        ]
+    });
+    let (laid, report) = lay(&document);
+    let page = &laid.pages[0];
+    let three = |first: &str| format!("{first} AAAA AAAA");
+    assert_eq!(
+        parts(page),
+        [
+            (20.0, 36.0, three("AAAA")),
+            (190.0, 36.0, three("ÁÁÁÁ")),
+            (20.0, 56.0, three("ÁÁÁÁ")),
+            (190.0, 56.0, three("AAAA")),
+            (20.0, 76.0, three("AAAA")),
+            (190.0, 76.0, three("AAAA")),
+            (20.0, 96.0, ["AAAA"; 7].join(" ")),
+            (20.0, 116.0, "AAAA".to_owned()),
+        ]
+    );
+    // The three lines in parts and the one after them, then the next paragraph.
+    let fragments: Vec<(usize, f64, f64)> = page
+        .fragments
+        .iter()
+        .map(|fragment| (fragment.lines.len(), fragment.top.0, fragment.height.0))
+        .collect();
+    assert_eq!(fragments, [(4, 20.0, 80.0), (1, 100.0, 20.0)]);
+    assert!(messages(&report).is_empty(), "{:?}", messages(&report));
+}
+
+#[test]
+fn a_line_beside_an_object_ends_in_the_part_its_paragraph_or_a_break_ends_in() {
+    // The paragraph's end in the left part of a line beside the centred picture leaves its
+    // right part empty: the next paragraph starts on the line below, in its left part.
+    let document = document(|style, document| {
+        let object = centred(document);
+        vec![
+            paragraph(style, vec![object], 2),
+            paragraph(style, Vec::new(), 4),
+        ]
+    });
+    let (laid, _) = lay(&document);
+    let page = &laid.pages[0];
+    let starts = |parts: &[(f64, f64, String)]| -> Vec<(f64, f64)> {
+        parts.iter().map(|part| (part.0, part.1)).collect()
+    };
+    let parts = parts(page);
+    assert_eq!(starts(&parts), [(20.0, 36.0), (20.0, 56.0), (190.0, 56.0)]);
+    assert_eq!(words_per_part(&parts), [2, 3, 1]);
+
+    // So does a line break: the text after it starts the next line.
+    let document = self::document(|style, document| {
+        let object = centred(document);
+        vec![
+            Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines([
+                    object,
+                    words(1, style),
+                    Inline::line_break(crate::ir::BreakClear::None, style),
+                    words(4, style),
+                ])
+                .into(),
+        ]
+    });
+    let (laid, _) = lay(&document);
+    let parts = self::parts(&laid.pages[0]);
+    assert_eq!(starts(&parts), [(20.0, 36.0), (20.0, 56.0), (190.0, 56.0)]);
+    assert_eq!(words_per_part(&parts), [1, 3, 1]);
+}
+
+#[test]
+fn a_line_with_room_on_one_side_only_is_laid_out_as_in_that_room() {
+    // E-wrap-square case 01: a picture taller than the paragraph at the margin, 10 pt
+    // from the text, leaves its lines room on their right only, from 130: they are drawn
+    // as those of the paragraph without it, indented by 110 pt, in single lines too.
+    let glyphs = |with_picture: bool| {
+        let document = document(|style, document| {
+            let mut inlines = Vec::new();
+            let mut props = ParagraphProps::default()
+                .with_spacing(Spacing::default().with_before(Pt(0.0)).with_after(Pt(0.0)));
+            if with_picture {
+                let wrapping = Wrapping::square([10.0, 0.0, 10.0, 0.0]);
+                inlines.push(picture(
+                    document,
+                    (100.0, 150.0),
+                    at(0.0),
+                    from_paragraph(0.0),
+                    wrapping,
+                ));
+            } else {
+                props = props.with_indent(crate::ir::Indent::default().with_start(Pt(110.0)));
+            }
+            inlines.push(words(20, style));
+            vec![
+                Paragraph::new(style)
+                    .with_props(props)
+                    .with_inlines(inlines)
+                    .into(),
+            ]
+        });
+        let (laid, _) = lay(&document);
+        let page = &laid.pages[0];
+        let glyphs: Vec<DisplayItem> = page
+            .items
+            .iter()
+            .filter(|item| matches!(item, DisplayItem::Glyphs(_)))
+            .cloned()
+            .collect();
+        let heights: Vec<f64> = page.fragments.iter().map(|f| f.height.0).collect();
+        (glyphs, heights, words_per_line(page))
+    };
+    let (beside, indented) = (glyphs(true), glyphs(false));
+    assert_eq!(beside.2, [5, 5, 5, 5]);
+    assert_eq!(beside, indented);
+}
+
+#[test]
+fn widow_control_counts_a_line_in_parts_as_one_line() {
+    // Four lines fill page 1 down to 100; the next paragraph anchors the centred picture,
+    // 200 pt tall, at its top: its four lines there take 3 words on each side, and its
+    // fifth, 2 words, does not fit. Widow control moves the fourth line, both its parts,
+    // on with it; on page 2, where nothing is beside them, the 8 words left take one line.
+    let document = document(|style, document| {
+        let mut blocks: Vec<Block> = (0..4).map(|_| paragraph(style, Vec::new(), 1)).collect();
+        let center = HorizontalPlacement::Align(AnchorHorizontalAlign::Center);
+        let wrapping = Wrapping::square([10.0, 0.0, 10.0, 0.0]);
+        let object = picture(
+            document,
+            (60.0, 200.0),
+            center,
+            from_paragraph(0.0),
+            wrapping,
+        );
+        blocks.push(paragraph(style, vec![object], 26));
+        blocks
+    });
+    let (laid, _) = lay(&document);
+    let pages = &laid.pages;
+    assert_eq!(pages.len(), 2);
+    let first = parts(&pages[0]);
+    let starts: Vec<(f64, f64)> = first.iter().map(|part| (part.0, part.1)).collect();
+    assert_eq!(
+        starts,
+        [
+            (20.0, 36.0),
+            (20.0, 56.0),
+            (20.0, 76.0),
+            (20.0, 96.0),
+            (20.0, 116.0),
+            (190.0, 116.0),
+            (20.0, 136.0),
+            (190.0, 136.0),
+            (20.0, 156.0),
+            (190.0, 156.0)
+        ]
+    );
+    assert_eq!(words_per_part(&first), [1, 1, 1, 1, 3, 3, 3, 3, 3, 3]);
+    assert_eq!(words_per_line(&pages[1]), [8]);
+    let last = pages[1]
+        .fragments
+        .first()
+        .expect("the paragraph's last line");
+    assert_eq!((last.paragraph, last.lines.clone()), (4, 3..4));
+}
+
+#[test]
+fn a_link_takes_a_box_on_each_part_of_a_line_it_spans() {
+    use crate::ir::LinkTarget;
+
+    // The third and fourth words of a paragraph beside the centred picture are a link:
+    // the third ends the first line's left part, at 73 to 97, the fourth starts its right
+    // part, at 190 to 214; the link takes a box on each, the line's height, and none over
+    // the picture between them.
+    let document = document(|style, document| {
+        let object = centred(document);
+        vec![
+            Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines([
+                    object,
+                    Inline::text("AAAA AAAA ", style),
+                    Inline::link_start(LinkTarget::Uri("https://example.com/".into())),
+                    words(2, style),
+                    Inline::link_end(),
+                    Inline::text(" AAAA", style),
+                ])
+                .into(),
+        ]
+    });
+    let (laid, _) = lay(&document);
+    let page = &laid.pages[0];
+    let parts = parts(page);
+    assert_eq!(words_per_part(&parts), [3, 2]);
+    let links: Vec<(f64, f64, f64, f64)> = page
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            DisplayItem::Link {
+                at, width, height, ..
+            } => Some((at.x.0, at.y.0, width.0, height.0)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(links, [(73.0, 20.0, 24.0, 20.0), (190.0, 20.0, 24.0, 20.0)]);
+}
+
+#[test]
+fn a_line_beside_several_objects_takes_every_part_they_leave_it() {
+    // Two pictures 30 wide, from 90 to 120 and from 180 to 210, with no distances, leave
+    // the lines beside them three parts, from 20, 120 and 210, of 70, 60 and 70 pt: 2 words
+    // each, filled from left to right.
+    let document = document(|style, document| {
+        let wrapping = Wrapping::square([0.0; 4]);
+        let first = picture(
+            document,
+            (30.0, 50.0),
+            at(70.0),
+            from_paragraph(0.0),
+            wrapping,
+        );
+        let second = picture(
+            document,
+            (30.0, 50.0),
+            at(160.0),
+            from_paragraph(0.0),
+            wrapping,
+        );
+        vec![paragraph(style, vec![first, second], 12)]
+    });
+    let (laid, report) = lay(&document);
+    let parts = parts(&laid.pages[0]);
+    let starts: Vec<(f64, f64)> = parts.iter().map(|part| (part.0, part.1)).collect();
+    assert_eq!(
+        starts,
+        [
+            (20.0, 36.0),
+            (120.0, 36.0),
+            (210.0, 36.0),
+            (20.0, 56.0),
+            (120.0, 56.0),
+            (210.0, 56.0)
+        ]
+    );
+    assert_eq!(words_per_part(&parts), [2; 6]);
+    assert!(messages(&report).is_empty(), "{:?}", messages(&report));
+}
+
+#[test]
+fn automatic_hyphenation_is_reported_where_a_line_wraps_from_part_to_part() {
+    use crate::ir::{DocumentSettings, Hyphenation};
+
+    // Five words fit on one line of the column, but beside the centred picture the line
+    // wraps from its left part, 3 words, to its right part, where the paragraph ends: a
+    // document that turns automatic hyphenation on gets the report.
+    let settings =
+        DocumentSettings::default().with_hyphenation(Hyphenation::default().with_auto(true));
+    let mut document = Document::new(settings);
+    let style = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Officewright Test"))
+            .with_size(Pt(10.0)),
+    );
+    let object = centred(&mut document);
+    let block = paragraph(style, vec![object], 5);
+    document.add_section(Section::new(setup()).with_blocks(vec![block]));
+    let (laid, report) = lay(&document);
+    assert_eq!(words_per_part(&parts(&laid.pages[0])), [3, 2]);
+    assert_eq!(
+        messages(&report),
+        ["automatic hyphenation is not done: words are not hyphenated at the ends of lines"]
+    );
 }

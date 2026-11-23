@@ -559,8 +559,9 @@ pub enum Wrap {
 }
 
 /// On which sides of an anchored object text wrapped around it goes (ST_WrapText), where
-/// it has room. Text goes on one side of an object only: where both sides have room for
-/// it, on the side with more, which is reported.
+/// it has room. A line beside an object that lets text go on both sides, with room on
+/// both, takes both: its text fills the part left of the object, then goes on in the part
+/// right of it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum WrapSide {

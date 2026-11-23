@@ -1789,7 +1789,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let mut stale = false;
         let mut meets = false;
         for line in layout.lines.iter().skip(first) {
-            stale |= line.above.0 != 0.0 || line.room.is_some();
+            stale |= line.above.0 != 0.0 || !line.parts.is_empty();
             let line_top = y + line.above.0;
             meets |= exclusions
                 .iter()
@@ -1831,7 +1831,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 .lines
                 .iter()
                 .take(first)
-                .map(|line| (line.above, line.room))
+                .map(|line| (line.above, line.rooms()))
                 .collect(),
             exclusions: &exclusions,
             origin: (body.left.0, top),
@@ -4998,8 +4998,9 @@ mod tests {
         let frame = pages[1].frame_items;
         assert_eq!(images(&pages[1]), [(frame - 1, 10.0, 5.0)]);
         assert!(pages[1].items.len() > frame);
-        // The body's line goes on the right of the picture text wraps around, the larger
-        // side, as the picture is taken to be at the paragraph's first line, which it is.
+        // The body's line goes in the part left of the picture text wraps around, which
+        // leaves room on both sides, as the picture is taken to be at the paragraph's first
+        // line, which it is.
         let body_runs: Vec<f64> = pages[0].items[pages[0].frame_items..]
             .iter()
             .filter_map(|item| match item {
@@ -5007,16 +5008,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(body_runs, [100.0]);
+        assert_eq!(body_runs, [20.0]);
         let messages = messages(&report);
-        for reported in [
-            "the lines of a paragraph go around a floating object it positions from a line or a \
-             character as if it were positioned from its first line and the column's start",
-            "text with room on both sides of a floating object goes on the side with more room \
-             only",
-        ] {
-            assert!(messages.iter().any(|m| m == reported), "{messages:?}");
-        }
+        let reported = "the lines of a paragraph go around a floating object it positions from a \
+                        line or a character as if it were positioned from its first line and the \
+                        column's start";
+        assert!(messages.iter().any(|m| m == reported), "{messages:?}");
         assert!(
             !messages.iter().any(|m| m.contains("does not wrap")),
             "{messages:?}"

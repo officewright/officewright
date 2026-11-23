@@ -82,7 +82,11 @@ struct Splice {
     replaced: Vec<Unit>,
 }
 
-/// A line of a paragraph.
+/// A line of a paragraph. Beside floating objects that leave it room in more than one part
+/// of the column (`crate::wrap`), a line is the row of all those parts: its text fills them
+/// from left to right, going on from one to the next where it wraps, and their pieces are
+/// its pieces, each where it is drawn. The parts share the line's top, baseline and height,
+/// so that whatever stacks lines down a page, a cell or a box takes such a row as one line.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Line {
     /// What is on the line, in order, each where it is drawn.
@@ -90,10 +94,12 @@ pub(crate) struct Line {
     /// The bytes of the break text the line holds.
     pub(crate) range: Range<usize>,
     /// Where the line may start and end, from the start edge of the column: the
-    /// paragraph's indents.
+    /// paragraph's indents; in parts, the start of the first and the end of the last that
+    /// holds pieces.
     pub(crate) start: Pt,
     pub(crate) end_edge: Pt,
-    /// The width of what is on the line, without the spaces that hang at its end.
+    /// The width of what is on the line, without the spaces that hang at its end: in
+    /// parts, from the line's start to the end of what its last part with pieces holds.
     pub(crate) width: Pt,
     /// How far the line's text reaches above and below its baseline, and the leading
     /// its fonts add.
@@ -106,6 +112,7 @@ pub(crate) struct Line {
     /// The room multiple line spacing adds below the text, a part of `height` that may
     /// reach past the bottom of the body.
     pub(crate) below_text: Pt,
+    /// Why the line ends: in parts, why the last that holds pieces does.
     pub(crate) end: LineEnd,
     /// Whether the line holds a piece too wide for any line, which reaches past its
     /// end and is reported.
@@ -113,9 +120,9 @@ pub(crate) struct Line {
     /// The room above the line that a floating object it goes below takes: the line's top
     /// is that far below the bottom of the line before, or the paragraph's top.
     pub(crate) above: Pt,
-    /// The part of the column, from its start edge, that floating objects beside the line
-    /// leave it, which narrows its edges; `None` where none is beside it.
-    pub(crate) room: Option<(Pt, Pt)>,
+    /// The parts of the column that floating objects beside the line leave it, from left
+    /// to right, which narrow its edges; empty where none is beside it.
+    pub(crate) parts: Vec<Part>,
 }
 
 impl Line {
@@ -123,6 +130,43 @@ impl Line {
     pub(crate) fn advance(&self) -> f64 {
         self.above.0 + self.height.0
     }
+
+    /// The room of each of the line's parts.
+    pub(crate) fn rooms(&self) -> Vec<(Pt, Pt)> {
+        self.parts.iter().map(|part| part.room).collect()
+    }
+
+    /// The pieces of each of the line's parts, from left to right: all of them, for a line
+    /// that is not in parts.
+    pub(crate) fn part_pieces(&self) -> impl Iterator<Item = &[Piece]> {
+        let whole = self.parts.is_empty().then_some(0..self.pieces.len());
+        whole
+            .into_iter()
+            .chain(self.parts.iter().map(|part| part.pieces.clone()))
+            .map(|range| self.pieces.get(range).unwrap_or(&[]))
+    }
+
+    /// Whether the line wraps: it ends where what follows does not fit, or its text goes
+    /// on from one of its parts to the next.
+    pub(crate) fn wraps(&self) -> bool {
+        self.end == LineEnd::Wrap
+            || self
+                .parts
+                .iter()
+                .filter(|part| !part.pieces.is_empty())
+                .count()
+                > 1
+    }
+}
+
+/// A part of a line beside floating objects (see [`Line`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Part {
+    /// The part of the column, from its start edge, that the objects leave the line there,
+    /// which narrows its edges.
+    pub(crate) room: (Pt, Pt),
+    /// The line's pieces in the part: none where the line ends in a part before it.
+    pub(crate) pieces: Range<usize>,
 }
 
 /// Why a line ends.
@@ -710,9 +754,12 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         loop {
             let first = lines.is_empty();
             let before = lines.last().map(|line| line.height.0);
-            let (end, line, last) = self.around(lines.len(), (first, before), &mut y, |breaker| {
-                breaker.next_line(start, first)
-            });
+            let (end, line, last) = self.around(
+                lines.len(),
+                (start, first, before),
+                &mut y,
+                |breaker, start, first| breaker.next_line(start, first),
+            );
             lines.push(line);
             if last {
                 break;
@@ -722,18 +769,23 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 // A line break at the very end: an empty line follows, with the
                 // paragraph mark.
                 let before = lines.last().map(|line| line.height.0);
-                let (_, line, _) = self.around(lines.len(), (false, before), &mut y, |breaker| {
-                    let fit = Fit {
-                        end,
-                        end_kind: LineEnd::Paragraph,
-                        hyphen: false,
-                        overflow: false,
-                        hanging_tab: None,
-                    };
-                    let mut line = breaker.place(end, fit, false);
-                    breaker.set_height(&mut line, true);
-                    (end, line, true)
-                });
+                let (_, line, _) = self.around(
+                    lines.len(),
+                    (end, false, before),
+                    &mut y,
+                    |breaker, end, _| {
+                        let fit = Fit {
+                            end,
+                            end_kind: LineEnd::Paragraph,
+                            hyphen: false,
+                            overflow: false,
+                            hanging_tab: None,
+                        };
+                        let mut line = breaker.place(end, fit, false);
+                        breaker.set_height(&mut line, true);
+                        (end, line, true)
+                    },
+                );
                 lines.push(line);
                 break;
             }
@@ -754,51 +806,50 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         (end, line, last)
     }
 
-    /// Line `index` of the paragraph, the `first` or not, as `make` fits it in the room the
-    /// floating objects the paragraph goes around leave it, if any; `before` is the height
-    /// of the line before. A line laid out before that stays takes the room it had. Any
-    /// other is fitted in the room a line as high as the one before has from `y`, its top
-    /// down the page; where the height it then takes leaves it other room, it is fitted
-    /// again in that, up to [`WRAP_ROUNDS`] times. `y` moves on below it.
+    /// Line `index` of the paragraph, from unit `start`, its `first` or not, in the room the
+    /// floating objects the paragraph goes around leave it, if any, `make` fitting each of
+    /// its parts from a unit as the paragraph's first line or not (`Breaker::row`);
+    /// `before` is the height of the line before. A line laid out before that stays takes
+    /// the room it had. Any other is fitted in the room a line as high as the one before has
+    /// from `y`, its top down the page; where the height it then takes leaves it other room,
+    /// it is fitted again in that, up to [`WRAP_ROUNDS`] times. `y` moves on below it.
     fn around(
         &mut self,
         index: usize,
-        (first, before): (bool, Option<f64>),
+        (start, first, before): (usize, bool, Option<f64>),
         y: &mut Option<f64>,
-        mut make: impl FnMut(&mut Self) -> (usize, Line, bool),
+        mut make: impl FnMut(&mut Self, usize, bool) -> (usize, Line, bool),
     ) -> (usize, Line, bool) {
         self.room = None;
         let Some(around) = self.around else {
-            return make(self);
+            return make(self, start, first);
         };
-        if let Some(&(above, room)) = around.kept.get(index) {
-            self.room = room;
-            let (end, mut line, last) = make(self);
-            line.above = above;
-            line.room = room;
-            self.room = None;
+        // The cuts that shaped the units at the end of a part again: those of the line
+        // before stay, those of a round given up are undone, the last first.
+        let mut splices = Vec::new();
+        if let Some((above, rooms)) = around.kept.get(index) {
+            let (end, mut line, last) = self.row(rooms, (start, first), &mut splices, &mut make);
+            line.above = *above;
             return (end, line, last);
         }
         let (column, top) = (around.origin.0, y.unwrap_or(around.origin.1));
-        let (start, end) = self.edges(first);
-        let edges = (column + start.0, column + end.0);
+        let (from, to) = self.edges(first);
+        let edges = (column + from.0, column + to.0);
         let mut height = before.unwrap_or(around.estimate);
         let mut tallest: f64 = 0.0;
-        // The cut that shaped the units at the end of the line again: that of the line
-        // before stays, that of a round given up is undone.
-        self.splice = None;
         let mut round = 0;
         loop {
             let room = wrap::room(around.exclusions, top, height, edges);
-            if let Some(splice) = self.splice.take() {
+            for splice in splices.drain(..).rev() {
                 self.undo(splice, 0);
             }
-            self.room = room
-                .span
-                .map(|(from, to)| (Pt(from - column), Pt(to - column)));
-            let (end, mut line, last) = make(self);
+            let rooms: Vec<(Pt, Pt)> = room
+                .spans
+                .iter()
+                .map(|&(from, to)| (Pt(from - column), Pt(to - column)))
+                .collect();
+            let (end, mut line, last) = self.row(&rooms, (start, first), &mut splices, &mut make);
             line.above = Pt(room.above);
-            line.room = self.room;
             tallest = tallest.max(line.height.0);
             let settled = wrap::room(around.exclusions, top, line.height.0, edges) == room;
             round += 1;
@@ -812,17 +863,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                             .to_owned(),
                     );
                 }
-                if room.sides {
-                    self.fonts.report_once(
-                        ReportKind::FeatureUnsupported,
-                        self.location,
-                        "text with room on both sides of a floating object goes on the side \
-                         with more room only"
-                            .to_owned(),
-                    );
-                }
                 *y = Some(top + line.advance());
-                self.room = None;
                 return (end, line, last);
             }
             height = if round == WRAP_ROUNDS {
@@ -831,6 +872,58 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 line.height.0
             };
         }
+    }
+
+    /// The line from unit `start`, the paragraph's `first` or not, as `make` fits it in
+    /// `rooms`, the parts of the column floating objects leave it from left to right, or
+    /// between its edges where there are none. Its text fills the parts in turn, going on
+    /// to the next where a part wraps; a part after one that ends otherwise, or after the
+    /// paragraph's end, stays empty. The parts make one line, whose height is that of all
+    /// their text (see [`Line`]). The cut each part ends at that is shaped again goes into
+    /// `splices`, in order. Returns the unit after the line's last, the line, and whether it
+    /// is the paragraph's last.
+    fn row(
+        &mut self,
+        rooms: &[(Pt, Pt)],
+        (start, first): (usize, bool),
+        splices: &mut Vec<Splice>,
+        make: &mut impl FnMut(&mut Self, usize, bool) -> (usize, Line, bool),
+    ) -> (usize, Line, bool) {
+        let mut parts = rooms.iter();
+        self.room = parts.next().copied();
+        let (mut end, mut line, mut last) = make(self, start, first);
+        splices.extend(self.splice.take());
+        if let Some(room) = self.room {
+            line.parts.push(Part {
+                room,
+                pieces: 0..line.pieces.len(),
+            });
+        }
+        let mut joined = false;
+        for &room in parts {
+            let from = line.pieces.len();
+            if !last && line.end == LineEnd::Wrap {
+                self.room = Some(room);
+                let (next, part, next_last) = make(self, end, false);
+                splices.extend(self.splice.take());
+                line.pieces.extend(part.pieces);
+                line.range.end = line.range.end.max(part.range.end);
+                line.end_edge = part.end_edge;
+                line.width = Pt(part.start.0 + part.width.0 - line.start.0);
+                line.end = part.end;
+                line.overflow |= part.overflow;
+                (end, last, joined) = (next, next_last, true);
+            }
+            line.parts.push(Part {
+                room,
+                pieces: from..line.pieces.len(),
+            });
+        }
+        if joined {
+            self.set_height(&mut line, last);
+        }
+        self.room = None;
+        (end, line, last)
     }
 
     /// The line from unit `start` that first fit chose, placed: after shaping again the
@@ -1430,7 +1523,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             end: fit.end_kind,
             overflow: fit.overflow,
             above: Pt(0.0),
-            room: None,
+            parts: Vec::new(),
         }
     }
 
@@ -2436,7 +2529,27 @@ mod tests {
     fn lay_around(
         make: impl Fn(RunStyleId, RunStyleId) -> Vec<Inline>,
         exclusions: &[crate::wrap::Exclusion],
-        kept: Vec<(Pt, Option<(Pt, Pt)>)>,
+        kept: Vec<(Pt, Vec<(Pt, Pt)>)>,
+    ) -> (ParagraphLayout, Vec<String>) {
+        lay_around_with(ParagraphProps::default(), make, exclusions, kept)
+    }
+
+    /// [`lay_around`] with the paragraph's `props`.
+    fn lay_around_with(
+        props: ParagraphProps,
+        make: impl Fn(RunStyleId, RunStyleId) -> Vec<Inline>,
+        exclusions: &[crate::wrap::Exclusion],
+        kept: Vec<(Pt, Vec<(Pt, Pt)>)>,
+    ) -> (ParagraphLayout, Vec<String>) {
+        lay_around_in(props, |small, big, _| make(small, big), exclusions, kept)
+    }
+
+    /// [`lay_around_with`], `make` adding what its inlines need to the document.
+    fn lay_around_in(
+        props: ParagraphProps,
+        make: impl FnOnce(RunStyleId, RunStyleId, &mut Document) -> Vec<Inline>,
+        exclusions: &[crate::wrap::Exclusion],
+        kept: Vec<(Pt, Vec<(Pt, Pt)>)>,
     ) -> (ParagraphLayout, Vec<String>) {
         let book = book(vec![minimal()]);
         let mut document = Document::default();
@@ -2447,7 +2560,10 @@ mod tests {
                     .with_size(Pt(size)),
             )
         });
-        let paragraph = Paragraph::new(small).with_inlines(make(small, big));
+        let inlines = make(small, big, &mut document);
+        let paragraph = Paragraph::new(small)
+            .with_props(props)
+            .with_inlines(inlines);
         let mut fonts = Fonts::new(&book);
         let mut shaper = Shaper::new();
         let location = Location::default();
@@ -2510,14 +2626,15 @@ mod tests {
         let rooms: Vec<_> = layout
             .lines
             .iter()
-            .map(|line| (line.start.0, line.room, line.height.0))
+            .map(|line| (line.start.0, line.rooms(), line.height.0))
             .collect();
+        let beside = vec![(Pt(110.0), Pt(260.0))];
         assert_eq!(
             rooms,
             [
-                (0.0, None, 11.5),
-                (110.0, Some((Pt(110.0), Pt(260.0))), 34.5),
-                (110.0, Some((Pt(110.0), Pt(260.0))), 11.5),
+                (0.0, Vec::new(), 11.5),
+                (110.0, beside.clone(), 34.5),
+                (110.0, beside, 11.5),
             ]
         );
         assert_eq!(widths(&layout), [236.0, 142.0, 130.0]);
@@ -2540,7 +2657,7 @@ mod tests {
             Vec::new(),
         );
         let second = layout.lines.get(1).expect("a second line");
-        assert_eq!(second.room, Some((Pt(110.0), Pt(260.0))));
+        assert_eq!(second.rooms(), [(Pt(110.0), Pt(260.0))]);
         assert_eq!(second.height, Pt(11.5));
         assert_eq!(
             messages,
@@ -2564,13 +2681,252 @@ mod tests {
             .lines
             .iter()
             .take(3)
-            .map(|line| (line.above, line.room))
+            .map(|line| (line.above, line.rooms()))
             .collect();
         let (again, _) = lay_around(make, &[], kept);
         assert_eq!(again.lines.get(..3), before.lines.get(..3));
-        let rooms: Vec<_> = again.lines.iter().map(|line| line.room).collect();
-        assert_eq!(rooms, [None, None, Some((Pt(110.0), Pt(260.0))), None]);
+        let rooms: Vec<_> = again.lines.iter().map(Line::rooms).collect();
+        let beside = vec![(Pt(110.0), Pt(260.0))];
+        assert_eq!(rooms, [vec![], vec![], beside, vec![]]);
         assert_eq!(widths(&again), [236.0, 236.0, 130.0, 183.0]);
+    }
+
+    /// An object from 100 to 160 across, from 0 to 100 down, wrapped square on both
+    /// sides: the room beside it is from 0 to 100 and from 160 to 260, which take 3
+    /// words of 10 pt each.
+    fn object_in_the_middle() -> [crate::wrap::Exclusion; 1] {
+        [crate::wrap::Exclusion {
+            top: 0.0,
+            bottom: 100.0,
+            left: 100.0,
+            right: 160.0,
+            side: Some(crate::ir::WrapSide::BothSides),
+        }]
+    }
+
+    /// Where each part of `line` starts and ends: its first piece's start and its last
+    /// piece's end that does not hang.
+    fn part_extents(line: &Line) -> Vec<(f64, f64)> {
+        line.part_pieces()
+            .filter(|pieces| !pieces.is_empty())
+            .map(|pieces| {
+                let start = pieces.first().map_or(0.0, |piece| piece.x.0);
+                let end = pieces
+                    .iter()
+                    .filter(|piece| !piece.hanging)
+                    .map(|piece| piece.x.0 + piece.width.0)
+                    .fold(start, f64::max);
+                (start, end)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_parts_of_a_line_make_one_line_as_high_as_all_their_text() {
+        // Three words of 10 pt fill the left part of the first line; the right part starts
+        // with `AA` of 30 pt, and its 10 pt words, then the second line's left part holds
+        // the rest. The first line is as high as its 30 pt text, both parts on its one
+        // baseline, and the second starts below it, in parts too.
+        let (layout, messages) = lay_around(
+            |small, big| {
+                vec![
+                    Inline::text(words(3) + " ", small),
+                    Inline::text("AA", big),
+                    Inline::text(" ".to_owned() + &words(4), small),
+                ]
+            },
+            &object_in_the_middle(),
+            Vec::new(),
+        );
+        let (Some(first), Some(second)) = (layout.lines.first(), layout.lines.get(1)) else {
+            panic!("two lines: {:?}", layout.lines);
+        };
+        let rooms = vec![(Pt(0.0), Pt(100.0)), (Pt(160.0), Pt(260.0))];
+        assert_eq!(first.rooms(), rooms);
+        assert_eq!((first.height, first.end), (Pt(34.5), LineEnd::Wrap));
+        assert_eq!(part_extents(first), [(0.0, 77.0), (160.0, 249.0)]);
+        // The first line's pieces are the left part's, then the right part's.
+        let split = first.parts.first().map(|part| part.pieces.end);
+        assert_eq!(split, first.parts.get(1).map(|part| part.pieces.start));
+        assert_eq!(
+            first.parts.get(1).map(|part| part.pieces.end),
+            Some(first.pieces.len())
+        );
+        assert_eq!(first.width, Pt(249.0));
+        // Its text: three words and a space, then `AA`, and a space, two words and a space.
+        assert_eq!(first.range, 0..28);
+        assert!(first.wraps());
+        // `AA` of 30 pt and two words in the right part; two words left go on the second
+        // line, 11.5 high, in its left part, its right part empty.
+        assert_eq!(second.rooms(), rooms);
+        assert_eq!(second.height, Pt(11.5));
+        assert_eq!(part_extents(second), [(0.0, 50.5)]);
+        assert!(
+            second
+                .parts
+                .get(1)
+                .is_some_and(|part| part.pieces.is_empty())
+        );
+        assert!(!second.wraps());
+        assert_eq!(layout.height(), Pt(46.0));
+        assert!(messages.is_empty(), "{messages:?}");
+        // A line whose text goes on from its left part to its right part wraps, though the
+        // paragraph ends there.
+        let make = |small, _| vec![Inline::text(words(5), small)];
+        let (layout, _) = lay_around(make, &object_in_the_middle(), Vec::new());
+        let [line] = layout.lines.as_slice() else {
+            panic!("one line: {:?}", layout.lines);
+        };
+        assert_eq!(line.end, LineEnd::Paragraph);
+        assert!(line.wraps());
+    }
+
+    #[test]
+    fn each_part_of_a_line_is_aligned_on_its_own() {
+        // Justified, the parts of the first line beside the object, 3 words of 77 pt each,
+        // reach the ends of their rooms, 100 and 260; the second line's, the paragraph's
+        // last, is not justified. Centred, each part is centred in its room.
+        let justified = ParagraphProps::default().with_alignment(Alignment::Both);
+        let make = |small, _| vec![Inline::text(words(7), small)];
+        let (layout, _) = lay_around_with(justified, make, &object_in_the_middle(), Vec::new());
+        let extents: Vec<_> = layout.lines.iter().map(part_extents).collect();
+        assert_eq!(
+            extents,
+            [vec![(0.0, 100.0), (160.0, 260.0)], vec![(0.0, 24.0)]]
+        );
+        let centred = ParagraphProps::default().with_alignment(Alignment::Center);
+        let (layout, _) = lay_around_with(centred, make, &object_in_the_middle(), Vec::new());
+        let extents: Vec<_> = layout.lines.iter().map(part_extents).collect();
+        assert_eq!(
+            extents,
+            [vec![(11.5, 88.5), (171.5, 248.5)], vec![(38.0, 62.0)]]
+        );
+    }
+
+    #[test]
+    fn a_word_wider_than_a_part_is_cut_as_on_a_line_and_goes_on_in_the_next() {
+        // A part of 25 pt left of the object takes four letters of a word of six, as a line
+        // too narrow for a word takes what fits of it; the rest of the word starts the part
+        // right of the object.
+        let object = [crate::wrap::Exclusion {
+            left: 25.0,
+            ..object_in_the_middle()[0]
+        }];
+        let make = |small, _| vec![Inline::text("AAAAAA ".to_owned() + &words(2), small)];
+        let (layout, messages) = lay_around(make, &object, Vec::new());
+        let first = layout.lines.first().expect("a line");
+        assert_eq!(part_extents(first), [(0.0, 24.0), (160.0, 225.0)]);
+        assert_eq!(layout.lines.len(), 1);
+        assert!(messages.is_empty(), "{messages:?}");
+    }
+
+    #[test]
+    fn a_line_holds_a_piece_too_wide_for_any_of_its_parts() {
+        use crate::ir::{ImageData, ImageFormat, InlineObject, ObjectContent, Picture, Size};
+
+        // An inline picture 120 wide, after a word that fills the left part: the right
+        // part, 100 wide, takes it alone, and the line holds a piece too wide for it,
+        // which is reported.
+        let make = |small, _, document: &mut Document| {
+            let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+            let picture = InlineObject::new(
+                ObjectContent::Picture(Picture::new(image)),
+                Size::new(Pt(120.0), Pt(10.0)),
+            );
+            vec![
+                Inline::text("AAAA ", small),
+                Inline::Object(picture),
+                Inline::text(" AAAA", small),
+            ]
+        };
+        let (layout, messages) = lay_around_in(
+            ParagraphProps::default(),
+            make,
+            &object_in_the_middle(),
+            Vec::new(),
+        );
+        let first = layout.lines.first().expect("a line");
+        assert_eq!(part_extents(first), [(0.0, 24.0), (160.0, 280.0)]);
+        assert!(first.overflow);
+        assert_eq!(
+            messages,
+            ["an inline object is wider than its line and reaches past its end"]
+        );
+    }
+
+    #[test]
+    fn the_first_line_indent_goes_in_the_first_part_and_tab_stops_count_from_the_column() {
+        // A first line indented by 20 starts its left part there, and takes 3 words up to
+        // 97; its right part, and the second line's left part, start at their rooms.
+        let indented = ParagraphProps::default()
+            .with_indent(crate::ir::Indent::default().with_first_line(Pt(20.0)));
+        let make = |small, _| vec![Inline::text(words(7), small)];
+        let (layout, _) = lay_around_with(indented, make, &object_in_the_middle(), Vec::new());
+        let extents: Vec<_> = layout.lines.iter().map(part_extents).collect();
+        assert_eq!(
+            extents,
+            [vec![(20.0, 97.0), (160.0, 237.0)], vec![(0.0, 24.0)]]
+        );
+        // A tab after the first word of the right part, at 184, goes to the next default
+        // stop past it, every 36 pt from the column's start edge: 216.
+        let make = |small, _| {
+            vec![
+                Inline::text(words(4), small),
+                Inline::tab(small),
+                Inline::text(words(3), small),
+            ]
+        };
+        let (layout, _) = lay_around(make, &object_in_the_middle(), Vec::new());
+        let first = layout.lines.first().expect("a line");
+        let tab = first
+            .pieces
+            .iter()
+            .find(|piece| matches!(piece.kind, PieceKind::Tab { .. }))
+            .map(|piece| (piece.x.0, piece.x.0 + piece.width.0));
+        assert_eq!(tab, Some((184.0, 216.0)));
+        assert_eq!(part_extents(first), [(0.0, 77.0), (160.0, 240.0)]);
+        // A hanging indent: the first line starts at 0, the others at 170. The first line's
+        // right part is not its first part, and starts at the indent, past its room's start
+        // at 160; the second line, between its indents, is past the object.
+        let hanging = ParagraphProps::default().with_indent(
+            crate::ir::Indent::default()
+                .with_start(Pt(170.0))
+                .with_first_line(Pt(-170.0)),
+        );
+        let make = |small, _| vec![Inline::text(words(9), small)];
+        let (layout, _) = lay_around_with(hanging, make, &object_in_the_middle(), Vec::new());
+        let extents: Vec<_> = layout.lines.iter().map(part_extents).collect();
+        assert_eq!(
+            extents,
+            [vec![(0.0, 77.0), (170.0, 247.0)], vec![(170.0, 247.0)]]
+        );
+        assert!(
+            layout
+                .lines
+                .get(1)
+                .is_some_and(|line| line.parts.is_empty())
+        );
+    }
+
+    #[test]
+    fn lines_in_parts_laid_out_before_stay_as_they_were() {
+        // Ten words beside the object: lines of 3 and 3, 3 and 1. Laid out again with its
+        // first line kept and nothing to go around, the paragraph keeps it in its parts and
+        // lays out the 4 words left on one line of the whole column.
+        let make = |small, _| vec![Inline::text(words(10), small)];
+        let (before, _) = lay_around(make, &object_in_the_middle(), Vec::new());
+        let kept: Vec<_> = before
+            .lines
+            .iter()
+            .take(1)
+            .map(|line| (line.above, line.rooms()))
+            .collect();
+        assert_eq!(kept.first().map(|kept| kept.1.len()), Some(2));
+        let (again, _) = lay_around(make, &[], kept);
+        assert_eq!(again.lines.get(..1), before.lines.get(..1));
+        let rooms: Vec<usize> = again.lines.iter().map(|line| line.parts.len()).collect();
+        assert_eq!(rooms, [2, 0]);
+        assert_eq!(widths(&again), [237.0, 103.5]);
     }
 
     #[test]

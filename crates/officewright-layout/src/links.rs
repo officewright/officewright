@@ -21,13 +21,13 @@ pub(crate) const MIN_LINK: f64 = 0.01;
 /// whose start edge is at `origin.x`. A line's top is below the room a floating object it
 /// goes below takes (`Line::above`).
 ///
-/// A link takes one rectangle on each line it spans: across, from where the first of its
-/// pieces on the line starts to where the last ends, the hyphen drawn after the last
-/// included, but for the spaces that hang at the line's end; down, the line's box, from
-/// its top to its bottom. A bookmark marks the
-/// line's start edge and its top on the line that holds what follows it, or on the
-/// paragraph's last line when nothing does. Both are hypotheses until a Word export of a
-/// document with links shows its annotations.
+/// A link takes one rectangle on each line it spans, and on each part of a line beside
+/// floating objects (`Line::parts`): across, from where the first of its pieces there
+/// starts to where the last ends, the hyphen drawn after the last included, but for the
+/// spaces that hang at the end; down, the line's box, from its top to its bottom. A
+/// bookmark marks the line's start edge and its top on the line that holds what follows
+/// it, or on the paragraph's last line when nothing does. Both are hypotheses until a Word
+/// export of a document with links shows its annotations.
 pub(crate) fn paint(
     itemized: &Itemized,
     all: &[Line],
@@ -45,7 +45,7 @@ pub(crate) fn paint(
         .unwrap_or(&[])
         .iter()
         .rev()
-        .find_map(last_placed)
+        .find_map(|line| last_placed(&line.pieces))
         .map_or(0, |piece| marked_by(itemized, piece));
     let mut top = origin.y.0;
     for (index, line) in all.iter().enumerate().take(lines.end).skip(lines.start) {
@@ -58,7 +58,7 @@ pub(crate) fn paint(
         let upto = if Some(index) == last_line {
             itemized.bookmarks.len()
         } else {
-            last_placed(line).map_or(marked, |piece| marked_by(itemized, piece))
+            last_placed(&line.pieces).map_or(marked, |piece| marked_by(itemized, piece))
         };
         for (_, name) in itemized.bookmarks.get(marked..upto).unwrap_or(&[]) {
             out.push(DisplayItem::Destination {
@@ -67,15 +67,23 @@ pub(crate) fn paint(
             });
         }
         marked = marked.max(upto);
-        line_links(itemized, line, (origin.x.0, top), out);
+        for pieces in line.part_pieces() {
+            part_links(itemized, (pieces, line.height), (origin.x.0, top), out);
+        }
         top += line.height.0;
     }
 }
 
-/// The links of `line`, whose top is at `y`, in a column whose start edge is at `x`.
-fn line_links(itemized: &Itemized, line: &Line, (x, y): (f64, f64), out: &mut Vec<DisplayItem>) {
-    let first = line.pieces.iter().find(|piece| place(piece).is_some());
-    let (Some(first), Some(last)) = (first, last_placed(line)) else {
+/// The links of `pieces`, those of a line `height` high or of a part of it, whose top is at
+/// `y`, in a column whose start edge is at `x`.
+fn part_links(
+    itemized: &Itemized,
+    (pieces, height): (&[Piece], Pt),
+    (x, y): (f64, f64),
+    out: &mut Vec<DisplayItem>,
+) {
+    let first = pieces.iter().find(|piece| place(piece).is_some());
+    let (Some(first), Some(last)) = (first, last_placed(pieces)) else {
         return;
     };
     let links = &itemized.links;
@@ -99,7 +107,7 @@ fn line_links(itemized: &Itemized, line: &Line, (x, y): (f64, f64), out: &mut Ve
     let mut at = 0;
     // The link of the glyph or piece before, which the hyphen drawn after it belongs to.
     let mut previous = None;
-    for piece in line.pieces.iter().filter(|piece| !piece.hanging) {
+    for piece in pieces.iter().filter(|piece| !piece.hanging) {
         let end = piece.x.0 + piece.width.0;
         match (&piece.kind, place(piece)) {
             // Text outside every link is not taken apart into glyphs.
@@ -157,7 +165,7 @@ fn line_links(itemized: &Itemized, line: &Line, (x, y): (f64, f64), out: &mut Ve
                     y: Pt(y),
                 },
                 width: Pt(end - start),
-                height: line.height,
+                height,
                 target: span.target.clone(),
             });
         }
@@ -187,12 +195,9 @@ fn place(piece: &Piece) -> Option<usize> {
     }
 }
 
-/// The last piece of `line` that has a place of its own.
-fn last_placed(line: &Line) -> Option<&Piece> {
-    line.pieces
-        .iter()
-        .rev()
-        .find(|piece| place(piece).is_some())
+/// The last of `pieces` that has a place of its own.
+fn last_placed(pieces: &[Piece]) -> Option<&Piece> {
+    pieces.iter().rev().find(|piece| place(piece).is_some())
 }
 
 /// How many of the paragraph's bookmarks come before `piece` or within it.
