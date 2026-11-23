@@ -362,9 +362,14 @@ class Packages(unittest.TestCase):
                         # w:hint names a slot, not a font.
                         if attribute == f"{W}hint":
                             continue
-                        # A theme attribute names the theme's font for its slot.
-                        if attribute.endswith("Theme"):
+                        # A theme attribute names the theme's font for its slot (CT_Fonts
+                        # spells the complex script one w:cstheme), or none, which the East
+                        # Asian slot has.
+                        if attribute in (f"{W}asciiTheme", f"{W}hAnsiTheme",
+                                         f"{W}eastAsiaTheme", f"{W}cstheme"):
                             value = rules.THEME_FONTS[rules.THEME_SLOTS[value]]
+                            if not value:
+                                continue
                         named.add(value)
             self.assertEqual(table, named, doc.name)
 
@@ -409,6 +414,7 @@ class Packages(unittest.TestCase):
                 "E-table-autofit-beside-constrained-14": {"doNotAutofitConstrainedTables"},
                 "E-table-autofit-grow-15": {"growAutofit"},
                 "E-underline-trailspace-indent": {"ulTrailSpace"},
+                "E-whitespace-compat": {"doNotUseIndentAsNumberingTabStop"},
             }.get(doc.name, set())
             self.assertEqual(flags, expected, doc.name)
             # The documents about a setting name its value; every other document in mode 15
@@ -444,6 +450,9 @@ class Packages(unittest.TestCase):
                 expected = ["1"] if modes == [15] else []
                 if doc.name in named and named[doc.name][0] == setting:
                     expected = named[doc.name][1]
+                # E-whitespace-compat writes each with a space around it (#243).
+                if doc.name == "E-whitespace-compat":
+                    expected = [" 1 "]
                 self.assertEqual(values, expected, f"{doc.name}: {setting}")
 
     def test_lists_only_use_defined_numbering(self):
@@ -464,8 +473,13 @@ class Packages(unittest.TestCase):
 
     def test_styles_named_are_defined(self):
         # Word falls back to Normal for a style it does not find, so a mistyped name would
-        # only show in the render.
+        # only show in the render. The documents about how Word matches style ids name ids
+        # in another case, a name, and a style of no type of the schema on purpose (#40);
+        # BatchFourteenStyles checks theirs.
+        on_purpose = {"E-style-id-case", "E-style-id-missing", "E-style-type-unknown"}
         for doc in self.docs:
+            if doc.name in on_purpose:
+                continue
             parts = rules.parts(doc)
             styles = part(parts, "word/styles.xml")
             defined = {s.get(f"{W}styleId") for s in styles.iter(f"{W}style")}
@@ -7134,6 +7148,8 @@ class Batch14A(unittest.TestCase):
         ]
         self.assertEqual(whats[::2], expected)
         self.assertEqual(whats[1::2], expected)
+
+
 # Batch 14, part B: the relationships of headers, footers and notes, and the documents of
 # floating and VML objects.
 
@@ -8298,6 +8314,1094 @@ class FloatingObjectDocuments(unittest.TestCase):
                 self.assertTrue(b14_text(holder).endswith(" after it."))
         # The inline cases on page 1, then two floating cases to a page.
         self.assertEqual(pages, [1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6])
+A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+
+
+class BatchFourteen(unittest.TestCase):
+    """Helpers of the batch 14 tests of part C: lists, styles and unusual values."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.docs = {doc.name: doc for doc in rules.documents()}
+
+    def parts(self, name):
+        return dict(rules.parts(self.docs[name]))
+
+    def xml(self, name, part_name):
+        return ElementTree.fromstring(self.parts(name)[part_name])
+
+    def body(self, name):
+        return self.xml(name, "word/document.xml").find(f"{W}body")
+
+    @staticmethod
+    def texts(element):
+        return "".join(t.text or "" for t in element.iter(f"{W}t"))
+
+    @staticmethod
+    def val(element, path):
+        found = element.find(path)
+        return None if found is None else found.get(f"{W}val")
+
+    def styles(self, name):
+        """Every w:style of the document, in order."""
+        return list(self.xml(name, "word/styles.xml").iter(f"{W}style"))
+
+    def style(self, name, style_id):
+        (found,) = [s for s in self.styles(name) if s.get(f"{W}styleId") == style_id]
+        return found
+
+    def numbering(self, name):
+        """{numId: {ilvl: w:lvl}} of the document's list instances."""
+        root = self.xml(name, "word/numbering.xml")
+        abstracts = {a.get(f"{W}abstractNumId"): {int(lvl.get(f"{W}ilvl")): lvl
+                                                  for lvl in a.iter(f"{W}lvl")}
+                     for a in root.iter(f"{W}abstractNum")}
+        return {int(n.get(f"{W}numId")): abstracts[self.val(n, f"{W}abstractNumId")]
+                for n in root.iter(f"{W}num")}
+
+    def items(self, name, root=None):
+        """(text, numId, ilvl, w:p) of every paragraph with a list of its own."""
+        root = self.body(name) if root is None else root
+        found = []
+        for p in root.iter(f"{W}p"):
+            num_pr = p.find(f"{W}pPr/{W}numPr")
+            if num_pr is not None:
+                found.append((self.texts(p), int(self.val(num_pr, f"{W}numId")),
+                              int(self.val(num_pr, f"{W}ilvl")), p))
+        return found
+
+    def settings(self, name):
+        return self.xml(name, "word/settings.xml")
+
+    def compat_values(self, name):
+        return {s.get(f"{W}name"): s.get(f"{W}val")
+                for s in self.settings(name).iter(f"{W}compatSetting")}
+
+    @staticmethod
+    def wrapped_lines(text_, width, size=11):
+        """The lines of text_ broken first fit at its spaces in Carlito at size points, in a
+        column width points wide: a lower bound on Word's count, which keeps a space at a
+        line's end out of its width."""
+        lines_, line = [], ""
+        for word in text_.split(" "):
+            trial = f"{line} {word}" if line else word
+            if line and carlito_width(trial, size) > width:
+                lines_.append(line)
+                line = word
+            else:
+                line = trial
+        return lines_ + [line]
+
+
+class BatchFourteenLists(BatchFourteen):
+    def test_list_header_numbers_one_instance_in_the_header_and_the_body(self):
+        name = "E-list-header"
+        instances = self.numbering(name)
+        self.assertEqual(list(instances), [1])
+        self.assertEqual((self.val(instances[1][0], f"{W}numFmt"),
+                          self.val(instances[1][0], f"{W}lvlText")), ("decimal", "%1."))
+        body = self.body(name)
+        (reference,) = body.iter(f"{W}headerReference")
+        self.assertEqual(reference.get(f"{W}type"), "default")
+        self.assertEqual(len(list(body.iter(f"{W}sectPr"))), 1, "one section for both pages")
+        rels = self.xml(name, "word/_rels/document.xml.rels")
+        target = {r.get("Id"): r.get("Target") for r in rels}[reference.get(R_ID)]
+        header = self.xml(name, f"word/{target}")
+        header_items = self.items(name, header)
+        self.assertEqual(len(header_items), 2)
+        self.assertEqual(len(header.findall(f"{W}p")), 2, "nothing else in the header")
+        for (text, num_id, ilvl, _), which in zip(header_items, ("first", "second")):
+            self.assertEqual((num_id, ilvl), (1, 0))
+            self.assertIn(f"the {which} of two (num 1, level 0)", text)
+        body_items = self.items(name)
+        self.assertEqual(len(body_items), 3)
+        label = self.texts(body.find(f"{W}p"))
+        self.assertIn("three items of num 1", label)
+        self.assertIn("two on page 1 and one on page 2", label)
+        self.assertIn("two items of the same num 1", label)
+        for (text, num_id, ilvl, p), (which, page) in zip(
+                body_items, (("first", 1), ("second", 1), ("third", 2))):
+            self.assertEqual((num_id, ilvl), (1, 0))
+            self.assertIn(f"the {which} of three, on page {page}", text)
+            self.assertEqual(p.find(f"{W}pPr/{W}pageBreakBefore") is not None, page == 2, text)
+        self.assertEqual(len(list(body.iter(f"{W}br"))), 0, "the only page break is case 3's")
+
+    def check_sequence(self, label, earlier):
+        """The claims a label makes about the items of its list before it, (ilvl, ...)."""
+        if "its first item" in label:
+            self.assertEqual(earlier, [], label)
+        match = re.search(r"none at levels? ([\d and]+)", label)
+        if match:
+            for ilvl in map(int, re.findall(r"\d", match.group(1))):
+                self.assertNotIn(ilvl, earlier, label)
+        match = re.search(r"after (?:the item|items) at levels? ([\d and]+)", label)
+        if match:
+            levels = list(map(int, re.findall(r"\d", match.group(1))))
+            self.assertEqual(earlier[-len(levels):], levels, label)
+
+    def test_list_own_level_items_are_where_their_labels_say(self):
+        name = "E-list-own-level"
+        instances = self.numbering(name)
+        self.assertEqual(sorted(instances), [1, 2])
+        self.assertIsNot(instances[1], instances[2], "two definitions")
+        shown = {0: ("decimal", "%1.", "1."), 1: ("upperLetter", "%2.", "A."),
+                 2: ("lowerLetter", "%3)", "a)")}
+        for levels in instances.values():
+            for ilvl, (fmt, template, _) in shown.items():
+                lvl = levels[ilvl]
+                self.assertEqual((self.val(lvl, f"{W}numFmt"), self.val(lvl, f"{W}lvlText")),
+                                 (fmt, template))
+                # Each level shows only its own number.
+                self.assertEqual(re.findall(r"%(\d)", template), [str(ilvl + 1)])
+        items = self.items(name)
+        self.assertEqual(len(items), 7)
+        before = {1: [], 2: []}
+        for n, (label, num_id, ilvl, _) in enumerate(items, 1):
+            self.assertTrue(label.startswith(f"Case {n:02d}: list {'AB'[num_id - 1]}, "
+                                             f"level {ilvl}, "), label)
+            self.check_sequence(label, before[num_id])
+            before[num_id].append(ilvl)
+        self.assertEqual(before, {1: [2, 1, 0, 1], 2: [2, 0, 1]})
+        self.assertIn("(1., A. and a))", self.docs[name].purpose)
+
+    def test_long_templates_have_the_length_their_labels_name(self):
+        for name, length in (("E-list-long-template", 300), ("E-list-long-template-600", 600)):
+            (levels,) = self.numbering(name).values()
+            template = self.val(levels[0], f"{W}lvlText")
+            self.assertEqual(len(template), length, name)
+            self.assertGreater(length, 256, "longer than the layout's cut")
+            self.assertTrue(template.startswith("%1. "), name)
+            self.assertEqual(template.count("%"), 1, "no other placeholder")
+            # Every block of ten ends in the count of characters up to its end.
+            for end in range(10, length + 1, 10):
+                self.assertEqual(template[end - 4:end], f"{end:04d}", f"{name} at {end}")
+            self.assertIn(f"w:lvlText has {length} characters", self.items(name)[0][0])
+            self.assertIn(f"w:lvlText has {length} characters", self.docs[name].purpose)
+
+    def test_template_controls_hold_the_characters_their_labels_name(self):
+        name = "E-list-template-controls"
+        instances = self.numbering(name)
+        items = self.items(name)
+        self.assertEqual(len(items), 7)
+        self.assertEqual(len({id(levels) for levels in instances.values()}), 7, "a list each")
+        raw = self.parts(name)["word/numbering.xml"].decode()
+        for text_ in re.findall(r'<w:lvlText w:val="([^"]*)"', raw):
+            # A literal tab or line feed would be read as a space (XML 1.0 §3.3.3).
+            self.assertNotRegex(text_, "[\t\n\r]")
+        names = {"U+0009, a tab": None, "U+000A, a line feed": None,
+                 "U+2028, the line separator": "LINE SEPARATOR",
+                 "U+2029, the paragraph separator": "PARAGRAPH SEPARATOR"}
+        seen = []
+        for n, (label, num_id, ilvl, _) in enumerate(items, 1):
+            self.assertTrue(label.startswith(f"Case {n:02d}: the label [%1] with "), label)
+            template = self.val(instances[num_id][0], f"{W}lvlText")
+            self.assertTrue(template.startswith("[%1") and template.endswith("]"), template)
+            middle = template[3:-1]
+            said = next((k for k in names if k in label), None)
+            if said is not None:
+                (character,) = middle
+                code = int(said[2:6], 16)
+                self.assertEqual(ord(character), code, label)
+                if names[said] is None:
+                    self.assertEqual(unicodedata.category(character), "Cc", label)
+                else:
+                    self.assertEqual(unicodedata.name(character), names[said], label)
+                seen.append(code)
+            elif "U+000B" in label:
+                self.assertIn("_x000B_", label)
+                self.assertEqual(middle, "_x000B_")
+                self.assertEqual(int(middle[2:6], 16), 0x0B)
+                seen.append(0x0B)
+            elif "U+007F" in label:
+                self.assertEqual(middle, "\x7f")
+                self.assertEqual(unicodedata.category(middle), "Cc")
+                seen.append(0x7F)
+            else:
+                self.assertIn("no other character", label)
+                self.assertEqual(middle, "")
+        self.assertEqual(seen, [0x09, 0x0A, 0x0B, 0x2028, 0x2029, 0x7F])
+        purpose = self.docs[name].purpose
+        for said in ("a tab", "a line feed", "U+000B (as _x000B_)", "U+2028", "U+2029",
+                     "U+007F"):
+            self.assertIn(said, purpose)
+
+    def test_deeper_template_items_are_where_their_labels_say(self):
+        name = "E-list-template-deeper"
+        instances = self.numbering(name)
+        items = self.items(name)
+        self.assertEqual(len(items), 5)
+        before = {1: [], 2: []}
+        for n, (label, num_id, ilvl, _) in enumerate(items, 1):
+            template = self.val(instances[num_id][ilvl], f"{W}lvlText")
+            self.assertTrue(label.startswith(f"Case {n:02d}: list {'AB'[num_id - 1]}, level "
+                                             f"{ilvl} ({template})"), label)
+            if "with no item at level 0 before it" in label:
+                self.assertNotIn(0, before[num_id], label)
+            if label.endswith("after it"):
+                self.assertEqual(len(before[num_id]), 1, label)
+            if "after the item at level 0" in label:
+                self.assertEqual(before[num_id][-1], 0, label)
+            before[num_id].append(ilvl)
+        # List A's level 1 shows level 0 and the deeper level 2; list B's only 0 and 1.
+        shown = {num_id: [int(d) for d in re.findall(r"%(\d)", self.val(
+            levels[1], f"{W}lvlText"))] for num_id, levels in instances.items()}
+        self.assertEqual(shown, {1: [1, 3], 2: [1, 2]})
+        self.assertIn(2, instances[1], "list A has the level its template shows")
+        formats = [self.val(instances[1][k], f"{W}numFmt") for k in range(3)]
+        self.assertEqual(len(set(formats)), 3, "each level counts in a format of its own")
+
+    def test_label_mark_style_cases_have_the_style_their_labels_name(self):
+        name = "E-list-label-mark-style"
+        instances = self.numbering(name)
+        properties = {
+            "colour FF0000": [("color", {f"{W}val": "FF0000"})],
+            "bold": [("b", {}), ("bCs", {})], "italic": [("i", {}), ("iCs", {})],
+            "capitals": [("caps", {})], "struck through": [("strike", {})],
+            "w:rFonts w:ascii Times New Roman": [("rFonts", {f"{W}ascii": "Times New Roman"})],
+            "single underline": [("u", {f"{W}val": "single"})],
+        }
+        items = self.items(name)
+        self.assertEqual(len(items), 9)
+        self.assertEqual(len({num_id for _, num_id, _, _ in items}), 9, "a list each")
+        for n, (label, num_id, ilvl, p) in enumerate(items, 1):
+            self.assertTrue(label.startswith(f"Case {n:02d}: "), label)
+            mark = p.find(f"{W}pPr/{W}rPr")
+            mark_style = self.val(p, f"{W}pPr/{W}rPr/{W}rStyle")
+            match = re.search(r"mark style (\w+)(?: \(([^)]+)\))?", label)
+            if match:
+                self.assertEqual(mark_style, match.group(1), label)
+                style_ = self.style(name, mark_style)
+                self.assertEqual(style_.get(f"{W}type"), "character")
+                said = match.group(2) or "colour FF0000"
+                self.assertEqual(said == "colour FF0000", mark_style == "MarkRed", label)
+                self.assertEqual([(c.tag, dict(c.attrib)) for c in style_.find(f"{W}rPr")],
+                                 [(f"{W}{tag}", attributes) for tag, attributes in
+                                  properties[said]], label)
+            else:
+                self.assertIn("no mark style", label)
+                self.assertIsNone(mark_style, label)
+            fmt = self.val(instances[num_id][0], f"{W}numFmt")
+            self.assertEqual(fmt, "lowerLetter" if "capitals" in label else "decimal", label)
+            direct = [c for c in (mark if mark is not None else []) if c.tag != f"{W}rStyle"]
+            if "a double underline on the mark" in label:
+                self.assertEqual([(c.tag, c.get(f"{W}val")) for c in direct],
+                                 [(f"{W}u", "double")])
+            else:
+                self.assertEqual(direct, [], label)
+            p_style = self.val(p, f"{W}pPr/{W}pStyle")
+            if "paragraph style ParaUnderline (single underline)" in label:
+                self.assertEqual(p_style, "ParaUnderline")
+                style_ = self.style(name, "ParaUnderline")
+                self.assertEqual(self.val(style_, f"{W}basedOn"), "Normal")
+                (only,) = style_.find(f"{W}rPr")
+                self.assertEqual((only.tag, only.get(f"{W}val")), (f"{W}u", "single"))
+            else:
+                self.assertIsNone(p_style, label)
+        self.assertNotIn(b"highlight", self.parts(name)["word/styles.xml"])
+
+    def test_label_mark_highlight_cases_have_the_highlight_their_labels_name(self):
+        name = "E-list-label-mark-highlight"
+        style_ = self.style(name, "MarkHighlight")
+        self.assertEqual(style_.get(f"{W}type"), "character")
+        (only,) = style_.find(f"{W}rPr")
+        self.assertEqual((only.tag, only.get(f"{W}val")), (f"{W}highlight", "yellow"))
+        items = self.items(name)
+        self.assertEqual(len(items), 2)
+        (first,) = items[0][3].find(f"{W}pPr/{W}rPr")
+        self.assertIn("mark style MarkHighlight (highlight yellow)", items[0][0])
+        self.assertEqual((first.tag, first.get(f"{W}val")), (f"{W}rStyle", "MarkHighlight"))
+        (second,) = items[1][3].find(f"{W}pPr/{W}rPr")
+        self.assertIn("a highlight yellow on the mark itself", items[1][0])
+        self.assertEqual((second.tag, second.get(f"{W}val")), (f"{W}highlight", "yellow"))
+
+    def test_high_levels_are_the_ones_their_labels_name(self):
+        name = "E-value-ilvl-high"
+        (levels,) = self.numbering(name).values()
+        self.assertEqual(sorted(levels), list(range(9)), "nine levels")
+        for ilvl, lvl in levels.items():
+            # Each label names its level: L<level>-<number>.
+            self.assertEqual(self.val(lvl, f"{W}lvlText"), f"L{ilvl}-%{ilvl + 1}")
+        items = self.items(name)
+        self.assertEqual([ilvl for _, _, ilvl, _ in items], [0, 9, 12, 8, 0])
+        for n, (label, _, ilvl, _) in enumerate(items, 1):
+            self.assertTrue(label.startswith(f"Case {n:02d}: "), label)
+            if "w:ilvl of" in label:
+                self.assertIn(f"a direct w:ilvl of {ilvl}", label)
+                self.assertGreater(ilvl, max(levels))
+            else:
+                self.assertIn(f"level {ilvl}", label)
+                self.assertIn(ilvl, levels)
+        self.assertIn("past the last of the nine levels", items[1][0])
+
+
+class BatchFourteenParagraphs(BatchFourteen):
+    def case_paragraphs(self, name):
+        return [p for p in self.body(name).findall(f"{W}p")
+                if self.texts(p).startswith("Case ")]
+
+    def test_paragraph_units_normal_cases_have_the_sizes_their_labels_name(self):
+        name = "E-paragraph-units-normal"
+        styles = self.xml(name, "word/styles.xml")
+        defaults = styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")
+        self.assertEqual(self.val(defaults, f"{W}sz"), "22", "document defaults of 11 pt")
+        normal = self.style(name, "Normal")
+        self.assertEqual([c.tag for c in normal.find(f"{W}rPr")], [f"{W}sz", f"{W}szCs"])
+        self.assertEqual(self.val(normal, f"{W}rPr/{W}sz"), "32", "Normal 16 pt")
+        self.assertIsNone(normal.find(f"{W}pPr"))
+        cases = self.case_paragraphs(name)
+        self.assertEqual(len(cases), 5)
+        previous = None
+        for n, p in enumerate(cases, 1):
+            label = self.texts(p)
+            self.assertTrue(label.startswith(f"Case {n:02d}: "), label)
+            ind = p.find(f"{W}pPr/{W}ind")
+            self.assertEqual(dict(ind.attrib), {f"{W}leftChars": "200"}, label)
+            self.assertIn("leftChars 200", label)
+            runs = p.findall(f"{W}r")
+            self.assertEqual(len(runs), 2)
+            sample = self.texts(runs[1])
+            sizes = []
+            for props in [r.find(f"{W}rPr") for r in runs] + [p.find(f"{W}pPr/{W}rPr")]:
+                sizes.append(None if props is None else (
+                    int(self.val(props, f"{W}sz")) / 2, int(self.val(props, f"{W}szCs")) / 2))
+            self.assertEqual(len(set(sizes)), 1, "runs and mark alike")
+            match = re.search(r"w:sz (\d+) pt and w:szCs (\d+) pt", label)
+            if "no other size" in label:
+                self.assertEqual(sizes[0], None)
+            elif "the same sizes" in label:
+                self.assertEqual(sizes[0], previous, label)
+            else:
+                self.assertEqual(sizes[0], (float(match.group(1)), float(match.group(2))))
+                self.assertNotEqual(*sizes[0])
+            if "East Asian text" in label:
+                self.assertTrue(all(unicodedata.east_asian_width(c) in "WF" for c in sample),
+                                sample)
+                self.assertTrue(any(unicodedata.name(c).startswith("CJK UNIFIED") for c in sample))
+            else:
+                self.assertTrue(sample.isascii(), label)
+            previous = sizes[0]
+
+    def test_paragraph_units_grids_have_the_grids_their_labels_name(self):
+        name = "E-paragraph-units-grids"
+        body = self.body(name)
+        sections, current = [], []
+        for p in body.findall(f"{W}p"):
+            if self.texts(p).startswith("Case "):
+                current.append(p)
+            sect = p.find(f"{W}pPr/{W}sectPr")
+            if sect is not None:
+                sections.append((sect, current))
+                current = []
+        sections.append((body.find(f"{W}sectPr"), current))
+        self.assertEqual(len(sections), 4)
+        types = []
+        n = 0
+        for sect, cases in sections:
+            grid = sect.find(f"{W}docGrid")
+            self.assertIn(self.val(sect, f"{W}type"), (None, "nextPage"), "a page each")
+            self.assertEqual(int(grid.get(f"{W}linePitch")) / 20, 18)
+            types.append(grid.get(f"{W}type"))
+            self.assertEqual(len(cases), 2)
+            for p in cases:
+                n += 1
+                label = self.texts(p)
+                self.assertTrue(label.startswith(f"Case {n:02d}: grid {types[-1]}, pitch 18 pt; "),
+                                label)
+                space = {k.replace(W, ""): v for k, v in p.find(f"{W}pPr/{W}spacing").attrib.items()}
+                if "beforeLines 100 beside 6 pt before" in label:
+                    self.assertEqual(space, {"before": "120", "beforeLines": "100"})
+                else:
+                    self.assertIn("6 pt before only", label)
+                    self.assertEqual(space, {"before": "120"})
+        self.assertEqual(types, ["lines", "linesAndChars", "snapToChars", "default"])
+
+    def test_negative_line_cases_have_the_spacing_their_labels_name(self):
+        name = "E-value-line-negative"
+        cases = self.case_paragraphs(name)
+        found = []
+        for n, p in enumerate(cases, 1):
+            label = self.texts(p)
+            space = p.find(f"{W}pPr/{W}spacing")
+            value, rule = int(space.get(f"{W}line")), space.get(f"{W}lineRule")
+            self.assertTrue(label.startswith(f"Case {n:02d}: w:spacing w:line {value} "
+                                             f"w:lineRule {rule}: "), label)
+            self.assertLess(value, 0)
+            self.assertEqual(len(space.attrib), 2)
+            # "a third line": the text takes three lines of Calibri 11 pt at least.
+            self.assertGreaterEqual(len(self.wrapped_lines(label, rules.TEXT_W / 20)), 3,
+                                    label)
+            found.append((value, rule))
+        self.assertEqual(found, [(-240, "auto"), (-480, "auto"), (-480, "exact"),
+                                 (-480, "atLeast")])
+
+    def test_outline_level_cases_have_the_levels_their_labels_name(self):
+        name = "E-value-outline-level"
+        found = []
+        for n, p in enumerate(self.case_paragraphs(name), 1):
+            value = int(self.val(p, f"{W}pPr/{W}outlineLvl"))
+            self.assertEqual(self.texts(p), f"Case {n:02d}: w:outlineLvl {value}")
+            self.assertEqual(len(p.find(f"{W}pPr")), 1)
+            found.append(value)
+        self.assertEqual(found, [0, -3, -2, 25, 9])
+        outside = [v for v in found if not 0 <= v <= 9]
+        self.assertEqual(outside, [-3, -2, 25], self.docs[name].purpose)
+
+    def test_negative_hanging_cases_have_the_indents_their_labels_name(self):
+        name = "E-value-hanging-negative"
+        expected = {"left 72 pt, w:hanging -18 pt": {"left": "1440", "hanging": "-360"},
+                    "left 72 pt, w:hanging 18 pt": {"left": "1440", "hanging": "360"},
+                    "left 72 pt, w:firstLine 18 pt": {"left": "1440", "firstLine": "360"}}
+        cases = self.case_paragraphs(name)
+        self.assertEqual(len(cases), 3)
+        for n, (p, (said, ind)) in enumerate(zip(cases, expected.items()), 1):
+            label = self.texts(p)
+            self.assertTrue(label.startswith(f"Case {n:02d}: {said}"), label)
+            found = {k.replace(W, ""): v for k, v in p.find(f"{W}pPr/{W}ind").attrib.items()}
+            self.assertEqual(found, ind)
+            # Two lines at least, at the 72 pt indent (54 pt for the first line of case 01, 90
+            # pt for case 03's), so that the hanging indent shows.
+            self.assertGreaterEqual(len(self.wrapped_lines(label, rules.TEXT_W / 20 - 54)), 2,
+                                    label)
+
+    def test_spacing_minus_one_cases_have_the_spacing_their_labels_name(self):
+        name = "E-value-spacing-minus-one"
+        spaced = self.style(name, "Spaced")
+        self.assertEqual(self.val(spaced, f"{W}basedOn"), "Normal")
+        space = spaced.find(f"{W}pPr/{W}spacing")
+        self.assertEqual((int(space.get(f"{W}before")) / 20, int(space.get(f"{W}after")) / 20),
+                         (24, 24))
+        paragraphs = self.body(name).findall(f"{W}p")
+        expected = [{"before": "-1"}, {"after": "-1"}, {"before": "-1", "after": "-1"},
+                    {"before": "0", "after": "0"}, None]
+        cases = [(k, p) for k, p in enumerate(paragraphs) if self.texts(p).startswith("Case ")]
+        self.assertEqual(len(cases), 5)
+        for n, ((k, p), spacing_) in enumerate(zip(cases, expected), 1):
+            label = self.texts(p)
+            self.assertTrue(label.startswith(f"Case {n:02d}: style Spaced (24 pt before and "
+                                             "after); "), label)
+            self.assertEqual(self.val(p, f"{W}pPr/{W}pStyle"), "Spaced")
+            found = p.find(f"{W}pPr/{W}spacing")
+            if spacing_ is None:
+                self.assertIsNone(found)
+                self.assertIn("no spacing of its own", label)
+                continue
+            attributes = {a.replace(W, ""): v for a, v in found.attrib.items()}
+            self.assertEqual(attributes, spacing_)
+            said = " and ".join(f"w:{a} {v}" for a, v in spacing_.items())
+            self.assertIn(said, label)
+            # Its neighbours are in Normal with no spacing of their own.
+            for neighbour in (paragraphs[k - 1], paragraphs[k + 1]):
+                self.assertIsNone(neighbour.find(f"{W}pPr"), self.texts(neighbour))
+
+    def test_short_theme_tint_cases_have_the_values_their_labels_name(self):
+        name = "E-value-theme-tint-short"
+        theme = self.xml(name, "word/theme/theme1.xml")
+        accent1 = theme.find(f".//{A}accent1/{A}srgbClr").get("val")
+        self.assertEqual(accent1, "336699")
+        cases = self.case_paragraphs(name)
+        self.assertEqual(len(cases), 6)
+        digits = []
+        for n, p in enumerate(cases, 1):
+            label = self.texts(p)
+            self.assertTrue(label.startswith(f"Case {n:02d}: "), label)
+            (props,) = p.findall(f"{W}r")[1].find(f"{W}rPr")
+            attribute, value = re.search(r'w:(\w+) "(\w+)"', label).groups()
+            if label.startswith(f"Case {n:02d}: text in accent1"):
+                self.assertEqual(props.tag, f"{W}color")
+                self.assertEqual((props.get(f"{W}themeColor"), props.get(f"{W}val")),
+                                 ("accent1", "000000"))
+            else:
+                self.assertIn("run shading in accent1", label)
+                self.assertEqual(props.tag, f"{W}shd")
+                self.assertEqual((props.get(f"{W}themeFill"), props.get(f"{W}fill")),
+                                 ("accent1", "000000"))
+            self.assertEqual(props.get(f"{W}{attribute}"), value, label)
+            themed = {a for a in props.attrib if "Tint" in a or "Shade" in a}
+            self.assertEqual(themed, {f"{W}{attribute}"}, label)
+            self.assertEqual(len(value) == 2, "(to compare)" in label, label)
+            digits.append(len(value))
+        self.assertEqual(digits, [1, 2, 1, 2, 1, 2])
+
+    def test_char_scale_cases_have_the_scales_their_labels_name(self):
+        name = "E-char-scale-zero"
+        cases = self.case_paragraphs(name)
+        scales = []
+        for n, p in enumerate(cases, 1):
+            label, sample, after = [self.texts(r) for r in p.findall(f"{W}r")]
+            scale = int(self.val(p.findall(f"{W}r")[1], f"{W}rPr/{W}w"))
+            self.assertEqual(label, f"Case {n:02d}: w:w {scale}, between the bars: |")
+            self.assertEqual((sample, after), ("Hamburgefontsiv Hamburgefontsiv", "|"))
+            self.assertIsNone(p.findall(f"{W}r")[0].find(f"{W}rPr"))
+            self.assertIsNone(p.findall(f"{W}r")[2].find(f"{W}rPr"))
+            # One line even at 100 %.
+            self.assertLess(carlito_width(label + sample + after), rules.TEXT_W / 20)
+            scales.append(scale)
+        self.assertEqual(scales, [0, 100, 1])
+
+    def test_hash_colour_cases_have_the_values_their_labels_name(self):
+        name = "E-color-hash"
+        cases = self.case_paragraphs(name)
+        self.assertEqual(len(cases), 5)
+        for n, p in enumerate(cases, 1):
+            label = self.texts(p.findall(f"{W}r")[0])
+            self.assertTrue(label.startswith(f"Case {n:02d}: "), label)
+            (value,) = re.findall(r'"(#?[0-9A-F]{6})"', label)
+            sample = p.findall(f"{W}r")[1]
+            if "paragraph shading" in label:
+                element, attribute = p.find(f"{W}pPr/{W}shd"), "fill"
+                self.assertIsNone(sample.find(f"{W}rPr"))
+            elif "run shading" in label:
+                element, attribute = sample.find(f"{W}rPr/{W}shd"), "fill"
+            elif label.startswith(f"Case {n:02d}: w:u"):
+                element, attribute = sample.find(f"{W}rPr/{W}u"), "color"
+                self.assertIn("on black text", label)
+                self.assertIsNone(sample.find(f"{W}rPr/{W}color"))
+            else:
+                element, attribute = sample.find(f"{W}rPr/{W}color"), "val"
+            self.assertEqual(element.get(f"{W}{attribute}"), value, label)
+            self.assertEqual(value.startswith("#"), "(to compare)" not in label, label)
+
+    def leader_font_codes(self, path, platform, encoding):
+        """The characters a cmap subtable of format 4 maps to a glyph, or None without it."""
+        data = path.read_bytes()
+        (count,) = struct.unpack(">H", data[4:6])
+        tables = {}
+        for i in range(count):
+            tag, _, offset, length = struct.unpack(">4sIII", data[12 + 16 * i: 28 + 16 * i])
+            tables[tag] = data[offset: offset + length]
+        cmap = tables[b"cmap"]
+        (subtables,) = struct.unpack(">H", cmap[2:4])
+        for i in range(subtables):
+            found = struct.unpack(">HHI", cmap[4 + 8 * i: 12 + 8 * i])
+            if found[:2] == (platform, encoding):
+                sub = cmap[found[2]:]
+                break
+        else:
+            return None
+        self.assertEqual(struct.unpack(">H", sub[0:2]), (4,))
+        segments = struct.unpack(">H", sub[6:8])[0] // 2
+        ends = struct.unpack(f">{segments}H", sub[14: 14 + 2 * segments])
+        at = 16 + 2 * segments
+        starts = struct.unpack(f">{segments}H", sub[at: at + 2 * segments])
+        deltas = struct.unpack(f">{segments}h", sub[at + 2 * segments: at + 4 * segments])
+        ranges_at = at + 4 * segments
+        ranges = struct.unpack(f">{segments}H", sub[ranges_at: ranges_at + 2 * segments])
+        codes = set()
+        for k in range(segments):
+            for code in range(starts[k], ends[k] + 1):
+                if ranges[k] == 0:
+                    glyph = (code + deltas[k]) & 0xFFFF
+                else:
+                    place = ranges_at + 2 * k + ranges[k] + 2 * (code - starts[k])
+                    (glyph,) = struct.unpack(">H", sub[place: place + 2])
+                if glyph and code != 0xFFFF:
+                    codes.add(code)
+        return codes
+
+    def test_leader_cases_have_the_fonts_and_leaders_their_labels_name(self):
+        name = "E-tab-leader-no-underscore"
+        font = Path(__file__).resolve().parents[2] / (
+            "tests/fonts-word/test-symbol/OfficewrightTestSymbol-Regular.ttf")
+        symbol = self.leader_font_codes(font, 3, 0)
+        self.assertIsNone(self.leader_font_codes(font, 3, 1), "no Unicode character map")
+        self.assertNotIn(ord("_"), symbol)
+        self.assertIn(0xF000 + ord("_"), symbol, "the symbol code F05F")
+        for leader in ".-·":
+            self.assertNotIn(ord(leader), symbol)
+            self.assertIn(0xF000 + ord(leader), symbol)
+        self.assertIn("(only the symbol code F05F)", self.docs[name].purpose)
+        paragraphs = self.body(name).findall(f"{W}p")
+        self.assertEqual(len(paragraphs), 14)
+        found = []
+        for n, (label_p, case) in enumerate(zip(paragraphs[::2], paragraphs[1::2]), 1):
+            label = self.texts(label_p)
+            match = re.fullmatch(rf"Case {n:02d}: (\w+) leader to a left stop at 216 pt, the tab "
+                                 r"in (.+?)( \(to compare\))?:", label)
+            self.assertIsNotNone(match, label)
+            leader, family = match.group(1), match.group(2)
+            (stop,) = case.find(f"{W}pPr/{W}tabs")
+            self.assertEqual((stop.get(f"{W}val"), int(stop.get(f"{W}pos")) / 20,
+                              stop.get(f"{W}leader")), ("left", 216, leader))
+            tab_run_, after = case.findall(f"{W}r")
+            self.assertIsNotNone(tab_run_.find(f"{W}tab"))
+            fonts = tab_run_.find(f"{W}rPr/{W}rFonts")
+            self.assertEqual({fonts.get(f"{W}{slot}") for slot in ("ascii", "hAnsi", "eastAsia",
+                                                                   "cs")}, {family})
+            self.assertEqual(self.texts(after), "x")
+            self.assertEqual(match.group(3) is None,
+                             leader in ("underscore", "heavy") and family == rules.SYMBOL_FONT)
+            found.append((leader, family))
+        self.assertEqual(found, [("underscore", "Officewright Test Symbol"),
+                                 ("heavy", "Officewright Test Symbol"),
+                                 ("dot", "Officewright Test Symbol"),
+                                 ("hyphen", "Officewright Test Symbol"),
+                                 ("middleDot", "Officewright Test Symbol"),
+                                 ("underscore", "Calibri"), ("heavy", "Calibri")])
+
+
+class BatchFourteenTableStyles(BatchFourteen):
+    def big(self, name):
+        big = self.style(name, "Big")
+        self.assertEqual(big.get(f"{W}type"), "table")
+        self.assertEqual(self.val(big, f"{W}pPr/{W}jc"), "center")
+        self.assertEqual(int(self.val(big, f"{W}rPr/{W}sz")) / 2, 14)
+
+    def cells(self, name):
+        (table,) = self.body(name).iter(f"{W}tbl")
+        self.assertEqual(self.val(table, f"{W}tblPr/{W}tblStyle"), "Big")
+        return [p for tc in table.iter(f"{W}tc") for p in tc.findall(f"{W}p")]
+
+    def test_based_on_normal_cases_have_the_styles_their_labels_name(self):
+        name = "E-table-style-based-on-normal-14"
+        self.big(name)
+        self.assertEqual(self.compat_values(name), {"compatibilityMode": "14"})
+        normal = self.style(name, "Normal")
+        self.assertEqual((self.val(normal, f"{W}pPr/{W}jc"),
+                          int(self.val(normal, f"{W}rPr/{W}sz")) / 2), ("left", 12))
+        inherit, own = self.style(name, "BasedInherit"), self.style(name, "BasedOwn")
+        for based in (inherit, own):
+            self.assertEqual(self.val(based, f"{W}basedOn"), "Normal")
+            self.assertIsNone(based.find(f"{W}pPr"))
+        self.assertIsNone(inherit.find(f"{W}rPr"), "inherits the 12 pt")
+        self.assertEqual([(c.tag, c.get(f"{W}val")) for c in own.find(f"{W}rPr")],
+                         [(f"{W}sz", "24"), (f"{W}szCs", "24")])
+        for p in self.cells(name):
+            said = self.texts(p).split(": ")[1]
+            self.assertEqual(self.val(p, f"{W}pPr/{W}pStyle"),
+                             None if said == "Normal" else said)
+        label = self.texts(self.body(name).find(f"{W}p"))
+        self.assertIn("Normal 12 pt, left", label)
+        self.assertIn("(14 pt, centred)", label)
+
+    def test_no_defaults_case_has_no_run_defaults(self):
+        name = "E-table-style-no-defaults"
+        self.big(name)
+        styles = self.xml(name, "word/styles.xml")
+        self.assertIsNone(styles.find(f"{W}docDefaults/{W}rPrDefault"))
+        normal = self.style(name, "Normal")
+        self.assertEqual([(c.tag, c.get(f"{W}val")) for c in normal.find(f"{W}rPr")],
+                         [(f"{W}sz", "20"), (f"{W}szCs", "20")])
+        self.assertIsNone(normal.find(f"{W}pPr"))
+        self.assertEqual(self.compat_values(name)["overrideTableStyleFontSizeAndJustification"],
+                         "1")
+        self.assertEqual(len(self.cells(name)), 4)
+
+    def test_normal_both_cases_wrap_and_have_the_justification_their_labels_name(self):
+        name = "E-table-style-normal-both"
+        self.big(name)
+        styles = self.xml(name, "word/styles.xml")
+        self.assertEqual(self.val(styles, f"{W}docDefaults/{W}rPrDefault/{W}rPr/{W}sz"), "24")
+        self.assertIsNone(styles.find(f"{W}docDefaults/{W}pPrDefault/{W}pPr/{W}jc"))
+        normal = self.style(name, "Normal")
+        self.assertEqual((self.val(normal, f"{W}pPr/{W}jc"),
+                          int(self.val(normal, f"{W}rPr/{W}sz")) / 2), ("both", 11))
+        self.assertEqual(self.compat_values(name)["overrideTableStyleFontSizeAndJustification"],
+                         "1")
+        # Every cell's text runs over a line at 11 pt, so that justification shows.
+        cell_width = (rules.TEXT_W // 2 - 2 * 108) / 20
+        cells = self.cells(name)
+        self.assertEqual(len(cells), 4)
+        for p in cells:
+            self.assertGreaterEqual(len(self.wrapped_lines(self.texts(p), cell_width)), 2)
+        after = self.body(name).findall(f"{W}p")[-1]
+        self.assertGreaterEqual(len(self.wrapped_lines(self.texts(after), rules.TEXT_W / 20)),
+                                2)
+
+
+class BatchFourteenStyles(BatchFourteen):
+    def case_paragraphs(self, name):
+        return [p for p in self.body(name).findall(f"{W}p")
+                if self.texts(p).startswith("Case ")]
+
+    def assert_centred_bold(self, style_):
+        self.assertEqual(self.val(style_, f"{W}pPr/{W}jc"), "center")
+        self.assertEqual([c.tag for c in style_.find(f"{W}rPr")], [f"{W}b", f"{W}bCs"])
+
+    def test_style_id_case_cases_name_ids_in_the_cases_their_labels_say(self):
+        name = "E-style-id-case"
+        ids = {s.get(f"{W}styleId"): s for s in self.styles(name)}
+        self.assert_centred_bold(ids["MixedCase"])
+        self.assertEqual([c.tag for c in ids["BasedOnLower"].find(f"{W}rPr")],
+                         [f"{W}i", f"{W}iCs"])
+        self.assertEqual(self.val(ids["LinkedPara"], f"{W}pPr/{W}jc"), "right")
+        self.assertEqual(self.val(ids["LinkedChar"], f"{W}rPr/{W}u"), "single")
+        self.assertEqual(ids["LinkedChar"].get(f"{W}type"), "character")
+        named = set()
+        for n, p in enumerate(self.case_paragraphs(name), 1):
+            label = self.texts(p)
+            self.assertTrue(label.startswith(f"Case {n:02d}: "), label)
+            (value,) = re.findall(r'(?:w:pStyle|w:rStyle) "(\w+)"', label)
+            kind = "rStyle" if "w:rStyle" in label else "pStyle"
+            found = p.find(f".//{W}{kind}")
+            self.assertEqual(found.get(f"{W}val"), value, label)
+            named.add(value)
+            if "as written" in label:
+                self.assertIn(value, ids)
+            target = re.search(r"the id ([A-Z]\w*)", label)
+            if target:
+                target = target.group(1)
+                if "in lower case" in label:
+                    self.assertEqual(value, target.lower())
+                elif "in capitals" in label:
+                    self.assertEqual(value, target.upper())
+                self.assertEqual(value == target, "as written" in label, label)
+                self.assertIn(target, ids)
+        self.assertEqual(self.val(ids["BasedOnLower"], f"{W}basedOn"), "mixedcase")
+        self.assertEqual(self.val(ids["LinkedPara"], f"{W}link"), "linkedchar")
+        self.assertEqual(self.val(ids["LinkedChar"], f"{W}link"), "linkedpara")
+        named |= {"mixedcase", "linkedchar", "linkedpara"}
+        # The values in another case match an id only without regard to case, and no name.
+        for value in named:
+            matches = [i for i in ids if i.lower() == value.lower()]
+            self.assertEqual(len(matches), 1, value)
+            for style_ in ids.values():
+                style_name = self.val(style_, f"{W}name")
+                self.assertNotEqual(style_name.replace(" ", "").lower(), value.lower())
+        self.assertEqual({v for v in named if v not in ids},
+                         {"mixedcase", "MIXEDCASE", "linkedchar", "linkedpara"})
+
+    def test_repeated_ids_are_the_styles_the_labels_name(self):
+        name = "E-style-id-repeated"
+        by_id = {}
+        for style_ in self.styles(name):
+            by_id.setdefault(style_.get(f"{W}styleId"), []).append(style_)
+        first, second = by_id["Twice"]
+        self.assertEqual([self.val(s, f"{W}name") for s in (first, second)],
+                         ["Twice first", "Twice second"])
+        self.assert_centred_bold(first)
+        self.assertEqual(self.val(second, f"{W}pPr/{W}jc"), "right")
+        self.assertEqual([c.tag for c in second.find(f"{W}rPr")], [f"{W}i", f"{W}iCs"])
+        first, second = by_id[""]
+        self.assertEqual([self.val(s, f"{W}name") for s in (first, second)],
+                         ["Empty id first", "Empty id second"])
+        self.assertEqual([int(s.find(f"{W}pPr/{W}spacing").get(f"{W}before")) / 20
+                          for s in (first, second)], [12, 24])
+        self.assertEqual((self.val(first, f"{W}rPr/{W}u"), first.find(f"{W}rPr/{W}strike")),
+                         ("single", None))
+        self.assertEqual([c.tag for c in second.find(f"{W}rPr")], [f"{W}strike"])
+        cases = self.case_paragraphs(name)
+        self.assertEqual([self.val(p, f"{W}pPr/{W}pStyle") for p in cases], ["Twice", "", None])
+        self.assertIn('w:pStyle "Twice"', self.texts(cases[0]))
+        self.assertIn('w:pStyle ""', self.texts(cases[1]))
+
+    def test_missing_id_cases_name_the_style_by_its_name(self):
+        name = "E-style-id-missing"
+        without = [s for s in self.styles(name) if s.get(f"{W}styleId") is None]
+        (style_,) = without
+        self.assertEqual(self.val(style_, f"{W}name"), "No Id Style")
+        self.assert_centred_bold(style_)
+        ids = {s.get(f"{W}styleId") for s in self.styles(name)}
+        cases = self.case_paragraphs(name)
+        values = [self.val(p, f"{W}pPr/{W}pStyle") for p in cases]
+        self.assertEqual(values, ["NoIdStyle", "No Id Style", None])
+        self.assertEqual(values[0], "No Id Style".replace(" ", ""))
+        for value, p in zip(values[:2], cases):
+            self.assertIn(f'w:pStyle "{value}"', self.texts(p))
+            self.assertNotIn(value, ids)
+
+    def test_unknown_type_cases_name_the_style_of_no_type(self):
+        name = "E-style-type-unknown"
+        style_ = self.style(name, "UnknownType")
+        self.assertEqual(style_.get(f"{W}type"), "unknown")
+        self.assertNotIn("unknown", ("paragraph", "character", "table", "numbering"))
+        self.assert_centred_bold(style_)
+        cases = self.case_paragraphs(name)
+        self.assertEqual([(self.val(p, f"{W}pPr/{W}pStyle"), self.val(p, f".//{W}rStyle"))
+                          for p in cases],
+                         [("UnknownType", None), (None, "UnknownType"), (None, None)])
+        self.assertIn('w:type "unknown"', self.texts(cases[0]))
+
+
+class BatchFourteenSectionsAndWhitespace(BatchFourteen):
+    def test_sectpr_in_cell_has_the_page_sizes_its_labels_name(self):
+        name = "E-sectpr-in-cell"
+        body = self.body(name)
+        (table,) = body.iter(f"{W}tbl")
+        (inner,) = table.iter(f"{W}sectPr")
+        size = inner.find(f"{W}pgSz")
+        width, height = int(size.get(f"{W}w")) / 20, int(size.get(f"{W}h")) / 20
+        self.assertEqual((width, height), (792, 612), "Letter in landscape")
+        first_cell = table.find(f"{W}tr/{W}tc/{W}p")
+        self.assertIs(first_cell.find(f"{W}pPr/{W}sectPr"), inner)
+        self.assertIn("792 x 612 pt", self.texts(first_cell))
+        last = body.find(f"{W}sectPr").find(f"{W}pgSz")
+        self.assertEqual((int(last.get(f"{W}w")), int(last.get(f"{W}h"))), (11906, 16838))
+        self.assertEqual(len(list(body.iter(f"{W}sectPr"))), 2, "no other section break")
+        self.assertIn("(792 x 612 pt); the last section is A4 portrait",
+                      self.texts(body.find(f"{W}p")))
+
+    def positions(self, name):
+        """Per case: its label, and (relativeFrom, kind, text) across and down."""
+        found = []
+        for p in self.body(name).findall(f"{W}p"):
+            anchor = p.find(f".//{WP}anchor")
+            if anchor is None:
+                continue
+            self.assertEqual(int(anchor.find(f"{WP}extent").get("cx")) / 12700, 72)
+            self.assertEqual(int(anchor.find(f"{WP}extent").get("cy")) / 12700, 72)
+            places = []
+            for axis in ("positionH", "positionV"):
+                position = anchor.find(f"{WP}{axis}")
+                (child,) = position
+                places.append((position.get("relativeFrom"), child.tag.replace(WP, ""),
+                               child.text))
+            found.append((self.texts(p), p, places))
+        return found
+
+    def test_pos_offset_cases_have_the_whitespace_their_labels_name(self):
+        name = "E-whitespace-pos-offset"
+        cases = self.positions(name)
+        self.assertEqual(len(cases), 2)
+        for n, (label, p, places) in enumerate(cases, 1):
+            self.assertTrue(label.startswith(f"Case {n:02d}: "), label)
+            self.assertEqual(p.find(f"{W}pPr/{W}pageBreakBefore") is not None, n == 2)
+            values = []
+            for relative, kind, value in places:
+                self.assertEqual((relative, kind), ("page", "posOffset"))
+                if n == 1:
+                    self.assertEqual(value[0], "\n", "a line feed before the number")
+                    self.assertTrue(value[1:].isdigit())
+                else:
+                    self.assertTrue(value.isdigit())
+                values.append(int(value) / 12700)
+            self.assertEqual(values, [144, 216])
+        self.assertIn("144 pt from the page's left edge and 216 pt from its top", cases[0][0])
+
+    def test_align_cases_have_the_whitespace_their_labels_name(self):
+        name = "E-whitespace-align"
+        cases = self.positions(name)
+        expected = [
+            [("margin", "align", "\ncenter\n"), ("page", "posOffset", str(216 * 12700))],
+            [("page", "posOffset", str(144 * 12700)), ("margin", "align", "\nbottom\n")],
+            [("margin", "align", "center"), ("margin", "align", "bottom")],
+        ]
+        self.assertEqual([places for _, _, places in cases], expected)
+        for n, (label, p, _) in enumerate(cases, 1):
+            self.assertTrue(label.startswith(f"Case {n:02d}: "), label)
+            self.assertEqual(p.find(f"{W}pPr/{W}pageBreakBefore") is not None, n > 1)
+        self.assertIn("a line feed before and after center", cases[0][0])
+        self.assertIn("216 pt from the page's top", cases[0][0])
+        self.assertIn("a line feed before and after bottom", cases[1][0])
+        self.assertIn("144 pt from the page's left edge", cases[1][0])
+        self.assertIn("no whitespace in wp:align", cases[2][0])
+
+    def test_compat_values_have_a_space_around_them(self):
+        name = "E-whitespace-compat"
+        values = self.compat_values(name)
+        self.assertEqual(values, {
+            "compatibilityMode": " 15 ", "overrideTableStyleFontSizeAndJustification": " 1 ",
+            "enableOpenTypeFeatures": " 1 ", "doNotFlipMirrorIndents": " 1 ",
+            "differentiateMultirowTableHeaders": " 1 "})
+        compat = self.settings(name).find(f"{W}compat")
+        self.assertEqual([c.tag for c in compat if c.tag != f"{W}compatSetting"],
+                         [f"{W}doNotUseIndentAsNumberingTabStop"])
+        (item,) = self.items(name)
+        lvl = self.numbering(name)[item[1]][item[2]]
+        ind = lvl.find(f"{W}pPr/{W}ind")
+        self.assertEqual((int(ind.get(f"{W}left")) / 20, int(ind.get(f"{W}hanging")) / 20,
+                          self.val(lvl, f"{W}suff")), (50, 50, "tab"))
+        self.assertIn("level indent left 50 pt, hanging 50 pt", item[0])
+        paragraphs = self.body(name).findall(f"{W}p")
+        (ligatures,) = [p for p in paragraphs if p.find(f".//{W14}ligatures") is not None]
+        self.assertEqual(ligatures.find(f".//{W14}ligatures").get(f"{W14}val"), "standard")
+        styles = self.xml(name, "word/styles.xml")
+        defaults = styles.find(f"{W}docDefaults")
+        self.assertEqual((self.val(defaults, f"{W}rPrDefault/{W}rPr/{W}sz"),
+                          self.val(defaults, f"{W}pPrDefault/{W}pPr/{W}jc")), ("24", "right"))
+        normal = self.style(name, "Normal")
+        self.assertEqual((self.val(normal, f"{W}pPr/{W}jc"), self.val(normal, f"{W}rPr/{W}sz")),
+                         ("left", "22"))
+        self.assertEqual(defaults.find(f"{W}rPrDefault/{W}rPr/{W}rFonts").get(f"{W}ascii"),
+                         "Calibri")
+        self.assertIsNone(ligatures.find(f".//{W}sz"), "Normal's 11 pt")
+        big = self.style(name, "Big")
+        self.assertEqual((self.val(big, f"{W}pPr/{W}jc"), self.val(big, f"{W}rPr/{W}sz")),
+                         ("center", "28"))
+
+
+class BatchFourteenThemeFonts(BatchFourteen):
+    SCRIPTS = {"my-MM": "Mymr", "jv-ID": "Java", "nqo": "Nkoo", "sat": "Olck",
+               "zgh-Tfng": "Tfng"}
+
+    def test_theme_font_languages_select_a_script_the_theme_gives_a_font(self):
+        names = sorted(n for n in self.docs if n.startswith("E-theme-font-lang-"))
+        self.assertEqual(len(names), 5)
+        tags = []
+        for name in names:
+            settings = self.settings(name)
+            lang = settings.find(f"{W}themeFontLang")
+            values = {lang.get(f"{W}{k}") for k in ("val", "eastAsia", "bidi")}
+            (tag,) = values
+            tags.append(tag)
+            self.assertIn(f"gives {tag} (", self.docs[name].purpose)
+            self.assertTrue(name.endswith("-" + tag.split("-")[0]), name)
+            theme = self.xml(name, "word/theme/theme1.xml")
+            typefaces = set()
+            for kind in ("major", "minor"):
+                collection = theme.find(f".//{A}{kind}Font")
+                if kind == "minor":
+                    self.assertEqual([collection.find(f"{A}{slot}").get("typeface")
+                                      for slot in ("latin", "ea", "cs")],
+                                     ["Verdana", "", "Tahoma"])
+                scripts = {f.get("script"): f.get("typeface") for f in collection.iter(f"{A}font")}
+                self.assertEqual(scripts, {"Mymr": "Times New Roman", "Java": "Cambria",
+                                           "Nkoo": "Courier New", "Olck": "Arial",
+                                           "Tfng": "Noto Sans"})
+                typefaces |= set(scripts.values())
+                self.assertIn(self.SCRIPTS[tag], scripts)
+            # Each script's font differs from the others and from the theme's own and the
+            # labels' fonts, so the font of a case names the script.
+            self.assertEqual(len(typefaces), 5)
+            self.assertFalse(typefaces & {"Verdana", "Tahoma", "Georgia", "Calibri"})
+            fonts = ", ".join(f"{s} {t}" for s, t in scripts.items())
+            self.assertIn(fonts, self.docs[name].purpose)
+            self.check_cases(name, tag)
+        self.assertEqual(sorted(tags), sorted(self.SCRIPTS))
+
+    def check_cases(self, name, tag):
+        paragraphs = self.body(name).findall(f"{W}p")
+        self.assertEqual(len(paragraphs), 12)
+        slots, runs = [], []
+        for n, (label_p, case) in enumerate(zip(paragraphs[::2], paragraphs[1::2]), 1):
+            label = self.texts(label_p)
+            self.assertTrue(label.startswith(f"Case {n:02d}: "), label)
+            (r,) = case.findall(f"{W}r")
+            props = r.find(f"{W}rPr")
+            lang = props.find(f"{W}lang")
+            if n > 3:
+                # The text of case n - 3, in the language of w:themeFontLang.
+                self.assertEqual(label, f"Case {n:02d}: case 0{n - 3}'s text with w:lang {tag} "
+                                        "on the run:")
+                self.assertEqual({lang.get(f"{W}{k}") for k in ("val", "eastAsia", "bidi")},
+                                 {tag})
+                props.remove(lang)
+                self.assertEqual(ElementTree.tostring(r), runs[n - 4])
+                continue
+            self.assertIsNone(lang)
+            runs.append(ElementTree.tostring(r))
+            fonts = {k.replace(W, ""): v for k, v in props.find(f"{W}rFonts").attrib.items()}
+            sample = self.texts(r)
+            toggles = [c.tag for c in props if c.tag != f"{W}rFonts"]
+            if "minorEastAsia" in label:
+                self.assertEqual(fonts, {"eastAsiaTheme": "minorEastAsia", "hint": "eastAsia"})
+                self.assertIn("w:hint eastAsia", label)
+                letters = [c for c in sample if not c.isspace()]
+                self.assertTrue(all(unicodedata.name(c).split()[0] in ("GREEK", "CYRILLIC")
+                                    for c in letters), sample)
+                self.assertEqual({unicodedata.name(c).split()[0] for c in letters},
+                                 {"GREEK", "CYRILLIC"})
+                self.assertEqual(toggles, [])
+                slots.append("ea")
+            elif "minorBidi" in label:
+                self.assertEqual(fonts, {"cstheme": "minorBidi"})
+                self.assertEqual(toggles, [f"{W}cs"])
+                self.assertIn("with w:cs", label)
+                self.assertTrue(sample.isascii() and sample.isalpha())
+                slots.append("cs")
+            else:
+                self.assertIn("minorHAnsi", label)
+                self.assertEqual(fonts, {"asciiTheme": "minorHAnsi", "hAnsiTheme": "minorHAnsi"})
+                self.assertEqual(toggles, [])
+                self.assertTrue(sample.isascii() and sample.isalpha())
+                slots.append("latin")
+        self.assertEqual(slots, ["latin", "ea", "cs"])
+
+
+class BatchFourteenIsolation(BatchFourteen):
+    """Markup Word may refuse stays in the document about it (the brief's group run last)."""
+
+    def odd_markup(self, name):
+        parts = self.parts(name)
+        found = set()
+        stories = [n for n in parts if n.startswith("word/") and n.endswith(".xml")
+                   and n.split("/")[1].startswith(("document", "header", "footer", "footnotes",
+                                                   "endnotes", "styles", "numbering"))]
+        for part_name in stories:
+            root = ElementTree.fromstring(parts[part_name])
+            for element in root.iter():
+                tag = element.tag
+                for attribute, value in element.attrib.items():
+                    local = attribute.replace(W, "")
+                    # w:color's w:val, w:u's w:color, w:shd's w:color and w:fill (VML's
+                    # colours are #RRGGBB by its own schema).
+                    colour = local in ("color", "fill") or (tag == f"{W}color" and local == "val")
+                    if tag.startswith(W) and colour and value.startswith("#"):
+                        found.add("hash colour")
+                    if tag.startswith(W) and local in ("themeTint", "themeShade",
+                                                       "themeFillTint", "themeFillShade") \
+                            and len(value) != 2:
+                        found.add("short tint")
+                if tag == f"{W}w" and int(element.get(f"{W}val")) < 1:
+                    found.add("scale below 1")
+                if tag == f"{W}ind" and int(element.get(f"{W}hanging", "0")) < 0:
+                    found.add("negative hanging")
+                if tag == f"{W}spacing":
+                    for side in ("before", "after"):
+                        if int(element.get(f"{W}{side}", "0")) < 0:
+                            found.add("negative spacing")
+                    if int(element.get(f"{W}line", "0")) < 0:
+                        found.add("negative line")
+                if tag == f"{W}outlineLvl" and not 0 <= int(element.get(f"{W}val")) <= 9:
+                    found.add("outline level")
+                if (tag == f"{W}ilvl" and part_name == "word/document.xml"
+                        and int(element.get(f"{W}val")) > 8):
+                    found.add("high level")
+                if tag == f"{W}lvlText":
+                    value = element.get(f"{W}val")
+                    if len(value) > 255:
+                        found.add("long template")
+                    if any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in value) \
+                            or "_x" in value:
+                        found.add("template control")
+                if tag in (f"{WP}posOffset", f"{WP}align") and element.text != \
+                        element.text.strip():
+                    found.add(f"whitespace {tag.replace(WP, '')}")
+            for tc in root.iter(f"{W}tc"):
+                if tc.find(f".//{W}sectPr") is not None:
+                    found.add("section in a cell")
+            if part_name == "word/styles.xml":
+                styles = list(root.iter(f"{W}style"))
+                ids = [s.get(f"{W}styleId") for s in styles]
+                if None in ids:
+                    found.add("style without id")
+                if len([i for i in ids if i is not None]) != len({i for i in ids if i is not None}):
+                    found.add("repeated style id")
+                if any(s.get(f"{W}type") not in ("paragraph", "character", "table", "numbering")
+                       for s in styles):
+                    found.add("unknown style type")
+                if any(s.find(f"{W}rPr/{W}highlight") is not None for s in styles):
+                    found.add("highlight in a style")
+        settings = ElementTree.fromstring(parts["word/settings.xml"])
+        for setting in settings.iter(f"{W}compatSetting"):
+            if setting.get(f"{W}val") != setting.get(f"{W}val").strip():
+                found.add("whitespace compatSetting")
+        return found
+
+    def test_markup_word_may_refuse_stays_in_its_own_document(self):
+        expected = {
+            "E-color-hash": {"hash colour"},
+            "E-value-theme-tint-short": {"short tint"},
+            "E-char-scale-zero": {"scale below 1"},
+            "E-value-hanging-negative": {"negative hanging"},
+            "E-value-spacing-minus-one": {"negative spacing"},
+            "E-value-line-negative": {"negative line"},
+            "E-value-outline-level": {"outline level"},
+            "E-value-ilvl-high": {"high level"},
+            "E-list-long-template": {"long template"},
+            "E-list-long-template-600": {"long template"},
+            "E-list-template-controls": {"template control"},
+            "E-whitespace-pos-offset": {"whitespace posOffset"},
+            "E-whitespace-align": {"whitespace align"},
+            "E-whitespace-compat": {"whitespace compatSetting"},
+            "E-sectpr-in-cell": {"section in a cell"},
+            "E-style-id-missing": {"style without id"},
+            "E-style-id-repeated": {"repeated style id"},
+            "E-style-type-unknown": {"unknown style type"},
+            "E-list-label-mark-highlight": {"highlight in a style"},
+        }
+        for name in self.docs:
+            self.assertEqual(self.odd_markup(name), expected.get(name, set()), name)
 
 
 if __name__ == "__main__":
