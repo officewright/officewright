@@ -492,6 +492,90 @@ fn leaders_stand_on_word_s_grid_from_the_page_edge() -> TestResult {
 }
 
 #[test]
+fn a_leader_to_a_stop_past_the_margin_is_drawn_as_word_draws_it() -> TestResult {
+    use officewright_layout::ir::CompatMode;
+
+    // E-tab-margin-alone.docx, its -12 and -14 twins, case 3, in Carlito, Calibri's
+    // metric twin, at 11 pt: "before", a tab with a dot leader to a start stop 18 pt
+    // into the right margin of an A4 page (541.3 pt; the margin is at 523.3), and
+    // "after". In mode 15 Word puts the tab on a line of its own, 162 periods from
+    // 74.544 pt on the grid from the page's edge to the margin, and "after" on the line
+    // after it. In modes 12 and 14 the tab goes to the stop: "before", 159 periods from
+    // 102.14 pt and "after" at the stop, on one line.
+    let book = book()?;
+    let cases = [
+        (CompatMode::Word2013, 74.544, 162),
+        (CompatMode::Word2010, 102.14, 159),
+        (CompatMode::Word2007, 102.14, 159),
+    ];
+    for (mode, left, count) in cases {
+        let mut document = Document::new(DocumentSettings::default().with_compat_mode(mode));
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Carlito"))
+                .with_size(Pt(11.0)),
+        );
+        // The column starts at the page's edge, so the paragraph is indented by the
+        // margin.
+        let props = ParagraphProps::default()
+            .with_indent(officewright_layout::ir::Indent::default().with_start(Pt(72.0)))
+            .with_tabs([TabStop::default()
+                .with_position(Pt((1440.0 + 9026.0 + 360.0) / 20.0))
+                .with_leader(TabLeader::Dot)]);
+        let paragraph = Paragraph::new(style).with_props(props).with_inlines([
+            Inline::text("before", style),
+            Inline::tab(style),
+            Inline::text("after", style),
+        ]);
+        let painted = fuzzing::paint(&book, &document, &[paragraph], (11906.0 - 1440.0) / 20.0);
+        let runs = items(&painted, "glyphs");
+        let leader = runs
+            .iter()
+            .find(|run| is_leader(run))
+            .ok_or(format!("{mode:?}: no leader in {}", painted.text()))?;
+        let xs = glyph_xs(leader);
+        let first = at(leader).0 + xs.first().copied().unwrap_or_default();
+        assert!(
+            (first as f64 - (left - 0.024) * 20.0).abs() <= 2.0,
+            "{mode:?}: first glyph at {first} twips, Word's at {left} pt"
+        );
+        assert_eq!(xs.len(), count, "{mode:?}: {leader}");
+        let baseline = |text: &str| {
+            runs.iter()
+                .find(|run| run.contains(&format!("\"{text}\"")))
+                .map(|run| at(run).1)
+        };
+        let (before, after) = (baseline("before"), baseline("after"));
+        let dots = Some(at(leader).1);
+        if mode == CompatMode::Word2013 {
+            assert!(
+                before < dots && dots < after,
+                "{mode:?}: {}",
+                painted.text()
+            );
+        } else {
+            assert!(
+                before == dots && dots == after,
+                "{mode:?}: {}",
+                painted.text()
+            );
+            // The stop, in twips.
+            let stop = 1440.0 + 9026.0 + 360.0;
+            let after = runs
+                .iter()
+                .find(|run| run.contains("\"after\""))
+                .map(|run| at(run).0)
+                .ok_or("no after")?;
+            assert!(
+                (after as f64 - stop).abs() <= 1.0,
+                "{mode:?}: after at {after}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn superscripts_are_raised_and_pictures_sit_on_the_baseline() -> TestResult {
     let book = book()?;
     let mut document = Document::default();
