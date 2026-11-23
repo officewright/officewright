@@ -1502,9 +1502,9 @@ mod tests {
             assert!(state.check(&face, glyph).is_err());
         }
         assert_eq!(state.components, 0);
-        // Reading .notdef's components again for each glyph read 900 million of them, and
-        // took over a minute in a debug build; counted, not timed, so that a loaded
-        // machine does not fail it (#525).
+        // Reading .notdef's components again for each glyph would read 900 million of
+        // them, over a minute in a debug build; the bound is a count, which does not
+        // depend on the machine's load.
         let read = COMPONENTS_READ.with(std::cell::Cell::get) - before;
         assert!(read <= 60_000, "{read} components read");
     }
