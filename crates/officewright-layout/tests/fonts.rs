@@ -475,3 +475,47 @@ fn a_symbol_that_is_a_soft_hyphen_stays_with_the_character_before_it() -> TestRe
     assert_eq!(runs("Carlito", 0x00AD)?, [run("ab\u{F0AD}cd", "Carlito")]);
     Ok(())
 }
+
+#[test]
+fn a_soft_hyphen_of_another_run_style_starts_a_run_of_its_own() -> TestResult {
+    // A soft hyphen formatted otherwise than the letter before it keeps its own font and
+    // size, as Word draws its hyphen (E-soft-hyphen-font), so its run starts with it; one
+    // of the letter's run style stays in the letter's run (issue #605).
+    let book = book()?;
+    let mut document = Document::default();
+    let text = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Calibri"))
+            .with_size(Pt(11.0)),
+    );
+    let large = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Noto Sans"))
+            .with_size(Pt(20.0)),
+    );
+    let runs = |hyphen| -> TestResult<Vec<(String, Option<String>)>> {
+        let inlines = [
+            Inline::text("ab", text),
+            Inline::soft_hyphen(hyphen),
+            Inline::text("cd", text),
+        ];
+        fuzzing::check_paragraph(&book, &document, &inlines)?;
+        let paragraph = fuzzing::paragraph(&book, &document, &inlines);
+        Ok(paragraph
+            .runs()
+            .iter()
+            .map(|run| (run.text().to_owned(), run.face().map(str::to_owned)))
+            .collect())
+    };
+    let run = |text: &str, face: &str| (text.to_owned(), Some(face.to_owned()));
+    assert_eq!(
+        runs(large)?,
+        [
+            run("ab", "Carlito"),
+            run("\u{AD}", "Noto Sans"),
+            run("cd", "Carlito")
+        ]
+    );
+    assert_eq!(runs(text)?, [run("ab\u{AD}cd", "Carlito")]);
+    Ok(())
+}
