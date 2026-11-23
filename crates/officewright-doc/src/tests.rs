@@ -4375,6 +4375,8 @@ mod field;
 mod format;
 #[cfg(feature = "pdf")]
 mod layout;
+#[cfg(feature = "pdf")]
+mod links;
 mod paragraph_format;
 #[cfg(feature = "pdf")]
 mod render;

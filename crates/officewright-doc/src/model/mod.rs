@@ -439,6 +439,17 @@ impl Document {
         self.nodes.get(index as usize)
     }
 
+    /// Every bookmark start of the document, of every story, in the order they were
+    /// read: the main document's first.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn bookmark_starts(&self) -> impl Iterator<Item = BookmarkStart<'_>> {
+        self.nodes.iter().filter_map(|node| match node.kind {
+            Kind::BookmarkStart(span) => Some(BookmarkStart::new(self, span)),
+            _ => None,
+        })
+    }
+
     pub(crate) fn element(&self, span: Span) -> Element<'_> {
         span.of(&self.tokens, &self.strings)
     }

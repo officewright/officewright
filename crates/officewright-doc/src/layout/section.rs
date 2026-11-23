@@ -329,11 +329,12 @@ const MAX_COPIED: usize = if cfg!(test) { 1 << 20 } else { 64 << 20 };
 
 /// How many bytes of memory a copy of some blocks takes: every allocation a clone makes.
 /// That is each block, row, cell, inline and tab stop, and what they own: a table's grid,
-/// a paragraph's tab stops, the text of inlines, a symbol's font name, a field's name, its
-/// number format's name and its result, an anchored object. A part that is small in the
-/// document can take much more in the IR: a table of thousands of grid columns, or empty
-/// paragraphs whose style gives 64 tab stops. Tables nest no deeper than the IR allows,
-/// and the results of fields hold no fields.
+/// a paragraph's tab stops, the text of inlines, a symbol's font name, a bookmark's name, a
+/// field's name, its number format's name and its result, an anchored object, and the
+/// blocks of a text box. A part that is small in the document can take much more in the
+/// IR: a table of thousands of grid columns, or empty paragraphs whose style gives 64 tab
+/// stops. Tables nest no deeper than the IR allows, the results of fields hold no fields,
+/// and text boxes hold no text boxes, which the IR refuses.
 fn weight(blocks: &[ir::Block]) -> usize {
     blocks
         .iter()
@@ -386,11 +387,28 @@ fn inlines_weight(inlines: &[ir::Inline]) -> usize {
                         };
                         name + format + inlines_weight(field.result())
                     }
-                    ir::Inline::Anchored(_) => size_of::<ir::AnchoredObject>(),
+                    ir::Inline::Object(object) => content_weight(object.content()),
+                    ir::Inline::Anchored(object) => {
+                        size_of::<ir::AnchoredObject>() + content_weight(object.content())
+                    }
+                    // A copy of a link holds its target's pointer, which the links to it
+                    // share; one of a bookmark its own name.
+                    ir::Inline::Bookmark { name, .. } => name.len(),
                     _ => 0,
                 }
         })
         .sum()
+}
+
+/// What an object's content owns: a text box its blocks, while a picture names an image
+/// that every copy shares.
+fn content_weight(content: &ir::ObjectContent) -> usize {
+    match content {
+        ir::ObjectContent::TextBox(text_box) => {
+            size_of::<ir::TextBox>() + weight(text_box.blocks())
+        }
+        _ => 0,
+    }
 }
 
 /// Note properties: Word's defaults, then those of `levels` in turn, each over the ones
