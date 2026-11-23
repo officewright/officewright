@@ -2014,16 +2014,16 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-style-override-off-11pt-14.docx": {
-      "line_agreement": 0.75,
-      "ssim_mean": 0.9642,
-      "ssim_min": 0.9642,
-      "text_score": 0.9288
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9936,
+      "ssim_min": 0.9936,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-style-override-off-11pt.docx": {
-      "line_agreement": 0.75,
-      "ssim_mean": 0.9628,
-      "ssim_min": 0.9628,
-      "text_score": 0.9288
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9901,
+      "ssim_min": 0.9901,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-style-override-off-12pt.docx": {
       "line_agreement": 0.75,
