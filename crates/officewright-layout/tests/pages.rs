@@ -124,11 +124,14 @@ fn random_table(block: &Block, next: &mut impl FnMut(u64) -> u64) -> Block {
         .into()
 }
 
-/// `E-space-before-top.docx` (scripts/make-rule-docs.py) in the IR, and the first words
-/// of its paragraphs in reading order; `None` for the paragraphs that hold only a page
-/// break, which never start a page.
+/// `E-space-before-top.docx` (scripts/make-rule-docs.py) in the IR, in its compatibility
+/// mode 15, and the first words of its paragraphs in reading order; `None` for the
+/// paragraphs that hold only a page break, which never start a page.
 fn space_before_top() -> (Document, Vec<Option<&'static str>>) {
-    let mut document = Document::default();
+    let mut document = Document::new(
+        officewright_layout::ir::DocumentSettings::default()
+            .with_compat_mode(officewright_layout::ir::CompatMode::Word2013),
+    );
     let style = document.add_run_style(
         RunStyle::default()
             .with_fonts(RunFonts::new("Calibri"))
