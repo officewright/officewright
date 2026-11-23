@@ -1126,3 +1126,105 @@ fn an_object_that_going_around_it_would_take_to_the_next_page_is_reported() {
                     would take the object to the next page: it runs over or under it";
     assert!(messages.iter().any(|m| m == reported), "{messages:?}");
 }
+
+/// Six paragraphs of one word fill page 1 down to 140; then a paragraph of `count` words,
+/// kept together and with widow control as `rules` say, that anchors a picture of 100 by 50
+/// wrapped square, 10 pt from the text, at its top, after its 12th word. Each page's lines,
+/// by where they start, their words, and the pictures it draws.
+///
+/// Beside the picture, the paragraph's two lines on page 1 leave the picture to the third,
+/// on page 2; without it, the second holds it, which page 1 then takes no line from: of the
+/// paragraph it may take the first line alone, laid out without the picture.
+fn keeping((keep_lines, widow_control): (bool, bool), count: usize) -> Vec<Drawn> {
+    let document = document(|style, document| {
+        let mut blocks: Vec<Block> = (0..6).map(|_| paragraph(style, Vec::new(), 1)).collect();
+        let wrapping = Wrapping::square([10.0, 0.0, 10.0, 0.0]);
+        let object = picture(
+            document,
+            (100.0, 50.0),
+            at(0.0),
+            from_paragraph(0.0),
+            wrapping,
+        );
+        let props = exact()
+            .with_keep_lines(keep_lines)
+            .with_widow_control(widow_control);
+        let rest = " ".to_owned() + &vec!["AAAA"; count.saturating_sub(12)].join(" ");
+        blocks.push(
+            Paragraph::new(style)
+                .with_props(props)
+                .with_inlines([words(12, style), object, Inline::text(rest, style)])
+                .into(),
+        );
+        blocks
+    });
+    let (laid, _) = lay(&document);
+    laid.pages
+        .iter()
+        .map(|page| {
+            let starts = lines(page).iter().map(|line| line.0).collect();
+            let pictures = page
+                .items
+                .iter()
+                .filter(|item| matches!(item, DisplayItem::Image(_)))
+                .count();
+            (starts, words_per_line(page), pictures)
+        })
+        .collect()
+}
+
+/// A page's lines by where they start, their words, and the pictures it draws.
+type Drawn = (Vec<f64>, Vec<usize>, usize);
+
+/// Page 1 of [`keeping`] when it takes none of the paragraph.
+fn ones() -> Drawn {
+    (vec![20.0; 6], vec![1; 6], 0)
+}
+
+/// A page of [`keeping`] with the paragraph's lines from its top, `words` in each, around
+/// the picture: three lines beside it, from 130, the rest from the margin.
+fn around(words: Vec<usize>) -> Drawn {
+    let starts = [130.0, 130.0, 130.0, 20.0, 20.0];
+    (starts[..words.len()].to_vec(), words, 1)
+}
+
+#[test]
+fn a_paragraph_kept_together_goes_on_whole_where_an_object_is_left_out() {
+    // Kept together, the paragraph does not split there but goes on whole to page 2,
+    // around the picture there: 27 words in lines of 5, 5 and 5 beside it, then 9 and 3.
+    let moved = vec![ones(), around(vec![5, 5, 5, 9, 3])];
+    assert_eq!(keeping((true, false), 27), moved);
+    assert_eq!(keeping((true, true), 27), moved);
+}
+
+#[test]
+fn widow_control_leaves_no_line_alone_where_an_object_is_left_out() {
+    // With widow control, which leaves no line alone at the foot of a page, the paragraph
+    // goes on whole to page 2 too.
+    assert_eq!(
+        keeping((false, true), 27),
+        [ones(), around(vec![5, 5, 5, 9, 3])]
+    );
+}
+
+#[test]
+fn a_short_paragraph_kept_together_goes_on_whole_where_an_object_is_left_out() {
+    // 18 words, 12 before the picture and 6 after it: whole on page 2, in 5, 5, 5 and 3.
+    let moved = vec![ones(), around(vec![5, 5, 5, 3])];
+    assert_eq!(keeping((true, true), 18), moved);
+    assert_eq!(keeping((false, true), 18), moved);
+}
+
+#[test]
+fn a_paragraph_that_may_split_takes_no_line_from_an_object_left_out_on() {
+    // Neither kept together nor with widow control, the paragraph splits before the line
+    // of the picture: page 1 takes its first line, 9 words in the whole column, and draws
+    // no picture; page 2 the rest around the picture, which it draws.
+    let (mut starts, mut words, _) = ones();
+    starts.push(20.0);
+    words.push(9);
+    assert_eq!(
+        keeping((false, false), 27),
+        [(starts, words, 0), around(vec![5, 5, 5, 3])]
+    );
+}

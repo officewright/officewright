@@ -1656,8 +1656,9 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             // page draws (`Painting::float`), and those of line `first` whatever happens to
             // it: where one they went around goes on to a later page with its line, they are
             // laid out again without it and those after it, and where one they did not go
-            // around would stay, its line starts the next page. Each round leaves out an
-            // object more, so the rounds end.
+            // around would stay, the page takes no line from its line on, and of the lines
+            // before it what keeping together and widow control let it (`lines_taken`).
+            // Each round leaves out an object more, so the rounds end.
             let mut limit = None;
             let (fit, breaks, rest, taken) = loop {
                 self.wrap(
@@ -1681,8 +1682,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         .find(|&(_, item)| item >= limit)
                         .map(|(line, _)| line)
                 });
+                // The lines before it fit, the last of them ending in no break: a break the
+                // lines that fit end in comes at or after its line.
                 if let Some(line) = left_out.filter(|&line| first + fit > line) {
-                    (fit, breaks) = (line - first, true);
+                    (fit, breaks) = (line - first, false);
                 }
                 let taken = lines_taken(
                     (fit, breaks, rest),
