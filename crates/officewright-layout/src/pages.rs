@@ -1699,11 +1699,20 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         .find(|&(_, item)| item >= limit)
                         .map(|(line, _)| line)
                 });
+                // An object the guess left out that the lines laid out again bring onto the
+                // page, line `first` too, which takes in text of the next where it kept a room
+                // from where it was laid out before: the rounds start over.
+                let brought = guess.is_some()
+                    && limit == guess
+                    && limit.is_some_and(|limit| {
+                        wrapping_objects(layout, paragraph, first..first + fit.max(1))
+                            .any(|(_, item)| item >= limit)
+                    });
+                if brought {
+                    (guess, limit) = (None, None);
+                    continue;
+                }
                 if let Some(line) = left_out {
-                    if guess.is_some() && limit == guess {
-                        (guess, limit) = (None, None);
-                        continue;
-                    }
                     (fit, breaks) = (line - first, false);
                 }
                 let taken = lines_taken(
