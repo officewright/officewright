@@ -1336,8 +1336,7 @@ fn flips_toggles_with_the_table_style_as_one_more_level() {
 }
 
 #[test]
-fn lets_the_table_style_win_over_the_default_style_s_11_or_12_pt_and_left_when_the_setting_is_off()
-{
+fn lets_the_table_style_win_over_the_default_style_s_size_and_left_when_the_setting_is_off() {
     // [MS-DOCX] 2.3.1 overrideTableStyleFontSizeAndJustification: not written below
     // compatibility mode 15, a size of 12 pt and a left justification of the default
     // paragraph style give way to the table style's (word-rules/E-table-style-size-12pt-14.docx);
@@ -1345,6 +1344,8 @@ fn lets_the_table_style_win_over_the_default_style_s_11_or_12_pt_and_left_when_t
     // document defaults give 11 pt, as in those documents, so Normal's 11 pt is not its
     // own: lets_only_12_pt_give_way_in_mode_14_when_the_setting_is_not_written tests a
     // Normal of 11 pt that is.
+    // A setting written without its w:val.
+    const NO_VALUE: &str = "\u{0}";
     let case = |normal: &str, mode: u32, setting: &[&str], style: &str| {
         let styles = format!(
             r#"<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>{normal}</w:style><w:style w:type="paragraph" w:styleId="Child"><w:name w:val="Child"/><w:basedOn w:val="Normal"/></w:style><w:style w:type="table" w:styleId="Big"><w:name w:val="Big"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>"#
@@ -1352,8 +1353,13 @@ fn lets_the_table_style_win_over_the_default_style_s_11_or_12_pt_and_left_when_t
         let setting: String = setting
             .iter()
             .map(|value| {
+                let value = if *value == NO_VALUE {
+                    String::new()
+                } else {
+                    format!(r#" w:val="{value}""#)
+                };
                 format!(
-                    r#"<w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word" w:val="{value}"/>"#
+                    r#"<w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word"{value}/>"#
                 )
             })
             .collect();
@@ -1407,12 +1413,27 @@ fn lets_the_table_style_win_over_the_default_style_s_11_or_12_pt_and_left_when_t
     assert_eq!(case(left_11, 15, &["1"], "").0, 14.0);
     // Mode 15, not written: on, the plain hierarchy.
     assert_eq!(case(left_12, 15, &[], ""), normal_12);
-    // Written, whatever the mode.
-    assert_eq!(case(left_12, 15, &["0"], ""), table_wins);
-    assert_eq!(case(left_12, 14, &["1"], ""), normal_12);
+    // Written on, whatever the mode, with any on value and white space around it.
+    for on in ["1", "true", "on", " 1 "] {
+        assert_eq!(case(left_12, 14, &[on], ""), normal_12, "{on:?}");
+    }
+    // Written off, or with a value that is not on, off whatever the mode: Word reads a
+    // written 0 as off, not as not written (#595).
+    for off in ["0", "false", "off", "x", ""] {
+        assert_eq!(case(left_12, 15, &[off], ""), table_wins, "{off:?}");
+        assert_eq!(case(left_12, 14, &[off], ""), table_wins, "{off:?}");
+    }
     // Written twice, the last counts.
-    assert_eq!(case(left_12, 14, &["0", "1"], ""), normal_12);
-    assert_eq!(case(left_12, 15, &["1", "0"], ""), table_wins);
+    for mode in [14, 15] {
+        assert_eq!(case(left_12, mode, &["0", "1"], ""), normal_12, "{mode}");
+        assert_eq!(case(left_12, mode, &["1", "0"], ""), table_wins, "{mode}");
+    }
+    // Written without its value, as not written, also after a value: our choice, no render
+    // shows it.
+    assert_eq!(case(left_12, 15, &[NO_VALUE], ""), normal_12);
+    assert_eq!(case(left_12, 15, &["0", NO_VALUE], ""), normal_12);
+    assert_eq!(case(left_12, 14, &[NO_VALUE], ""), table_wins);
+    assert_eq!(case(left_12, 14, &["1", NO_VALUE], ""), table_wins);
     // Strict documents write `start` for `left`.
     let start_12 = r#"<w:pPr><w:jc w:val="start"/></w:pPr><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>"#;
     assert_eq!(case(start_12, 14, &[], ""), table_wins);
@@ -1444,8 +1465,8 @@ fn lets_only_12_pt_give_way_in_mode_14_when_the_setting_is_not_written() {
     // the alignment of Word's renders: document defaults other than Normal's size, so
     // that Normal's size is its own; the table style Big gives 14 pt, centred. In mode 14
     // with the setting not written, Normal's 11 pt stays and its 12 pt gives way; its left
-    // justification gives way in both. Written off, 11 pt gives way too, as [MS-DOCX]
-    // 2.3.1 says: our choice until a render shows the setting written off (#532).
+    // justification gives way in both. Written off, the same in any mode: the cases of
+    // word-rules/E-table-style-override-off*.docx (#595).
     let case = |defaults: &str, defaults_jc: &str, normal: &str, mode: u32, setting: &str| {
         let styles = format!(
             r#"<w:docDefaults><w:rPrDefault><w:rPr>{defaults}</w:rPr></w:rPrDefault><w:pPrDefault><w:pPr>{defaults_jc}</w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>{normal}</w:style><w:style w:type="table" w:styleId="Big"><w:name w:val="Big"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>"#
@@ -1513,19 +1534,31 @@ fn lets_only_12_pt_give_way_in_mode_14_when_the_setting_is_not_written() {
         ),
         (11.0, 11.0, Justification::Left)
     );
-    // Written off, in either mode, 11 pt gives way as well: our choice, no render shows it
-    // (#532).
+    // Written off (#595). E-table-style-override-off-11pt, -12pt and -11pt-14: document
+    // defaults a point more than Normal and right-aligned. In mode 14, as Word's render of
+    // -11pt-14 shows, Normal's 11 pt stays and its left justification gives way. From
+    // mode 15 no render shows it, since Word's copies of -11pt and -12pt lost the
+    // setting: the same, our choice.
     let off = on.replace(r#"w:val="1""#, r#"w:val="0""#);
+    let override_off = |normal_half_points: u32, mode: u32| {
+        case(
+            &size(normal_half_points + 2),
+            r#"<w:jc w:val="right"/>"#,
+            &normal("left", normal_half_points),
+            mode,
+            &off,
+        )
+    };
     for mode in [14, 15] {
         assert_eq!(
-            case(
-                &size(24),
-                r#"<w:jc w:val="right"/>"#,
-                &normal("left", 22),
-                mode,
-                &off
-            ),
-            (14.0, 14.0, Justification::Center)
+            override_off(22, mode),
+            (11.0, 11.0, Justification::Center),
+            "{mode}"
+        );
+        assert_eq!(
+            override_off(24, mode),
+            (14.0, 14.0, Justification::Center),
+            "{mode}"
         );
     }
 }

@@ -109,8 +109,8 @@ pub enum Inline {
     /// the stored result of a field it computes, such as `PAGE`.
     #[non_exhaustive]
     LinkStart {
-        /// Where the link goes.
-        target: LinkTarget,
+        /// Where the link goes. Links given one `Arc` share it ([`Inline::link_start`]).
+        target: Arc<LinkTarget>,
     },
     /// The end of the link started last; outside a link it does nothing.
     LinkEnd,
@@ -210,9 +210,12 @@ impl Inline {
         Self::ContinuationSeparator { style }
     }
 
-    /// The start of a link to `target`.
-    pub fn link_start(target: LinkTarget) -> Self {
-        Self::LinkStart { target }
+    /// The start of a link to `target`. Links given one `Arc` share their target: the
+    /// layout keeps that one copy of it, however many links and lines go there.
+    pub fn link_start(target: impl Into<Arc<LinkTarget>>) -> Self {
+        Self::LinkStart {
+            target: target.into(),
+        }
     }
 
     /// The end of a link.
@@ -379,6 +382,8 @@ impl Field {
 /// Where a link goes ([`Inline::LinkStart`]).
 ///
 /// ```
+/// use std::sync::Arc;
+///
 /// use officewright_core::PageSize;
 /// use officewright_layout::ir::{
 ///     Document, Inline, LinkTarget, PageSetup, Paragraph, RunStyle, Section,
@@ -386,15 +391,21 @@ impl Field {
 ///
 /// let mut document = Document::default();
 /// let style = document.add_run_style(RunStyle::default());
-/// // "the terms" goes to the heading that the bookmark "Terms" starts.
+/// // "the terms" goes to the heading that the bookmark "Terms" starts; "our site" and
+/// // "write to us" go to one URI, which their links share.
+/// let site = Arc::new(LinkTarget::Uri("https://example.com/".into()));
 /// let text = Paragraph::new(style).with_inlines([
 ///     Inline::text("See ", style),
 ///     Inline::link_start(LinkTarget::Bookmark("Terms".into())),
 ///     Inline::text("the terms", style),
 ///     Inline::link_end(),
 ///     Inline::text(" and ", style),
-///     Inline::link_start(LinkTarget::Uri("https://example.com/".into())),
+///     Inline::link_start(Arc::clone(&site)),
 ///     Inline::text("our site", style),
+///     Inline::link_end(),
+///     Inline::text(", or ", style),
+///     Inline::link_start(site),
+///     Inline::text("write to us", style),
 ///     Inline::link_end(),
 /// ]);
 /// let heading =
