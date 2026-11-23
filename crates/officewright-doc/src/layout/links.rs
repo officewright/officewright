@@ -106,8 +106,7 @@ impl<'a> Translator<'a> {
     }
 }
 
-/// The IR's mark for the start of a link to `target`.
+/// The IR's mark for the start of a link to `target`, which it shares.
 pub(super) fn link_start(target: &Arc<ir::LinkTarget>) -> ir::Inline {
-    // Each mark holds a copy of the target until the IR takes the shared one (#612).
-    ir::Inline::link_start(ir::LinkTarget::clone(target))
+    ir::Inline::link_start(Arc::clone(target))
 }

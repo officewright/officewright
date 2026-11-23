@@ -243,6 +243,23 @@ fn makes_the_target_of_an_address_once_for_all_its_links() {
     );
     let translation = translate(&same);
     assert_eq!(linked(&translation), 40);
+    // The IR's marks share the one target.
+    let targets = |translation: &Translation| -> Vec<std::sync::Arc<ir::LinkTarget>> {
+        paragraphs(translation)[0]
+            .inlines()
+            .iter()
+            .filter_map(|inline| match inline {
+                ir::Inline::LinkStart { target, .. } => Some(std::sync::Arc::clone(target)),
+                _ => None,
+            })
+            .collect()
+    };
+    let shared = targets(&translation);
+    assert!(
+        shared
+            .iter()
+            .all(|target| std::sync::Arc::ptr_eq(target, &shared[0]))
+    );
     assert!(
         translation.left_out().is_empty(),
         "{:?}",
@@ -254,6 +271,8 @@ fn makes_the_target_of_an_address_once_for_all_its_links() {
     );
     let translation = translate(&distinct);
     assert_eq!(linked(&translation), 33);
+    let apart = targets(&translation);
+    assert!(!std::sync::Arc::ptr_eq(&apart[0], &apart[1]));
     assert_eq!(
         messages(&translation),
         [
