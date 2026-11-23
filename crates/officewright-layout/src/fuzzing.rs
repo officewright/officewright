@@ -426,9 +426,10 @@ fn glyphs(run: &ShapedRun) -> Vec<Glyph> {
 /// characters and at most 4096 bytes; a run that follows another of the same formatting,
 /// face and script, cut for its length, starts where HarfRust starts a cluster (it draws
 /// no dotted circle before it), and one that follows another run does not start with a
-/// mark or joiner; their source text follows in order and covers the paragraph's; every
-/// glyph is one its face has; clusters are character boundaries of the run's text that
-/// never go backwards.
+/// mark, a joiner or a soft hyphen of that run's run style (one of another run style
+/// starts a run of its own); their source text follows in order and covers the
+/// paragraph's; every glyph is one its face has; clusters are character boundaries of the
+/// run's text that never go backwards.
 ///
 /// # Errors
 ///
