@@ -109,8 +109,7 @@ pub enum Inline {
     /// the stored result of a field it computes, such as `PAGE`.
     #[non_exhaustive]
     LinkStart {
-        /// Where the link goes, shared by the links to one target that are given the same
-        /// one.
+        /// Where the link goes. Links given one `Arc` share it ([`Inline::link_start`]).
         target: Arc<LinkTarget>,
     },
     /// The end of the link started last; outside a link it does nothing.
