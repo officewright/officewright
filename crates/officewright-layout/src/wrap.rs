@@ -7,35 +7,35 @@
 //! the effects it draws above it (`wp:effectExtent`) and its distance above (`distT`) to
 //! the bottom of the frame, the effects below it and its distance below (`distB`). On page
 //! 8 of `business/letter-dol-cobra-election-notice`, the form's first line goes 1.5 pt
-//! below the frame of the instruction box above it, as far as the box's effects reach,
-//! with no distance. The ninth line of case 01 of `E-wrap-square`, whose top is 0.56 pt above the bottom of
-//! the picture, goes beside it, the tenth starts at the margin; in case 09, 36 pt below the
-//! paragraph's top, the third line, whose bottom reaches 4.3 pt into the band, goes beside
-//! it. A line beside an object wrapped square starts its distance at the right (`distR`)
-//! past the frame, or ends its distance at the left (`distL`) before it: at 189 pt for a
-//! picture of 108 pt at the margin of 72 pt and 9 pt (case 01), 180 with no distances
-//! (case 07), 198 with 18 pt (case 08); case 02, at the right margin, ends the lines 9 pt
-//! before the picture. Text goes on the side the object's [`WrapSide`] allows: the left
-//! only (case 05), the right only (case 06), the side with more room (case 04). A line that
-//! meets an object wrapped top and bottom goes below the band, its top at the band's bottom
-//! (`E-wrap-top-bottom` cases 01, 02 with 12 pt below, 04 at 40 pt below the paragraph's
-//! top, where the first two lines stay above it, and 06 from the page's top), even where
-//! the object leaves room beside it (case 03, a picture of 72 pt centred).
+//! below the frame of the instruction box above it, as far as the box's effects reach, with
+//! no distance. The ninth line of case 01 of `E-wrap-square`, whose top is 0.56 pt above
+//! the bottom of the picture, goes beside it, the tenth starts at the margin; in case 09,
+//! 36 pt below the paragraph's top, the third line, whose bottom reaches 4.3 pt into the
+//! band, goes beside it. A line beside an object wrapped square starts its distance at the
+//! right (`distR`) past the frame, or ends its distance at the left (`distL`) before it: at
+//! 189 pt for a picture of 108 pt at the margin of 72 pt and 9 pt (case 01), 180 with no
+//! distances (case 07), 198 with 18 pt (case 08); case 02, at the right margin, ends the
+//! lines 9 pt before the picture. Text goes on the side the object's [`WrapSide`] allows:
+//! the left only (case 05), the right only (case 06), the side with more room (case 04). A
+//! line that meets an object wrapped top and bottom goes below the band, its top at the
+//! band's bottom (`E-wrap-top-bottom` cases 01, 02 with 12 pt below, 04 at 40 pt below the
+//! paragraph's top, where the first two lines stay above it, and 06 from the page's top),
+//! even where the object leaves room beside it (case 03, a picture of 72 pt centred).
 //!
 //! Where an object lets text go on both sides and both leave it room, a line takes both, at
-//! the same height: its text fills the part left of the object, goes on in the part right of
-//! it, and from there on to the next line's left part. On page 2 of `E-wrap-square`, case
-//! 03 centres a picture of 108 pt in the column from 72 to 523.3 pt, its frame from 243.65
-//! to 351.65: the first line is "Text 01 of case 03 wraps around the", from 72 to 234.2,
-//! ending before 234.65, `distL` (9 pt) before the frame, and "object. Text 02 of case 03
-//! wraps", from 360.7, `distR` past it, the tops of the words of both at 87.6 and their
-//! text at the start, as the paragraph aligns it; the next line starts with "around the
-//! object." on the left. `E-wrap-tight` case 07 (tight around a U open at the top, whose
-//! outline is as wide as the frame), `E-wrap-vml` case 02 and `E-wrap-textbox` case 02 (a
-//! box of 180 pt, the parts from 72 and from 396.7) do the same, and so do cases 03 and 05
-//! of `E-vml-pictures`, pictures of 72 pt whatever side has more room: 144 pt from the
-//! margin, more on the right (the right part from 297.1), and 300 pt from the page's edge,
-//! more on the left (the right part from 381.1).
+//! the same height: its text fills the part left of the object, goes on in the part right
+//! of it, and from there on to the next line's left part. On page 2 of `E-wrap-square`,
+//! case 03 centres a picture of 108 pt in the column from 72 to 523.3 pt, its frame from
+//! 243.65 to 351.65: the first line is "Text 01 of case 03 wraps around the", from 72 to
+//! 234.2, ending before 234.65, `distL` (9 pt) before the frame, and "object. Text 02 of
+//! case 03 wraps", from 360.7, `distR` past it, the tops of the words of both at 87.6 and
+//! their text at the start, as the paragraph aligns it; the next line starts with "around
+//! the object." on the left. `E-wrap-tight` case 07 (tight around a U open at the top,
+//! whose outline is as wide as the frame), `E-wrap-vml` case 02 and `E-wrap-textbox` case
+//! 02 (a box of 180 pt, the parts from 72 and from 396.7) do the same, and so do cases 03
+//! and 05 of `E-vml-pictures`, pictures of 72 pt whatever side has more room: 144 pt from
+//! the margin, more on the right (the right part from 297.1), and 300 pt from the page's
+//! edge, more on the left (the right part from 381.1).
 //!
 //! Hypotheses until Word renders rule documents for them: the parts of a line are one line,
 //! with one top, baseline and height, those of all their text (Word's references have text
@@ -46,12 +46,12 @@
 //! a word wider than it is cut between its characters and goes on in the next part, and a
 //! character wider than it reaches past its end, which is reported; a break of any kind or
 //! the paragraph's end ends the line in the part it is in, and the parts after it stay
-//! empty; where several objects meet a line, it takes every part they leave it, from
-//! left to right; a side narrower than [`LEAST_ROOM`] takes no text, and a line with no
-//! wider room goes below the band that ends first, as below an object wrapped top and
-//! bottom; the paragraph's indents still hold beside an object, the object's edge narrowing
-//! a line only where it is past the indent; tight and through wrapping keep text from the
-//! frame, as square wrapping does (the polygon of a whole picture gives the same lines,
+//! empty; where several objects meet a line, it takes every part they leave it, from left
+//! to right; a side narrower than [`LEAST_ROOM`] takes no text, and a line with no wider
+//! room goes below the band that ends first, as below an object wrapped top and bottom; the
+//! paragraph's indents still hold beside an object, the object's edge narrowing a line only
+//! where it is past the indent; tight and through wrapping keep text from the frame, as
+//! square wrapping does (the polygon of a whole picture gives the same lines,
 //! `E-wrap-tight` case 01 and `E-wrap-textbox` case 03, but other polygons do not, which is
 //! reported); and the effects an object draws beyond its frame at the left and right keep
 //! text out as far as they reach, as those above and below do.
