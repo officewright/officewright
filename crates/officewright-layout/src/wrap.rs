@@ -61,14 +61,16 @@ pub(crate) struct Around<'a> {
 pub(crate) const LEAST_ROOM: f64 = 18.0;
 
 /// The most floating objects of a page that text goes around; it runs over or under the
-/// others, which is reported. [`room`] takes time in the cube of the objects a line meets
-/// at worst, so that this bounds it; a page of a document seldom has more than a few.
+/// others, which is reported. Beside the objects a line meets, [`room`] keeps at most one
+/// part of the line more than there are objects, and takes time in the cube of them at
+/// worst, so that this bounds it; a page of a document seldom has more than a few.
 pub(crate) const MAX_EXCLUSIONS: usize = 32;
 
 /// What a floating object keeps text out of, in points from the page's top left corner: the
 /// band down the page from the top of its frame less its effects and its distance above to
 /// the bottom of its frame, its effects and its distance below, and across it the frame with
-/// its effects and its distances at the left and right.
+/// its effects and its distances at the left and right. Its sides never cross: `top` is at
+/// most `bottom`, and `left` at most `right` (`Exclusion::of`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Exclusion {
     pub(crate) top: f64,
@@ -82,6 +84,13 @@ pub(crate) struct Exclusion {
 impl Exclusion {
     /// What `object`, the top left corner of its frame at `at`, keeps text out of: nothing
     /// when text does not wrap around it.
+    ///
+    /// Effects may be negative (`wp:effectExtent` is an ST_Coordinate), and those at two
+    /// opposite sides can take more than the frame and the distances there give, so that
+    /// the band would end before it starts. Across or down, such a band is empty, at the
+    /// middle of the frame: a hypothesis, as no Word render has such an object. A line that
+    /// reaches past that middle still goes beside it or below it, as beside a frame of no
+    /// width, and the parts of a line beside the band never overlap (`Exclusion::beside`).
     pub(crate) fn of(object: &AnchoredObject, (x, y): (f64, f64)) -> Option<Self> {
         let side = match object.wrap() {
             Wrap::None => return None,
@@ -90,11 +99,22 @@ impl Exclusion {
         };
         let (size, effects, distances) =
             (object.size(), object.effect_extent(), object.distances());
+        let (width, height) = (size.width().0, size.height().0);
+        let (top, bottom) = band(
+            y - effects.top().0 - distances.top().0,
+            y + height + effects.bottom().0 + distances.bottom().0,
+            y + height / 2.0,
+        );
+        let (left, right) = band(
+            x - effects.left().0 - distances.left().0,
+            x + width + effects.right().0 + distances.right().0,
+            x + width / 2.0,
+        );
         Some(Self {
-            top: y - effects.top().0 - distances.top().0,
-            bottom: y + size.height().0 + effects.bottom().0 + distances.bottom().0,
-            left: x - effects.left().0 - distances.left().0,
-            right: x + size.width().0 + effects.right().0 + distances.right().0,
+            top,
+            bottom,
+            left,
+            right,
             side,
         })
     }
@@ -119,13 +139,42 @@ impl Exclusion {
             Some(WrapSide::BothSides) => (true, true),
         };
         let (from, to) = span;
-        if left && to.min(self.left) > from {
-            out.push((from, to.min(self.left)));
+        // The part right of the band starts no earlier than the part left of it ends, even
+        // for a band whose sides cross, so that the two never overlap: a band splits at most
+        // one of a line's parts, which keeps them one more than the bands at most.
+        let left_end = to.min(self.left);
+        let right_start = from.max(self.right).max(left_end);
+        if left && left_end > from {
+            out.push((from, left_end));
         }
-        if right && to > from.max(self.right) {
-            out.push((from.max(self.right), to));
+        if right && to > right_start {
+            out.push((right_start, to));
         }
     }
+}
+
+/// From `start` to `end`, down or across the page; where `end` is before `start`, an empty
+/// band at `middle` (see `Exclusion::of`).
+fn band(start: f64, end: f64, middle: f64) -> (f64, f64) {
+    if start <= end {
+        (start, end)
+    } else {
+        (middle, middle)
+    }
+}
+
+/// The parts of a line between `edges`, its start and end across the page, that the
+/// objects of `met` leave it, from left to right, however narrow.
+fn parts(met: &[&Exclusion], edges: (f64, f64)) -> Vec<(f64, f64)> {
+    let mut spans = vec![edges];
+    for exclusion in met {
+        let mut next = Vec::with_capacity(spans.len() + 1);
+        for &span in &spans {
+            exclusion.beside(span, edges, &mut next);
+        }
+        spans = next;
+    }
+    spans
 }
 
 /// Where a line goes around floating objects: how far below the place it would start it
@@ -144,7 +193,6 @@ pub(crate) struct Room {
 /// first among them, and is measured there again.
 pub(crate) fn room(exclusions: &[Exclusion], y: f64, height: f64, edges: (f64, f64)) -> Room {
     let mut top = y;
-    let mut spans = Vec::new();
     // Each round goes below the bottom of a band the line met, so after as many rounds as
     // there are bands it meets none.
     for _ in 0..=exclusions.len() {
@@ -155,15 +203,7 @@ pub(crate) fn room(exclusions: &[Exclusion], y: f64, height: f64, edges: (f64, f
         if met.is_empty() {
             break;
         }
-        spans.clear();
-        spans.push(edges);
-        for exclusion in &met {
-            let mut next = Vec::with_capacity(spans.len() + 1);
-            for &span in &spans {
-                exclusion.beside(span, edges, &mut next);
-            }
-            spans = next;
-        }
+        let mut spans = parts(&met, edges);
         spans.retain(|&(from, to)| to - from >= LEAST_ROOM);
         // The widest, the first of those as wide.
         let mut widest: Option<(f64, f64)> = None;
@@ -253,6 +293,105 @@ mod tests {
         assert_eq!(
             Exclusion::of(&top_and_bottom, (100.0, 200.0)).map(|exclusion| exclusion.side),
             Some(None)
+        );
+    }
+
+    #[test]
+    fn effects_that_take_more_than_the_frame_leave_an_empty_band_at_its_middle() {
+        use crate::ir::{
+            Document, HorizontalAnchor, ImageData, ImageFormat, Insets, ObjectContent, Picture,
+            Size, VerticalAnchor,
+        };
+
+        // A frame of 10 by 20 at (100, 200): effects of -20 pt on every side take more than
+        // it, across and down, so the band is empty at its middle, (105, 210); effects of
+        // -2 pt leave it a band of 6 by 16 pt.
+        let mut document = Document::default();
+        let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+        let effects = |each: f64| {
+            Insets::default()
+                .with_left(Pt(each))
+                .with_top(Pt(each))
+                .with_right(Pt(each))
+                .with_bottom(Pt(each))
+        };
+        let object = AnchoredObject::new(
+            ObjectContent::Picture(Picture::new(image)),
+            Size::new(Pt(10.0), Pt(20.0)),
+            HorizontalAnchor::default(),
+            VerticalAnchor::default(),
+        )
+        .with_wrap(Wrap::Square);
+        let band = |each: f64| {
+            let object = object.clone().with_effect_extent(effects(each));
+            Exclusion::of(&object, (100.0, 200.0)).map(|e| (e.left, e.right, e.top, e.bottom))
+        };
+        assert_eq!(band(-20.0), Some((105.0, 105.0, 210.0, 210.0)));
+        assert_eq!(band(-2.0), Some((102.0, 108.0, 202.0, 218.0)));
+        // Distances that make up for the effects keep the band as they leave it.
+        let distances = object
+            .clone()
+            .with_effect_extent(effects(-20.0))
+            .with_distances(effects(15.0));
+        assert_eq!(
+            Exclusion::of(&distances, (100.0, 200.0)).map(|e| (e.left, e.right)),
+            Some((105.0, 105.0))
+        );
+        let distances = distances.with_distances(effects(16.0));
+        assert_eq!(
+            Exclusion::of(&distances, (100.0, 200.0)).map(|e| (e.left, e.right)),
+            Some((104.0, 106.0))
+        );
+    }
+
+    #[test]
+    fn bands_whose_sides_cross_leave_one_part_more_than_the_bands_at_most() {
+        // Twenty bands whose left side is right of their right side, as negative effects
+        // would make them without `Exclusion::of`: each leaves the parts beside it apart,
+        // so a line beside all of them has two parts, not one for each way of taking a
+        // side of each band.
+        let crossed = square(WrapSide::BothSides, (220.0, 190.0), (0.0, 100.0));
+        let met = vec![&crossed; 20];
+        let edges = (72.0, 523.0);
+        assert_eq!(parts(&met, edges), [(72.0, 220.0), (220.0, 523.0)]);
+        // Bands of every kind, crossed or not, in any order: the parts stay apart and in
+        // order, one more than the bands at most.
+        let bands: Vec<Exclusion> = (0..20)
+            .map(|n| {
+                let at = 80.0 + 20.0 * f64::from(n);
+                let side = [
+                    WrapSide::BothSides,
+                    WrapSide::Left,
+                    WrapSide::Right,
+                    WrapSide::Largest,
+                ][n as usize % 4];
+                let (left, right) = if n % 3 == 0 {
+                    (at + 30.0, at)
+                } else {
+                    (at, at + 5.0)
+                };
+                square(side, (left, right), (0.0, 100.0))
+            })
+            .collect();
+        let met: Vec<&Exclusion> = bands.iter().rev().collect();
+        let spans = parts(&met, edges);
+        assert!(spans.len() <= met.len() + 1, "{spans:?}");
+        assert!(
+            spans.windows(2).all(|pair| match pair {
+                [(a, b), (c, d)] => a < b && b <= c && c < d,
+                _ => true,
+            }),
+            "{spans:?}"
+        );
+        // And `room` measures a line beside the twenty crossed bands at once.
+        let crossed = vec![crossed; 20];
+        assert_eq!(
+            room(&crossed, 10.0, 12.0, edges),
+            Room {
+                above: 0.0,
+                span: Some((220.0, 523.0)),
+                sides: true,
+            }
         );
     }
 

@@ -733,3 +733,51 @@ fn links_and_bookmarks_on_a_line_below_an_object_are_where_its_text_is() {
         .collect();
     assert_eq!(marks, ["bookmark Below 20 80", "link 20 80 50.5 20"]);
 }
+
+#[test]
+fn objects_whose_effects_take_more_than_their_frames_keep_the_room_beside_them_small() {
+    use crate::wrap::MAX_EXCLUSIONS;
+
+    // As many pictures as a page wraps around, each 10 pt wide at 100 pt from the margin,
+    // from 120 to 130, 50 high, with effects of -20 pt at the left and right, which take
+    // more than its frame: each keeps text out of an empty band at its middle, 125. The
+    // lines beside them go on the larger side, from 125 to 280, 5 words each, and the
+    // room beside them stays two parts, not one for each way of taking a side of each.
+    let document = document(|style, document| {
+        let objects = (0..MAX_EXCLUSIONS)
+            .map(|_| {
+                let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+                Inline::anchored(
+                    AnchoredObject::new(
+                        ObjectContent::Picture(Picture::new(image)),
+                        Size::new(Pt(10.0), Pt(50.0)),
+                        HorizontalAnchor::default()
+                            .with_relative_to(HorizontalReference::Margin)
+                            .with_placement(at(100.0)),
+                        VerticalAnchor::default()
+                            .with_relative_to(VerticalReference::Paragraph)
+                            .with_placement(VerticalPlacement::Offset(Pt(0.0))),
+                    )
+                    .with_wrap(Wrap::Square)
+                    .with_effect_extent(
+                        Insets::default().with_left(Pt(-20.0)).with_right(Pt(-20.0)),
+                    ),
+                )
+            })
+            .collect();
+        vec![paragraph(style, objects, 200)]
+    });
+    let (laid, _) = lay(&document);
+    let page = &laid.pages[0];
+    assert_eq!(page.exclusions.len(), MAX_EXCLUSIONS);
+    assert!(
+        page.exclusions
+            .iter()
+            .all(|exclusion| (exclusion.left, exclusion.right) == (125.0, 125.0))
+    );
+    assert_eq!(
+        lines(page).get(..4),
+        Some(&[(125.0, 36.0), (125.0, 56.0), (125.0, 76.0), (20.0, 96.0)][..])
+    );
+    assert_eq!(words_per_line(page).get(..4), Some(&[5, 5, 5, 9][..]));
+}
