@@ -3262,27 +3262,44 @@ mod tests {
     }
 
     #[test]
-    fn a_large_mark_makes_the_last_line_of_a_cell_taller() {
-        // In a cell the paragraph mark still counts in the last line of text, as in the
-        // rows of Word's letterheads (generated/invoice-en-standard): a 20 pt mark under
-        // 10 pt text makes the row taller than a 10 pt mark does (#359).
-        let (mut document, small) = document(CompatMode::Word2013);
-        let big = document.add_run_style(
-            RunStyle::default()
-                .with_fonts(RunFonts::new("Officewright Test"))
-                .with_size(Pt(20.0)),
-        );
-        let row_of = |mark: RunStyleId| {
-            let paragraph = Paragraph::new(mark).with_inlines([Inline::text("A", small)]);
-            row(vec![cell(vec![paragraph.into()])])
-        };
-        let table = Table::default()
-            .with_grid([Pt(100.0)])
-            .with_rows(vec![row_of(small), row_of(big)]);
-        let (_, bands) = laid(&document, &table, (400.0, &[]));
-        let heights: Vec<f64> = bands.iter().map(|band| band.height.0).collect();
-        assert_eq!(heights.len(), 2);
-        assert!(heights[1] > heights[0] + 5.0, "{heights:?}");
+    fn a_large_mark_or_break_makes_no_row_of_text_taller() {
+        // In a cell, as out of one, a line of text keeps its text's height: a 20 pt mark
+        // under 10 pt text, and 20 pt breaks between its lines, make no row taller than
+        // 10 pt ones do, in modes 14 and 15 alike, as Word's references of
+        // E-cell-mark-height and -14 show. An empty paragraph keeps its mark's height.
+        for mode in [CompatMode::Word2010, CompatMode::Word2013] {
+            let (mut document, small) = document(mode);
+            let big = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(20.0)),
+            );
+            let row_of = |paragraph: Paragraph| row(vec![cell(vec![paragraph.into()])]);
+            let lines = |mark: RunStyleId, breaks: RunStyleId| {
+                Paragraph::new(mark).with_inlines([
+                    Inline::text("A", small),
+                    Inline::line_break(BreakClear::None, breaks),
+                    Inline::text("A", small),
+                ])
+            };
+            let table = Table::default().with_grid([Pt(100.0)]).with_rows(vec![
+                row_of(lines(small, small)),
+                row_of(lines(big, small)),
+                row_of(lines(small, big)),
+                row_of(lines(big, big)),
+                row_of(Paragraph::new(small)),
+                row_of(Paragraph::new(big)),
+            ]);
+            let (_, bands) = laid(&document, &table, (400.0, &[]));
+            let heights: Vec<f64> = bands.iter().map(|band| band.height.0).collect();
+            let [text, mark, breaks, both, empty, empty_big] = heights.as_slice() else {
+                panic!("{mode:?}: {heights:?}");
+            };
+            for other in [mark, breaks, both] {
+                assert!((other - text).abs() < 1e-9, "{mode:?}: {heights:?}");
+            }
+            assert!(empty_big > &(empty + 5.0), "{mode:?}: {heights:?}");
+        }
     }
 
     /// What laying out every band of `table` of `document` in a column `width` wide

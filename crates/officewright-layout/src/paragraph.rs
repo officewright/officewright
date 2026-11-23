@@ -107,8 +107,9 @@ pub(crate) fn lay_out_with(
     )
 }
 
-/// [`lay_out_with`] for a paragraph in a table cell, whose lines of text take the height
-/// of its paragraph mark and breaks too (`Breaker::set_height`).
+/// [`lay_out_with`] for a paragraph in a table cell, whose lines of an inline picture or
+/// text box alone take the height of its paragraph mark and breaks too
+/// (`Breaker::set_height`).
 pub(crate) fn lay_out_in_cell(
     document: &Document,
     paragraph: (&Paragraph, Option<&Label>),
@@ -555,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn a_large_mark_makes_the_last_line_taller_only_in_a_table_cell() {
+    fn a_large_mark_makes_a_line_of_text_no_taller_in_a_table_cell_either() {
         use crate::fonts::Fonts;
         use crate::ir::{
             AnchoredObject, BreakClear, HorizontalAnchor, ImageData, ImageFormat, Inline,
@@ -563,9 +564,8 @@ mod tests {
         };
         use crate::testing::{book, minimal};
         // The test font: a line of 1.15 em. 10 pt text with a 20 pt mark and a 20 pt
-        // break: out of a cell, each line of text is as tall as its text; in a cell, the
-        // break's line and the last line take the 20 pt of the break and of the mark, as
-        // the rows of Word's letterheads do (generated/invoice-en-standard).
+        // break: in a cell as out of one, each line of text is as tall as its text, as in
+        // Word's references of E-cell-mark-height and -14.
         let book = book(vec![minimal()]);
         let mut document = Document::default();
         let style = |size: f64| {
@@ -582,7 +582,8 @@ mod tests {
             Inline::line_break(BreakClear::None, big),
             Inline::text("A", small),
         ]);
-        // A line of an inline picture 30 pt high is as tall as the picture out of a cell.
+        // A line of an inline picture 30 pt high is as tall as the picture out of a cell,
+        // and taller in one.
         let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
         let picture = Paragraph::new(big).with_inlines([Inline::Object(InlineObject::new(
             ObjectContent::Picture(Picture::new(image)),
@@ -632,7 +633,7 @@ mod tests {
             heights(&text, false)
         );
         assert!(
-            close(&heights(&text, true), &[line(20.0), line(20.0)]),
+            close(&heights(&text, true), &[line(10.0), line(10.0)]),
             "{:?}",
             heights(&text, true)
         );
@@ -646,11 +647,13 @@ mod tests {
             !in_cell.is_empty() && in_cell.iter().all(|height| *height > 30.0),
             "{in_cell:?}"
         );
-        assert!(
-            close(&heights(&anchored, false), &[line(20.0)]),
-            "{:?}",
-            heights(&anchored, false)
-        );
+        for cell in [false, true] {
+            assert!(
+                close(&heights(&anchored, cell), &[line(20.0)]),
+                "cell {cell}: {:?}",
+                heights(&anchored, cell)
+            );
+        }
     }
 
     #[test]

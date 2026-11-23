@@ -334,8 +334,8 @@ pub(crate) struct Input<'p> {
     pub(crate) width: Pt,
     /// The paragraph's place, for the report.
     pub(crate) location: &'p Location,
-    /// Whether the paragraph is in a table cell, where its paragraph mark and breaks keep
-    /// counting in the height of a line of text (see `set_height`).
+    /// Whether the paragraph is in a table cell, where its paragraph mark and breaks count
+    /// in the height of a line of an inline picture or text box alone (see `set_height`).
     pub(crate) cell: bool,
 }
 
@@ -1493,6 +1493,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             .has_compat_flag(&CompatFlag::NoLeading);
         let mut extent = Extent::default();
         let mut text = false;
+        let mut object = false;
         let mut breaks = Vec::new();
         for piece in &line.pieces {
             match &piece.kind {
@@ -1521,7 +1522,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 }
                 PieceKind::Object { item, height } => {
                     if let Some(height) = height {
-                        text = true;
+                        object = true;
                         extent.ascent = extent.ascent.max(height.0);
                         extent.empty = false;
                     } else if let Some(style) = item_style(self.itemized, *item) {
@@ -1537,14 +1538,15 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         // reference: a Calibri 11 pt break and mark next to 9 pt text;
         // contract-usds-statement-of-objectives: a 12 pt title with a 20 pt mark, under a
         // picture whose line ends where Word's does; E-textbox-spacing: lines of inline
-        // text boxes). A line with none of them has the height of its break, and the last
+        // text boxes). So it is in table cells, in the body and in a header, in modes 14
+        // and 15 alike (E-cell-mark-height and -14: 9 pt text with marks and breaks of 11
+        // and 20 pt). A line with none of them has the height of its break, and the last
         // line of a paragraph that of the mark too, such as an empty line. In a table cell
-        // the break and the last line's mark still count: Word's rows of the letterheads
-        // of generated/invoice-en-standard and letter-uk are taller than their text, and
-        // a line of a picture alone takes them too, as on main, though Word's pictures in
-        // the cells of form-gsa-reseller-form and form-gsa-pacs-series-form sit 1.3 pt
-        // lower than ours. Hypothesis until a rule document settles cells (#537).
-        if !text || self.cell {
+        // a line of an inline picture or text box alone takes them too, though Word's
+        // pictures in the cells of form-gsa-reseller-form and form-gsa-pacs-series-form
+        // sit 1.3 pt lower than ours: a hypothesis until E-cell-mark-height-picture has a
+        // render.
+        if !(text || object) || (self.cell && !text) {
             for metrics in breaks {
                 extent.add(metrics, Pt(0.0));
             }
