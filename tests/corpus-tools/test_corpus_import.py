@@ -8,7 +8,10 @@ import base64
 import dataclasses
 import hashlib
 import importlib.util
+import io
 import json
+import random
+import re
 import shutil
 import struct
 import sys
@@ -17,6 +20,7 @@ import unittest
 import unittest.mock
 import warnings
 import zipfile
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -966,6 +970,20 @@ class Import(unittest.TestCase):
         self.assertIn(
             "word/fonts/font1.odttf, the embedRegular of 'Liberation Mono', is not one of the "
             f"OFL test fonts THIRD-PARTY-NOTICES.md names (SHA-256 {sha256(foreign)})", message)
+        self.assertFalse((self.corpus / "resaved").exists())
+
+    def test_refuses_a_copy_with_a_foreign_font_under_another_name(self):
+        # The check by content: a synthetic font, obfuscated, as a picture the copy names
+        # nowhere.
+        doc, record = self.embedded_font_result()
+        foreign = rules.obfuscated(sfnt_of("ForeignSans"), rules.EMBEDDED_MONO.key)
+        resaved = self.results / record["resaved_file"]
+        with zipfile.ZipFile(resaved, "a") as archive:
+            archive.writestr("word/media/image9.png", foreign)
+        record["resaved_sha256"] = sha256(resaved.read_bytes())
+        self.save_record(record)
+        self.assertIn(f"{doc.name}.docx: word/media/image9.png holds a font that is none of the "
+                      "OFL test fonts THIRD-PARTY-NOTICES.md names", self.refused())
         self.assertFalse((self.corpus / "resaved").exists())
 
     def test_refuses_a_copy_that_names_a_font_part_twice(self):
@@ -4047,6 +4065,209 @@ class EmbeddedFonts(unittest.TestCase):
         parts[rels] = parts[rels].replace(b'Target="f.bin"', b'Target="Gone.bin"')
         self.assertIn(f"{written}/fontTable.xml: the embedRegular of 'Liberation Mono' is in "
                       f"{written}/Gone.bin, which the package does not have", self.check(parts)[0])
+
+    def moved_font(self, target, entries, rels="word/_rels/fontTable.xml.rels"):
+        """The rule document's parts with the font table's relationship (in the entry rels)
+        going to target, and entries in place of the font part."""
+        parts = {n: d for n, d in self.parts.items() if n not in (self.PART, rels)}
+        parts[rels] = self.parts["word/_rels/fontTable.xml.rels"].replace(
+            b'Target="fonts/font1.odttf"', f'Target="{target}"'.encode())
+        parts.update(entries)
+        return parts
+
+    def test_a_target_is_resolved_as_written_before_it_is_read_as_a_part_name(self):
+        # officewright-opc removes "." and ".." before it decodes anything: the foreign font
+        # is where it resolves the target; the test font is where decoding first would
+        # resolve it.
+        foreign = rules.obfuscated(self.FOREIGN, self.key)
+        mono = self.parts[self.PART]
+        for target, read, decoded_first in (
+            ("x/%2E%2E/../f.bin", "word/x/f.bin", "f.bin"),
+            ("x/%2E/../f.bin", "word/x/f.bin", "word/f.bin"),
+            ("a%5Cb/../f.bin", "word/f.bin", "word/a/f.bin"),
+            ("a%2Fb/../f.bin", "word/f.bin", "word/a/f.bin"),
+            ("a\\b/../f.bin", "word/f.bin", "word/a/f.bin"),
+            ("x//../f.bin", "word/x/f.bin", "word/f.bin"),
+        ):
+            with self.subTest(target):
+                parts = self.moved_font(target, {read: foreign, decoded_first: mono})
+                self.assertEqual(self.check(parts), ([
+                    f"{read}, the embedRegular of 'Liberation Mono', is not one of the OFL test "
+                    f"fonts THIRD-PARTY-NOTICES.md names (SHA-256 {sha256(self.FOREIGN)})"], []))
+        # The source's folder is read with a backslash as a slash, as the entry names it.
+        parts = self.moved_font("x/../f.bin", {"word/f.bin": foreign, "f.bin": mono},
+                                rels="word\\_rels\\fontTable.xml.rels")
+        self.assertEqual(self.check(parts)[0][0][:len("word/f.bin, ")], "word/f.bin, ")
+        self.assertEqual(importer.resolve_target("word", "../../f.bin"), "f.bin")
+        self.assertEqual(importer.resolve_target("", "/word/./fonts/f.odttf"),
+                         "word/fonts/f.odttf")
+
+
+def sfnt_of(postscript, count=9):
+    """A synthetic TrueType font of count tables: its name table and tables of 64 bytes
+    under the tags of TrueType's required tables, sorted as a table directory sorts them."""
+    tags = [b"OS/2", b"cmap", b"glyf", b"head", b"hhea", b"hmtx", b"loca", b"maxp", b"post"]
+    tables = [(b"name", name_table({4: postscript, 6: postscript}))]
+    tables += [(tag, bytes(range(64))) for tag in tags[: count - 1]]
+    tables.sort()
+    head, body = directory(b"\x00\x01\x00\x00", tables, 12 + 16 * len(tables))
+    return head + body
+
+
+def zipped(entries):
+    """A ZIP package of the (name, bytes) entries."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        for name, data in entries:
+            archive.writestr(name, data)
+    return out.getvalue()
+
+
+class FontContent(unittest.TestCase):
+    """foreign_fonts(): every entry of a re-saved copy is checked by what it holds, whatever
+    its name, relationships and content type say (#145)."""
+
+    PART = "word/fonts/font1.odttf"
+    MESSAGE = "holds a font that is none of the OFL test fonts THIRD-PARTY-NOTICES.md names"
+
+    def setUp(self):
+        self.doc = next(d for d in rules.documents() if d.name == "E-embedded-font")
+        self.parts = dict(rules.parts(self.doc))
+        self.key = rules.EMBEDDED_MONO.key
+        self.tails = importer.font_tails(importer.ofl_test_fonts())
+        self.mono = rules.EMBEDDED_MONO.data()
+        self.foreign = sfnt_of("ForeignSans")
+
+    def check(self, parts):
+        return importer.foreign_fonts(list(parts.items()), self.tails)
+
+    def test_fonts_are_found_by_their_content(self):
+        for signature in (b"\x00\x01\x00\x00", b"true", b"OTTO", b"ttcf", b"wOFF", b"wOF2"):
+            self.assertTrue(importer.holds_font(signature + bytes(60)), signature)
+        eot = bytearray(80)
+        eot[0:4] = (80).to_bytes(4, "little")
+        eot[34:36] = b"\x4c\x50"
+        self.assertTrue(importer.holds_font(bytes(eot)))
+        eot[0:4] = (81).to_bytes(4, "little")
+        self.assertFalse(importer.holds_font(bytes(eot)))
+        # As stored, obfuscated, and with its signature gone; the test font too.
+        for font in (self.foreign, self.mono, sfnt_of("Five", 5)):
+            self.assertTrue(importer.holds_font(font))
+            self.assertTrue(importer.holds_font(rules.obfuscated(font, self.key)))
+            self.assertTrue(importer.holds_font(bytes(4) + font[4:]))
+        # The limit: an obfuscated font of four tables keeps only two records as stored.
+        self.assertTrue(importer.holds_font(sfnt_of("Four", 4)))
+        self.assertFalse(importer.holds_font(rules.obfuscated(sfnt_of("Four", 4), self.key)))
+        # The first font of a collection of 20, whose records start at byte 104, past where
+        # a single font's do.
+        collection = b"ttcf" + struct.pack(">HHI", 1, 0, 20) + struct.pack(">20I", *[92] * 20)
+        self.assertEqual(len(collection), 92)
+        first = sfnt_of("InCollection")
+        table_start = len(collection) + 12
+        head, body = directory(b"\x00\x01\x00\x00", sorted(
+            (tag, first[offset : offset + length]) for tag, _, offset, length in (
+                struct.unpack_from(">4sIII", first, 12 + 16 * k) for k in range(9))),
+            table_start + 16 * 9)
+        packed = collection + head + body
+        self.assertTrue(importer.holds_font(rules.obfuscated(packed, self.key)))
+        # Not a font: records with printable tags whose tables are not after them, or are not
+        # within the data; random bytes, compressed text, text, zeros, the parts of every rule
+        # document but the embedded font.
+        directory_only = bytes(44) + b"".join(
+            struct.pack(">4sIII", tag, 0, 0, 16) for tag in (b"cmap", b"glyf", b"head"))
+        self.assertFalse(importer.holds_font(directory_only + bytes(200)))
+        beyond = bytes(44) + b"".join(
+            struct.pack(">4sIII", tag, 0, 92, 1000) for tag in (b"cmap", b"glyf", b"head"))
+        self.assertFalse(importer.holds_font(beyond + bytes(200)))
+        self.assertTrue(importer.holds_font(beyond + bytes(1000)))
+        noise = random.Random(145).randbytes(200_000)
+        text = ("<w:t>Hamburgefonts</w:t> " * 4000).encode()
+        for data in (noise, zlib.compress(text), text, bytes(5000), b"true" [1:] + text):
+            self.assertFalse(importer.holds_font(data), data[:20])
+        found = [(doc.name, name) for doc in rules.documents()
+                 for name, data in rules.parts(doc) if importer.holds_font(data)]
+        self.assertEqual(found, [("E-embedded-font", self.PART)])
+
+    def test_the_rule_document_holds_only_the_test_font(self):
+        self.assertEqual(self.check(self.parts), [])
+
+    def test_a_foreign_font_is_refused_under_any_name_stored_or_obfuscated(self):
+        for name in ("word/media/image9.png", "customXml/item9.xml", "word/fonts/font1.odttf"):
+            for form, font in (("stored", self.foreign),
+                               ("obfuscated", rules.obfuscated(self.foreign, self.key))):
+                with self.subTest(name=name, form=form):
+                    parts = dict(self.parts)
+                    parts[name] = font
+                    self.assertEqual(self.check(parts), [f"{name} {self.MESSAGE}"])
+
+    def test_the_test_font_is_accepted_with_any_first_32_bytes_and_only_so(self):
+        for first in (bytes(32), b"\xff" * 32, rules.obfuscated(self.mono, self.key)[:32]):
+            parts = dict(self.parts)
+            parts[self.PART] = first + self.mono[32:]
+            self.assertEqual(self.check(parts), [])
+        changed = bytearray(self.mono)
+        changed[1000] ^= 1
+        for data in (bytes(changed), self.mono + b"\x00", self.mono[:-4]):
+            parts = dict(self.parts)
+            parts[self.PART] = data
+            self.assertEqual(self.check(parts), [f"{self.PART} {self.MESSAGE}"])
+
+    def test_the_re_check_s_packages_are_refused_by_content(self):
+        # A font a reader could take, which the checks by name, relationship and content type
+        # do not see: the font table named otherwise than .xml, and an embedRegular under
+        # mc:AlternateContent; each with an image relationship to the foreign font.
+        foreign = rules.obfuscated(self.foreign, self.key)
+        image = b"relationships/image\" Target=\"media/f.bin\""
+        renamed = {n: d for n, d in self.parts.items()
+                   if n not in (self.PART, "word/fontTable.xml", "word/_rels/fontTable.xml.rels")}
+        renamed["word/fontTable.dat"] = self.parts["word/fontTable.xml"]
+        renamed["word/_rels/fontTable.dat.rels"] = self.parts[
+            "word/_rels/fontTable.xml.rels"].replace(
+            b"relationships/font\" Target=\"fonts/font1.odttf\"", image)
+        renamed["word/_rels/document.xml.rels"] = renamed["word/_rels/document.xml.rels"].replace(
+            b'Target="fontTable.xml"', b'Target="fontTable.dat"')
+        renamed["word/media/f.bin"] = foreign
+        mc = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+        alternate = {n: d for n, d in self.parts.items() if n != self.PART}
+        alternate["word/fontTable.xml"] = re.sub(
+            rb"(<w:embedRegular [^>]*/>)",
+            f'<mc:AlternateContent xmlns:mc="{mc}"><mc:Fallback>'.encode() + rb"\1"
+            + b"</mc:Fallback></mc:AlternateContent>", self.parts["word/fontTable.xml"])
+        alternate["word/_rels/fontTable.xml.rels"] = self.parts[
+            "word/_rels/fontTable.xml.rels"].replace(
+            b"relationships/font\" Target=\"fonts/font1.odttf\"", image)
+        alternate["word/media/f.bin"] = foreign
+        allowed = importer.ofl_test_fonts()
+        for parts in (renamed, alternate):
+            # The checks by name find nothing to refuse ...
+            self.assertEqual(importer.embedded_fonts(parts, allowed), ([], []))
+            # ... the content check does.
+            self.assertEqual(self.check(parts), [f"word/media/f.bin {self.MESSAGE}"])
+
+    def test_a_font_in_a_nested_package_is_refused(self):
+        foreign = rules.obfuscated(self.foreign, self.key)
+        nested = zipped([("[Content_Types].xml", b"<Types/>"), ("word/fonts/f.odttf", foreign)])
+        parts = dict(self.parts)
+        parts["word/embeddings/doc.docx"] = nested
+        self.assertEqual(self.check(parts),
+                         [f"word/embeddings/doc.docx/word/fonts/f.odttf {self.MESSAGE}"])
+        parts["word/embeddings/doc.docx"] = zipped([("word/fonts/f.odttf", self.parts[self.PART])])
+        self.assertEqual(self.check(parts), [])
+        # Deeper, and deeper than three packages, and one that cannot be read.
+        deep = zipped([("f.bin", foreign)])
+        for level in range(2):
+            deep = zipped([(f"level{level}.docx", deep)])
+        parts["word/embeddings/doc.docx"] = deep
+        self.assertEqual(self.check(parts), [
+            f"word/embeddings/doc.docx/level1.docx/level0.docx/f.bin {self.MESSAGE}"])
+        parts["word/embeddings/doc.docx"] = zipped([("level2.docx", deep)])
+        self.assertEqual(self.check(parts), [
+            "word/embeddings/doc.docx/level2.docx/level1.docx/level0.docx is a package nested "
+            "too deep to check for fonts"])
+        parts["word/embeddings/doc.docx"] = b"PK\x03\x04" + bytes(100)
+        (problem,) = self.check(parts)
+        self.assertTrue(problem.startswith(
+            "word/embeddings/doc.docx is a package that cannot be read: "), problem)
 
 
 if __name__ == "__main__":

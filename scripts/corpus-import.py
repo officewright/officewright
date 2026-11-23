@@ -14,10 +14,13 @@ under WSL). For every <name>.json there the script checks that
     (a second check, independent of the one on Windows);
   - the re-saved copy names no language and no number format the input did not have
     (they would say where Word ran), unless --allow-locale accepts them;
-  - the re-saved copy names no part twice (its entry names compared as OPC compares part
-    names, part_key), and embeds no font but the OFL test fonts that THIRD-PARTY-NOTICES.md
-    names with their SHA-256: every font part is reached by a font table entry and is such a
-    font de-obfuscated with the entry's key or as stored (embedded_fonts, #145);
+  - the re-saved copy holds no font but the OFL test fonts that THIRD-PARTY-NOTICES.md names
+    with their SHA-256 (#145): every entry, and every entry of a package nested in it, is
+    checked by what it holds, whatever names it, and one that holds a font (holds_font) must
+    have the length and the bytes after the first 32 of such a font (foreign_fonts); besides,
+    it names no part twice (its entry names read as OPC compares part names, part_key), and
+    every font part is reached by a font table entry and is such a font de-obfuscated with
+    the entry's key or as stored (embedded_fonts);
   - Word kept the compatibility mode of the input, and pdfinfo and pdftotext count the pages
     Word counted.
 
@@ -68,6 +71,7 @@ import argparse
 import base64
 import difflib
 import hashlib
+import io
 import json
 import posixpath
 import re
@@ -873,6 +877,24 @@ def font_program(data: bytes, key: bytes) -> bytes:
     return bytes(b ^ key[i % 16] for i, b in enumerate(data[:32])) + data[32:]
 
 
+def resolve_target(folder: str, target: str) -> str:
+    """A relationship's target joined to its source's folder (both as written, the folder
+    without a leading slash), with its "." and ".." segments removed before anything is
+    decoded, as officewright-opc resolves targets; without a leading slash. A ".." above the
+    root is dropped, where opc names no part: the importer then checks a part opc does not
+    read."""
+    joined = target if target.startswith("/") else f"/{folder}/{target}" if folder else (
+        f"/{target}")
+    segments: list[str] = []
+    for segment in joined.split("/")[1:]:
+        if segment == "..":
+            if segments:
+                segments.pop()
+        elif segment != ".":
+            segments.append(segment)
+    return "/".join(segments)
+
+
 def package_relationships(
     parts: dict[str, bytes],
 ) -> dict[str, dict[str, tuple[str, str | None]]]:
@@ -887,7 +909,7 @@ def package_relationships(
             continue
         base = folder.rpartition("/")[0]
         source = posixpath.join(base, file[: -len(".rels")]) if base else file[: -len(".rels")]
-        # The source's folder as the entry writes it, for naming a target that is missing.
+        # The source's folder as the entry writes it.
         written_base = posixpath.dirname(posixpath.dirname(name.replace("\\", "/").lstrip("/")))
         entries = {}
         for rel in ElementTree.fromstring(data):
@@ -895,15 +917,12 @@ def package_relationships(
                 continue
             target, part = rel.get("Target", ""), None
             if rel.get("TargetMode") != "External":
-                # The target is resolved against the folder of its source as officewright-opc
-                # resolves it, each decoded once: base is already part_key()'s, so only the
-                # target goes through part_key() here. A target the package does not have is
-                # named as written, to be reported.
-                key = part_key(target)
-                absolute = target.replace("\\", "/").startswith("/")
-                resolved = posixpath.normpath(key if absolute else posixpath.join(base, key))
-                written = target.lstrip("/") if absolute else posixpath.join(written_base, target)
-                part = names.get(resolved, posixpath.normpath(written))
+                # Resolved as officewright-opc resolves a target (resolve_target), and only
+                # then read as a part name (part_key), so that a %2E, %2F, %5C, a backslash
+                # or an empty segment stays one segment for a ".." to remove. A target the
+                # package does not have is named as resolved, as written.
+                written = resolve_target(written_base, target)
+                part = names.get(part_key(written), written)
             entries[rel.get("Id", "")] = (rel.get("Type", ""), part)
         out[source] = entries
     return out
@@ -1000,6 +1019,99 @@ def embedded_fonts(
         for part in sorted(holding - named)
     ]
     return problems, fonts
+
+
+# Fonts found by what an entry holds, whatever its name, relationships and content type say
+# (#145). The first four bytes of a font as stored: TrueType, Apple TrueType, OpenType with
+# CFF outlines, a collection, WOFF and WOFF2. An obfuscated font (§17.8.1) keeps all but its
+# first 32 bytes, so its table records from the third on stay as stored, and are looked for
+# at every 4-aligned offset from RECORDS_FROM to RECORDS_TO (the records of the first font of
+# a collection start further in); a nested package (an embedded document) is looked into, to
+# NESTED_DEPTH levels.
+FONT_SIGNATURES = (b"\x00\x01\x00\x00", b"true", b"OTTO", b"ttcf", b"wOFF", b"wOF2")
+RECORDS_FROM, RECORDS_TO = 12, 1024
+NESTED_DEPTH = 3
+
+
+def table_records_at(data: bytes, start: int) -> bool:
+    """Whether three records of an sfnt's table directory (OpenType: tag, checksum, offset
+    and length, 16 bytes each) start at start: each tag four printable ASCII characters, and
+    each table after the three records and within the data. The order of the tags and the
+    alignment of the tables, which OpenType asks for, are not required, so that a font that
+    breaks them is found too. Text cannot pass in a part under 512 MiB (four characters of
+    it read as an offset are at least 0x20202020), nor zeros (no tag), and random bytes, as
+    compressed data has, pass with a probability below 2**-80 per offset in a part of a
+    mebibyte."""
+    if start + 48 > len(data):
+        return False
+    for k in range(3):
+        tag, _, offset, length = struct.unpack_from(">4sIII", data, start + 16 * k)
+        if not all(0x20 <= byte <= 0x7E for byte in tag):
+            return False
+        if offset < start + 48 or offset + length > len(data):
+            return False
+    return True
+
+
+def holds_font(data: bytes) -> bool:
+    """Whether bytes are a font: they start with a font's signature (FONT_SIGNATURES), are an
+    Embedded OpenType file (its size first, little-endian, and the magic number 0x504C at
+    byte 34), or hold three table records (table_records_at) at a 4-aligned offset from
+    RECORDS_FROM to RECORDS_TO, as an sfnt does as stored and with its first 32 bytes
+    obfuscated. Not found: an obfuscated sfnt of fewer than five tables (TrueType and CFF
+    fonts have at least nine), one whose records start past RECORDS_TO, and a font inside
+    data compressed otherwise than in a nested package."""
+    if data[:4] in FONT_SIGNATURES:
+        return True
+    if len(data) >= 36 and struct.unpack_from("<I", data)[0] == len(data) and (
+        data[34:36] == b"\x4c\x50"
+    ):
+        return True
+    return any(table_records_at(data, start) for start in range(RECORDS_FROM, RECORDS_TO + 1, 4))
+
+
+def font_tails(allowed: dict[str, str], root: Path = ROOT) -> set[tuple[int, str]]:
+    """The length and the SHA-256 of the bytes after the first 32 of each allowed font file
+    (ofl_test_fonts): what an embedded copy keeps of it, whatever key obfuscates the rest."""
+    tails = set()
+    for path in allowed.values():
+        data = (root / path).read_bytes()
+        tails.add((len(data), hashlib.sha256(data[32:]).hexdigest()))
+    return tails
+
+
+def foreign_fonts(
+    entries: list[tuple[str, bytes]], tails: set[tuple[int, str]], prefix: str = "", depth: int = 0
+) -> list[str]:
+    """The entries of a package that hold a font (holds_font) other than one of the OFL test
+    fonts, each named: an allowed one has the length and the bytes after the first 32 of one
+    of them (tails); the first 32 bytes are the key's, and 32 bytes cannot carry a font. An
+    entry that is a ZIP package (an embedded document) is looked into the same way, its
+    entries named after it, and one that cannot be read, or is nested deeper than
+    NESTED_DEPTH, is refused, since its fonts cannot be checked."""
+    problems = []
+    for name, data in entries:
+        where = f"{prefix}{name}"
+        if data[:4] == b"PK\x03\x04":
+            # Its entries are checked, rather than the package itself, which holds the bytes
+            # of a font it stores uncompressed.
+            if depth >= NESTED_DEPTH:
+                problems.append(f"{where} is a package nested too deep to check for fonts")
+                continue
+            try:
+                with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                    nested = [(info.filename, archive.read(info)) for info in archive.infolist()]
+            except (zipfile.BadZipFile, NotImplementedError, RuntimeError, ValueError,
+                    EOFError, OSError, zlib.error) as error:
+                problems.append(f"{where} is a package that cannot be read: {error}")
+                continue
+            problems += foreign_fonts(nested, tails, f"{where}/", depth + 1)
+        elif holds_font(data) and (len(data), hashlib.sha256(data[32:]).hexdigest()) not in tails:
+            problems.append(
+                f"{where} holds a font that is none of the OFL test fonts THIRD-PARTY-NOTICES.md "
+                "names"
+            )
+    return problems
 
 
 def png_from_pgm(data: bytes) -> bytes:
@@ -2767,6 +2879,7 @@ def check_result(
     allow_locale: bool = False,
     fonts: dict[str, list[FontFace]] | None = None,
     test_fonts: dict[str, str] | None = None,
+    test_font_tails: set[tuple[int, str]] | None = None,
 ) -> Checked:
     record = load_record(json_path)
     results = json_path.parent
@@ -2790,6 +2903,9 @@ def check_result(
         allowed = ofl_test_fonts() if test_fonts is None else test_fonts
         font_problems, embedded = embedded_fonts(resaved_parts, allowed)
         problems += font_problems
+        # The guarantee: no entry holds a font but the test fonts, whatever names it.
+        tails = font_tails(allowed) if test_font_tails is None else test_font_tails
+        problems += foreign_fonts(list(resaved_parts.items()), tails)
         # Accepted only by the maintainer's --allow-locale, and then named in SOURCES.md, so
         # that tests/corpus-tools can tell an accepted trace from a later change.
         accepted = locale_problems(original_parts, resaved_parts)
@@ -2944,6 +3060,7 @@ def import_results(
         raise Refused(f"tests/corpus/{group} does not exist")
     fonts = font_index(font_dirs or [])
     test_fonts = ofl_test_fonts()
+    tails = font_tails(test_fonts)
     records = sorted(
         p
         for p in results.glob("*.json")
@@ -2956,7 +3073,7 @@ def import_results(
     for path in records:
         try:
             checked.append(
-                check_result(path, group, corpus, tools, allow_locale, fonts, test_fonts)
+                check_result(path, group, corpus, tools, allow_locale, fonts, test_fonts, tails)
             )
         except Refused as error:
             errors.append(str(error))
