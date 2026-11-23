@@ -6596,7 +6596,9 @@ class Batch14A(unittest.TestCase):
     def test_justify_narrow_cases_need_the_narrowing_their_labels_name(self):
         space = carlito_width(" ", font=self.LIBERATION)
         bodies = set()
-        for name, mode in (("E-justify-narrow", ["15"]), ("E-justify-narrow-14", ["14"])):
+        # #497: the same lines in every compatibility mode, 11 to 15.
+        for name, mode in (("E-justify-narrow", ["15"]), ("E-justify-narrow-14", ["14"]),
+                           ("E-justify-narrow-12", []), ("E-justify-narrow-11", ["11"])):
             parts, _, found = self.load(name)
             self.assertEqual(found, mode)
             bodies.add(parts["word/document.xml"])
@@ -7016,7 +7018,7 @@ class Batch14A(unittest.TestCase):
             element = r.find(f"{W}rPr/{W}{tag}")
             return None if element is None else element.get(f"{W}{attribute}")
 
-        kinds = []
+        kinds, whats = [], []
         for n, p in enumerate(paragraphs, 1):
             label_run, *samples = p.findall(f"{W}r")
             label = self.texts(label_run)
@@ -7025,6 +7027,7 @@ class Batch14A(unittest.TestCase):
             kinds.append(kind)
             mark = marks[kind]
             what = label[len(f"Case {n:02d}: {kind}, "):-2]
+            whats.append(what)
             found = [(mark_of(r) == mark, mark_of(r) is None) for r in samples]
             for marked, plain in found:
                 self.assertTrue(marked or plain, label)
@@ -7075,6 +7078,17 @@ class Batch14A(unittest.TestCase):
             self.assert_one_line(self.first_line(p) + " " * 12)
         # Each case once with each mark, the highlight first.
         self.assertEqual(kinds, ["highlight yellow", "run shading D9D9D9"] * 13)
+        # The cases #346 asks for: its cases 1 to 6 and those of its comment of 2026-10-19.
+        expected = [
+            "two lines spaced 1.15 lines", "two lines spaced 1.5 lines",
+            "two lines spaced 2 lines", "at least 24 pt spacing",
+            "a 6 pt run between plain 11 pt runs", "an 11 pt run beside a plain 20 pt run",
+            "an 11 pt run, the paragraph mark 20 pt", "Times New Roman 12 pt", "Arial 12 pt",
+            "Cambria 12 pt", "lowered 6 pt (w:position -12)",
+            "beside a plain run raised 6 pt (w:position 12)", "a tab raised 6 pt (w:position 12)",
+        ]
+        self.assertEqual(whats[::2], expected)
+        self.assertEqual(whats[1::2], expected)
 
 
 if __name__ == "__main__":

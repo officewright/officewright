@@ -7541,9 +7541,10 @@ def font_props(font: str, size: float) -> str:
 
 def subscript_drop() -> Doc:
     # E-superscript, -sizes and -steps (Calibri and Liberation Sans, 8 to 48 pt) fit both a
-    # drop by the descent and a fixed share of the size. The label is Calibri 11 pt; the
-    # sample, "Base" and the subscript "123", is in the case's font and size, so the line
-    # holds no other text of that font. Each font starts a page.
+    # drop by the descent and a fixed share of the size. The label is Calibri 11 pt, smaller
+    # than every sample; the sample, "Base" and the subscript "123", is in the case's font and
+    # size, so the line holds no other text of that font at that size. Each font starts a
+    # page.
     body, n = "", 0
     for k, font in enumerate(SUBSCRIPT_DROP_FONTS):
         for size in SUBSCRIPT_DROP_SIZES:
@@ -8546,6 +8547,8 @@ def documents() -> list[Doc]:
         table_vmerge_heights(14),
         justify_narrow(15),
         justify_narrow(14),
+        justify_narrow(12),
+        justify_narrow(11),
         footnote_pages_section(),
         number_formats_limits(),
         number_formats_languages(),
