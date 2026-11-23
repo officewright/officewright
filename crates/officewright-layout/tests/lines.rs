@@ -397,6 +397,31 @@ fn lines_end_at_the_last_word_that_fits_and_spaces_hang() -> TestResult {
 }
 
 #[test]
+fn a_line_does_not_end_right_after_a_solidus() -> TestResult {
+    // contract-ec-data-processing-clauses-el: Word takes «της/των» to the next line whole
+    // where «της/» would fit on the line. Here "Word and/" fits on a line, "Word and/or"
+    // does not.
+    let book = book()?;
+    let (document, style) = liberation(11.0);
+    let width = (width_of(&book, &document, style, "Word and/")
+        + width_of(&book, &document, style, "Word and/or"))
+        / 2.0;
+    let laid = fuzzing::lay_out(
+        &book,
+        &document,
+        &paragraph(
+            style,
+            ParagraphProps::default(),
+            vec![Inline::text("Word and/or", style)],
+        ),
+        width,
+    );
+    let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
+    assert_eq!(lines, ["Word ", "and/or"]);
+    Ok(())
+}
+
+#[test]
 fn a_word_wider_than_the_line_breaks_where_it_reaches_the_end() -> TestResult {
     let book = book()?;
     let (document, style) = liberation(11.0);

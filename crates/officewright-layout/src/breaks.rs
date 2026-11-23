@@ -53,6 +53,14 @@ impl BreakMap {
                 (at, opportunity)
             })
             .collect();
+        // Word ends no line right after a solidus, where UAX #14 lets a line end before a
+        // letter: no line of the Word references of tests/corpus ends there, though 507 of
+        // their words hold one (contract-ec-data-processing-clauses-el takes «της/των» to
+        // the next line whole, form-ec-state-aid-notification-de its URLs).
+        breaks.retain(|&(at, opportunity)| {
+            opportunity == Opportunity::Mandatory
+                || !text.get(..at).is_some_and(|before| before.ends_with('/'))
+        });
         if !word_wrap {
             let mut extra = Vec::new();
             // The last character that is not a mark or joiner of the one before it.
@@ -173,6 +181,16 @@ mod tests {
             allowed(&BreakMap::new(&text, true)),
             [4 + PLACEHOLDER_MARK.len_utf8() + 1]
         );
+    }
+
+    #[test]
+    fn a_line_does_not_end_right_after_a_solidus() {
+        // Only after the spaces, also in a URL and after digits.
+        let text = "της/των and/or http://a.b/c 2016/679/EU x";
+        let spaces: Vec<usize> = text.match_indices(' ').map(|(at, _)| at + 1).collect();
+        assert_eq!(allowed(&BreakMap::new(text, true)), spaces);
+        // A line still ends after the space after one.
+        assert_eq!(allowed(&BreakMap::new("a/ b", true)), [3]);
     }
 
     #[test]
