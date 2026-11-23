@@ -60,8 +60,6 @@ PDFFONTS_EMBEDDED = PDFFONTS.replace(
 )
 assert PDFFONTS_EMBEDDED != PDFFONTS
 
-# qpdf --json=2 output (abridged) for that document: Calibri's descriptor embeds a font file,
-# Garamond's does not; a second Garamond descriptor (another encoding) embeds one already.
 # The page tree of the fake PDFs of qpdf's JSON: three A4 pages, no annotations. Its objects
 # are numbered above the fakes' maxobjectid, as the objects the embedding adds are not.
 PAGE_TREE = {
@@ -72,6 +70,8 @@ PAGE_TREE = {
     **{f"obj:{n} 0 R": {"value": {"/Type": "/Page", "/Parent": "91 0 R"}} for n in (92, 93, 94)},
 }
 
+# qpdf --json=2 output (abridged) for that document: Calibri's descriptor embeds a font file,
+# Garamond's does not; a second Garamond descriptor (another encoding) embeds one already.
 OBJECTS = {
     "qpdf": [
         {"jsonversion": 2, "maxobjectid": 12},
@@ -636,16 +636,45 @@ class Import(unittest.TestCase):
         geometry = self.geometry_of(doc)
         self.assertEqual((geometry["links"], geometry["destinations"]), ([], []))
 
-    def test_a_crop_box_inherited_from_the_page_tree_is_the_origin(self):
+    def with_page_tree(self, change):
+        """The fake PDF of with_annotations, its objects changed by change(objects)."""
+        tree = json.loads(self.tools.objects(None))
+        change(tree["qpdf"][1])
+        self.tools = dataclasses.replace(self.tools, objects=lambda path: json.dumps(tree))
+
+    def test_links_are_measured_from_the_media_box_as_pdftotext_measures_words(self):
+        # pdftotext -bbox-layout and pdftoppm measure from the MediaBox, as the importer runs
+        # them, whatever the CropBox; a MediaBox off the origin moves both.
         doc = rules.documents()[0]
         self.add_result(doc)
-        self.with_annotations([{"/Subtype": "/Link", "/Rect": [30, 700, 40, 714],
-                                "/A": {"/S": "/URI", "/URI": "u:https://example.org/"}}])
-        tree = json.loads(self.tools.objects(None))
-        tree["qpdf"][1]["obj:91 0 R"]["value"]["/CropBox"] = [10, 20, 585.32, 821.92]
-        self.tools = dataclasses.replace(self.tools, objects=lambda path: json.dumps(tree))
-        self.run_import()
-        self.assertEqual(self.geometry_of(doc)["links"][0]["box"], [20.0, 107.92, 30.0, 121.92])
+        for boxes, expected in (
+            ({"/CropBox": [10, 20, 585.32, 821.92]}, [30.0, 127.92, 40.0, 141.92]),
+            ({"/MediaBox": [10, 20, 605.32, 861.92], "/CropBox": [10, 20, 585.32, 821.92]},
+             [20.0, 147.92, 30.0, 161.92]),
+            ({"/Rotate": 360}, [30.0, 127.92, 40.0, 141.92]),
+        ):
+            with self.subTest(boxes=boxes):
+                self.with_annotations([{"/Subtype": "/Link", "/Rect": [30, 700, 40, 714],
+                                        "/A": {"/S": "/URI", "/URI": "u:https://example.org/"}}])
+                self.with_page_tree(lambda objects: objects["obj:91 0 R"]["value"].update(boxes))
+                self.run_import()
+                self.assertEqual(self.geometry_of(doc)["links"][0]["box"], expected)
+
+    def test_a_turned_page_is_refused(self):
+        doc = rules.documents()[0]
+        self.add_result(doc)
+        for where, rotate, message in (
+            ("obj:91 0 R", 90, "page 1 is turned (/Rotate 90)"),
+            ("obj:93 0 R", -90, "page 2 is turned (/Rotate -90)"),
+            ("obj:94 0 R", "/Ninety", "page 3 has a /Rotate that is no number"),
+        ):
+            with self.subTest(rotate=rotate):
+                self.with_annotations([])
+                self.with_page_tree(lambda objects: objects[where]["value"].update(
+                    {"/Rotate": rotate}))
+                with self.assertRaises(importer.Refused) as raised:
+                    self.run_import()
+                self.assertIn(f"cannot read the PDF's links: {message}", str(raised.exception))
 
     def test_a_page_tree_that_loops_is_read_once(self):
         doc = rules.documents()[0]
@@ -672,18 +701,70 @@ class Import(unittest.TestCase):
              "a link of the PDF names a user profile path"),
             ({"/A": {"/S": "/URI", "/URI": "u:https://example.org/"}},
              "cannot read the PDF's links: a link on page 1 has no rectangle"),
+            ({"/A": {"/S": "/URI", "/URI": "u:https://example.org/"}, "/Rect": [0, 0, 1, 1],
+              "/QuadPoints": [0, 0, 1, 0, 0, 1]},
+             "cannot read the PDF's links: a link on page 1 has malformed /QuadPoints"),
+            ({"/A": {"/S": "/URI", "/URI": "u:https://example.org/"}, "/Rect": [0, 0, 1, 1],
+              "/QuadPoints": [0, 0, 1, 0, 0, 1, 1, "u:one"]},
+             "cannot read the PDF's links: a link on page 1 has malformed /QuadPoints"),
+            ({"/A": {"/S": "/URI"}, "/Rect": [0, 0, 1, 1]},
+             "cannot read the PDF's links: a link on page 1 has a URI action without a URI"),
+            ({"/A": {"/S": "/GoTo"}, "/Rect": [0, 0, 1, 1]},
+             "cannot read the PDF's links: a link on page 1 goes to no destination"),
+            ({"/Dest": 7, "/Rect": [0, 0, 1, 1]},
+             "cannot read the PDF's links: a link on page 1 goes to no destination"),
         ):
-            with self.subTest(message=message):
+            with self.subTest(message=message, annotation=annotation):
                 self.with_annotations([{"/Subtype": "/Link", **annotation}])
                 with self.assertRaises(importer.Refused) as raised:
                     self.run_import()
                 self.assertIn(message, str(raised.exception))
 
+    def test_named_destinations_naming_a_user_profile_or_no_destination_are_refused(self):
+        doc = rules.documents()[0]
+        self.add_result(doc)
+        for names, message in (
+            # Only destinations that name a page are recorded, so the name needs one.
+            (["u:C:\\Users\\<name>\\notes", ["92 0 R", "/Fit"]],
+             "a link of the PDF names a user profile path"),
+            (["u:Elsewhere", "/Another"],
+             "cannot read the PDF's links: the named destination Elsewhere is not a destination"),
+            (["u:Nowhere", {"/S": "/GoTo"}],
+             "cannot read the PDF's links: the named destination Nowhere is not a destination"),
+        ):
+            with self.subTest(message=message, names=names):
+                self.with_annotations([], catalog={"/Names": {"/Dests": "300 0 R"}},
+                                      extra={"obj:300 0 R": {"value": {"/Names": names}}})
+                with self.assertRaises(importer.Refused) as raised:
+                    self.run_import()
+                self.assertIn(message, str(raised.exception))
+
+    def test_local_paths_keep_only_the_scheme_and_strings_are_no_references(self):
+        doc = rules.documents()[0]
+        self.add_result(doc)
+        uris = ["u:D:\\reports\\next.docx", "u:d:/reports/next.docx", "u:\\\\server\\share\\a",
+                "u: FILE:///C:/reports/next.docx", "u:https://example.org/a R"]
+        self.with_annotations([{"/Subtype": "/Link", "/Rect": [0, 0, 1, 1],
+                                "/A": {"/S": "/URI", "/URI": uri}} for uri in uris])
+        self.run_import()
+        self.assertEqual([link["uri"] for link in self.geometry_of(doc)["links"]],
+                         ["file:", "file:", "file:", "file:", "https://example.org/a R"])
+
     def test_qpdf_output_without_a_page_tree_is_refused(self):
         doc = rules.documents()[0]
         self.add_result(doc)
+        no_pages = {**PAGE_TREE, "obj:90 0 R": {"value": {"/Type": "/Catalog"}}}
+        no_root = {**PAGE_TREE, "trailer": {"value": {"/Size": 95}}}
+        dangling = {key: value for key, value in PAGE_TREE.items() if key != "obj:91 0 R"}
+        short = {**PAGE_TREE, "obj:91 0 R": {"value": {
+            **PAGE_TREE["obj:91 0 R"]["value"], "/Kids": ["92 0 R", "93 0 R"]}}}
+        held = "the page tree of qpdf's JSON holds {} pages, not 3"
         for data, message in (({"qpdf": [{"jsonversion": 2}, {}]}, "the PDF has no trailer"),
-                              ("not json", "not qpdf's JSON of a PDF")):
+                              ("not json", "not qpdf's JSON of a PDF"),
+                              ({"qpdf": [{"jsonversion": 2}, no_pages]}, held.format(0)),
+                              ({"qpdf": [{"jsonversion": 2}, no_root]}, held.format(0)),
+                              ({"qpdf": [{"jsonversion": 2}, dangling]}, held.format(0)),
+                              ({"qpdf": [{"jsonversion": 2}, short]}, held.format(2))):
             with self.subTest(message=message):
                 text = data if isinstance(data, str) else json.dumps(data)
                 self.tools = dataclasses.replace(self.tools, objects=lambda path, t=text: t)

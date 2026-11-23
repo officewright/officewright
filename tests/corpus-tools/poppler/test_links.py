@@ -1,8 +1,9 @@
 """Checks that corpus-import.py reads links and named destinations from the real qpdf's JSON.
 
 The unit tests in ../test_corpus_import.py give the importer qpdf's JSON written by hand; this
-one runs qpdf on a small PDF with a link of each kind Word writes, so that the forms the
-importer reads (strings, references, name trees) are the ones qpdf gives. scripts/check.sh
+one runs qpdf on a small PDF with links of the kinds the importer reads, among them the
+one Word writes for the references of notes (a /Dest array on the link itself), so that the
+forms the importer reads (strings, references, name trees) are the ones qpdf gives. scripts/check.sh
 runs it on Linux and macOS, where qpdf is installed.
 """
 
@@ -37,13 +38,14 @@ def pdf(objects):
 
 
 # Two pages of 300 by 400 pt. Page 1 holds a URI link, a GoTo link to page 2 with its
-# quadrilateral, a link to a named destination, and a text annotation, which is no link.
+# quadrilateral, a link to a named destination, a text annotation, which is no link, and a
+# link with its destination on page 2 as Word writes one for a note's reference.
 # The name tree, its keys in order, has a destination named in UTF-16 and one wrapped in a
 # /D dictionary.
 LINKS_PDF = pdf([
     b"<< /Type /Catalog /Pages 2 0 R /Names << /Dests 7 0 R >> >>",
     b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 400] >>",
-    b"<< /Type /Page /Parent 2 0 R /Resources << >> /Annots [5 0 R 6 0 R 8 0 R 9 0 R] >>",
+    b"<< /Type /Page /Parent 2 0 R /Resources << >> /Annots [5 0 R 6 0 R 8 0 R 9 0 R 10 0 R] >>",
     b"<< /Type /Page /Parent 2 0 R /Resources << >> >>",
     b"<< /Type /Annot /Subtype /Link /Rect [72 300 200 314] /Border [0 0 0] "
     b"/A << /S /URI /URI (https://example.org/a) >> >>",
@@ -53,6 +55,8 @@ LINKS_PDF = pdf([
     b"(_Toc1) << /D [4 0 R /XYZ 90 200 null] >>] >>",
     b"<< /Type /Annot /Subtype /Link /Rect [72 260 200 274] /Dest (_Toc1) >>",
     b"<< /Type /Annot /Subtype /Text /Rect [0 0 10 10] /Contents (a note) >>",
+    b"<< /Type /Annot /Subtype /Link /Rect [72 240 200 254] /Border [0 0 0] "
+    b"/Dest [4 0 R /XYZ 72 370 0] >>",
 ])
 
 
@@ -62,13 +66,15 @@ class Links(unittest.TestCase):
             path = Path(folder) / "links.pdf"
             path.write_bytes(LINKS_PDF)
             text = importer.run_tool("qpdf", "--json=2", str(path))
-        links, destinations = importer.pdf_links(text)
+        links, destinations = importer.pdf_links(text, 2)
         self.assertEqual(links, [
             {"page": 1, "box": [72.0, 86.0, 200.0, 100.0], "uri": "https://example.org/a"},
             {"page": 1, "box": [72.0, 106.0, 200.0, 120.0],
              "quad_points": [[72.0, 106.0], [200.0, 106.0], [72.0, 120.0], [200.0, 120.0]],
              "dest": {"page": 2, "fit": "XYZ", "x": 72.0, "y": 30.0}},
             {"page": 1, "box": [72.0, 126.0, 200.0, 140.0], "dest": {"name": "_Toc1"}},
+            {"page": 1, "box": [72.0, 146.0, 200.0, 160.0],
+             "dest": {"page": 2, "fit": "XYZ", "x": 72.0, "y": 30.0}},
         ])
         self.assertEqual(destinations, [
             {"name": "Name", "page": 1, "fit": "XYZ", "x": 10.0, "y": 10.0},
