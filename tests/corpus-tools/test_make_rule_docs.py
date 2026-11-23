@@ -6193,6 +6193,25 @@ class Batch14A(unittest.TestCase):
     def assert_one_line(self, label, size=11, font=CARLITO):
         self.assertLess(carlito_width(label, size, font) + 12, self.TEXT, label)
 
+    def assert_twins(self, names):
+        """Documents that differ in their compatibility mode alone: every part is the same
+        bytes but the settings, whose w:compat carries the mode, and the core properties,
+        which carry the purpose."""
+        compat = re.compile(rb"<w:compat>.*?</w:compat>")
+        first = dict(rules.parts(self.docs[names[0]]))
+        for name in names[1:]:
+            parts = dict(rules.parts(self.docs[name]))
+            self.assertEqual(sorted(parts), sorted(first), name)
+            for part_name, data in parts.items():
+                if part_name == "docProps/core.xml":
+                    continue
+                if part_name == "word/settings.xml":
+                    data = compat.sub(b"", data)
+                    expected = compat.sub(b"", first[part_name])
+                else:
+                    expected = first[part_name]
+                self.assertTrue(data == expected, f"{name}: {part_name}")
+
     def test_subscript_drop_has_every_size_in_every_font(self):
         _, body, mode = self.load("E-subscript-drop")
         self.assertEqual(mode, ["15"])
@@ -6343,10 +6362,8 @@ class Batch14A(unittest.TestCase):
                      "E-line-multiple-foot-12": [], "E-line-multiple-foot-11": ["11"]}
         first = self.load("E-line-multiple-foot")[0]
         for name, mode in documents.items():
-            parts, _, found = self.load(name)
-            self.assertEqual(found, mode, name)
-            for part_name in ("word/document.xml", "word/footnotes.xml"):
-                self.assertEqual(parts[part_name], first[part_name], name)
+            self.assertEqual(self.load(name)[2], mode, name)
+        self.assert_twins(list(documents))
         parts, body, _ = self.load("E-line-multiple-foot")
         notes = {e.get(f"{W}id"): e for e in ElementTree.fromstring(
             parts["word/footnotes.xml"]).findall(f"{W}footnote")}
@@ -6533,12 +6550,9 @@ class Batch14A(unittest.TestCase):
     def test_justify_nbsp_cases_have_the_spaces_their_labels_name(self):
         space = carlito_width(" ", font=self.LIBERATION)
         documents = {"E-justify-nbsp-14": ["14"], "E-justify-nbsp-15": ["15"]}
-        bodies = set()
         for name, mode in documents.items():
-            parts, _, found = self.load(name)
-            self.assertEqual(found, mode)
-            bodies.add(parts["word/document.xml"])
-        self.assertEqual(len(bodies), 1)
+            self.assertEqual(self.load(name)[2], mode)
+        self.assert_twins(list(documents))
         cases = self.justified("E-justify-nbsp-15")
         self.assertEqual(len(cases), 9)
         seen = []
@@ -6595,14 +6609,12 @@ class Batch14A(unittest.TestCase):
 
     def test_justify_narrow_cases_need_the_narrowing_their_labels_name(self):
         space = carlito_width(" ", font=self.LIBERATION)
-        bodies = set()
         # #497: the same lines in every compatibility mode, 11 to 15.
-        for name, mode in (("E-justify-narrow", ["15"]), ("E-justify-narrow-14", ["14"]),
-                           ("E-justify-narrow-12", []), ("E-justify-narrow-11", ["11"])):
-            parts, _, found = self.load(name)
-            self.assertEqual(found, mode)
-            bodies.add(parts["word/document.xml"])
-        self.assertEqual(len(bodies), 1)
+        twins = {"E-justify-narrow": ["15"], "E-justify-narrow-14": ["14"],
+                 "E-justify-narrow-12": [], "E-justify-narrow-11": ["11"]}
+        for name, mode in twins.items():
+            self.assertEqual(self.load(name)[2], mode)
+        self.assert_twins(list(twins))
         cases = self.justified("E-justify-narrow")
         self.assertEqual(len(cases), 21)
         found = []
@@ -6684,16 +6696,14 @@ class Batch14A(unittest.TestCase):
         self.assertEqual(list(body.iter(f"{W}footnoteReference")), [])
 
     def test_table_vmerge_heights_cases_have_the_merges_their_labels_name(self):
-        bodies = set()
         for name, mode in (("E-table-vmerge-heights", ["15"]),
                            ("E-table-vmerge-heights-14", ["14"])):
             parts, _, found = self.load(name)
             self.assertEqual(found, mode)
-            bodies.add(parts["word/document.xml"])
             styles = ElementTree.fromstring(parts["word/styles.xml"])
             fonts = styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr/{W}rFonts").attrib
             self.assertEqual(set(fonts.values()), {"Liberation Sans"})
-        self.assertEqual(len(bodies), 1)
+        self.assert_twins(["E-table-vmerge-heights", "E-table-vmerge-heights-14"])
         _, body, _ = self.load("E-table-vmerge-heights")
         children = [e for e in body if e.tag != f"{W}sectPr"]
         self.assertEqual(self.texts(children[-1]), "End of the document.")
@@ -6999,9 +7009,19 @@ class Batch14A(unittest.TestCase):
         self.assertEqual(k, len(rest))
 
     def test_highlight_spacing_cases_have_the_marks_their_labels_name(self):
-        _, body, _ = self.load("E-highlight-spacing")
+        parts, body, _ = self.load("E-highlight-spacing")
         paragraphs = body.findall(f"{W}p")
         self.assertEqual(len(paragraphs), 26)
+        # #346: Calibri 11 pt unless the label names a font or a size, which the document
+        # defaults give and no style changes.
+        styles = ElementTree.fromstring(parts["word/styles.xml"])
+        defaults = styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")
+        self.assertEqual({k[len(W):]: v for k, v in defaults.find(f"{W}rFonts").attrib.items()},
+                         dict.fromkeys(("ascii", "hAnsi", "eastAsia", "cs"), "Calibri"))
+        self.assertEqual([defaults.find(f"{W}{tag}").get(f"{W}val") for tag in ("sz", "szCs")],
+                         ["22", "22"])
+        for style in styles.findall(f"{W}style"):
+            self.assertIsNone(style.find(f"{W}rPr"), style.get(f"{W}styleId"))
         marks = {"highlight yellow": ("highlight", "yellow"), "run shading D9D9D9": ("shd", "D9D9D9")}
 
         def mark_of(r):
@@ -7074,6 +7094,17 @@ class Batch14A(unittest.TestCase):
             if what != "an 11 pt run, the paragraph mark 20 pt":
                 self.assertIsNone(p.find(f"{W}pPr/{W}rPr"), label)
             self.assertEqual(len(marked) >= 1, True, label)
+            # Only the font cases name a font, and only they and the 6 pt and 20 pt runs a
+            # size; every other run takes the defaults' Calibri 11 pt.
+            fonts = what.endswith(" 12 pt")
+            for r in samples:
+                self.assertEqual(r.find(f"{W}rPr/{W}rFonts") is not None, fonts, label)
+                self.assertEqual(value(r, "sz"), value(r, "szCs"), label)
+            sizes = [value(r, "sz") for r in samples]
+            named = {"a 6 pt run between plain 11 pt runs": [None, "12", None],
+                     "an 11 pt run beside a plain 20 pt run": [None, "40"]}
+            self.assertEqual(sizes, ["24"] if fonts else named.get(what, [None] * len(samples)),
+                             label)
             # The first line, with room for the tab.
             self.assert_one_line(self.first_line(p) + " " * 12)
         # Each case once with each mark, the highlight first.
