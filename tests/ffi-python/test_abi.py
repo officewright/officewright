@@ -576,9 +576,9 @@ class AbiTest(unittest.TestCase):
         # ow_font_book_add_file once it is one: each call drops one entry, and costs no
         # more for the entries left. Timed against adding as many files of a folder no scan
         # listed, which costs the file system the same: at most 4 times as long, where work
-        # that grows with the entries left takes about 80 times as long for 8000 (#426);
-        # the shortest of two runs each, a floor of 50 ms, and a failure only when a second
-        # measurement agrees.
+        # that grows with the entries left (#426) took 19 to 99 times as long for 8000 in
+        # release and debug builds; the shortest of two runs each, taken in turn, a floor of
+        # 50 ms, and a failure only when a second measurement agrees.
         font = MINIMAL_FONT.read_bytes()
 
         def took(n, listed):
@@ -606,8 +606,9 @@ class AbiTest(unittest.TestCase):
         n = 8000
         measured = []
         for _ in range(2):
-            alone = max(min(took(n, False) for _ in range(2)), 0.05)
-            listed = min(took(n, True) for _ in range(2))
+            runs = [(took(n, False), took(n, True)) for _ in range(2)]
+            alone = max(min(run[0] for run in runs), 0.05)
+            listed = min(run[1] for run in runs)
             if listed < 4 * alone:
                 return
             measured.append((listed, alone))
