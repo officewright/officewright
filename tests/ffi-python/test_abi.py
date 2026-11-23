@@ -574,23 +574,25 @@ class AbiTest(unittest.TestCase):
     def test_adds_listed_files_one_by_one_in_linear_time(self):
         # Files that were not fonts when a scan listed them, each added by
         # ow_font_book_add_file once it is one: each call drops one entry, and costs no
-        # more for the entries left. At most 24 times what an eighth of them take, where
-        # linear work takes about 8 times and work that grows with the square of their
-        # number about 64; the shortest of several runs, a floor of 50 ms, and a failure
-        # only when a second measurement agrees.
+        # more for the entries left. Timed against adding as many files of a folder no scan
+        # listed, which costs the file system the same: at most 4 times as long, where work
+        # that grows with the entries left takes about 80 times as long for 8000 (#426);
+        # the shortest of two runs each, a floor of 50 ms, and a failure only when a second
+        # measurement agrees.
         font = MINIMAL_FONT.read_bytes()
 
-        def took(n):
+        def took(n, listed):
             with tempfile.TemporaryDirectory() as directory:
                 paths = [Path(directory) / f"bad{i:06}.ttf" for i in range(n)]
                 for path in paths:
                     path.write_bytes(b"not a font")
                 book = self.new_book()
                 added = c_size_t()
-                self.check(lib.ow_font_book_add_dir(book, directory.encode(), byref(added)))
                 count = c_size_t()
-                self.check(lib.ow_font_book_skipped_count(book, byref(count)))
-                self.assertEqual(count.value, n)
+                if listed:
+                    self.check(lib.ow_font_book_add_dir(book, directory.encode(), byref(added)))
+                    self.check(lib.ow_font_book_skipped_count(book, byref(count)))
+                    self.assertEqual(count.value, n)
                 for path in paths:
                     path.write_bytes(font)
                 start = time.perf_counter()
@@ -604,12 +606,12 @@ class AbiTest(unittest.TestCase):
         n = 8000
         measured = []
         for _ in range(2):
-            small = max(min(took(n // 8) for _ in range(3)), 0.05)
-            full = min(took(n) for _ in range(2))
-            if full < 24 * small:
+            alone = max(min(took(n, False) for _ in range(2)), 0.05)
+            listed = min(took(n, True) for _ in range(2))
+            if listed < 4 * alone:
                 return
-            measured.append((full, small))
-        self.fail(f"{measured}: the shortest times for {n} and for {n // 8}")
+            measured.append((listed, alone))
+        self.fail(f"{measured}: the shortest times for {n} files listed and not listed")
 
     def test_keeps_a_skipped_message_while_it_reads_the_same(self):
         book = self.new_book()
