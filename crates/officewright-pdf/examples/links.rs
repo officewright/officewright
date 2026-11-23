@@ -14,8 +14,10 @@
 //! - Page 2 has the destinations "d000" to "d149", "dNNN" at (36, 800 − 5 × NNN), more
 //!   than one node of the name tree holds.
 //! - Page 3 has the destinations "Appendix" at (72, 770.25) and "Глава" at (0, 400), a
-//!   link to "Глава" at (300, 400), 100 by 20 pt, and a link back to "Start" at (300,
-//!   300), 100 by 20 pt.
+//!   link to "Глава" at (300, 400), 100 by 20 pt, a link back to "Start" at (300,
+//!   300), 100 by 20 pt, and a second box of the link to `https://example.com/a b/(Ж)`
+//!   over the text "Example, again" at (300, 200), 100 by 20 pt, which shares the first
+//!   box's action.
 //!
 //! tests/pdf-output/test_links.py checks the file at these positions.
 
@@ -62,6 +64,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     third.add_text(Pt(300.0), Pt(305.0), &helvetica, Pt(12.0), "To the start")?;
     let start = destination("Start");
     third.add_link(Pt(300.0), Pt(300.0), Pt(100.0), Pt(20.0), &start)?;
+    third.add_text(Pt(300.0), Pt(205.0), &helvetica, Pt(12.0), "Example, again")?;
+    third.add_link(Pt(300.0), Pt(200.0), Pt(100.0), Pt(20.0), &site)?;
 
     doc.save(out)?;
     Ok(())

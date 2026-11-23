@@ -12,6 +12,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import unicodedata
 import unittest
 import zipfile
 import zlib
@@ -4923,7 +4924,7 @@ class Packages(unittest.TestCase):
                     self.assertRegex(words[0], r"^ \S", f"{doc.name}: {i}")
                     for word in words[1:]:
                         self.assertNotRegex(word, r"^\s", f"{doc.name}: {i}")
-        self.assertEqual(documents_with_notes, 17)
+        self.assertEqual(documents_with_notes, 25)
 
     def test_settings_follow_the_schema_order(self):
         # CT_Settings 17.15.1.78 is a sequence (here the elements the script writes), and so
@@ -5358,11 +5359,22 @@ class Packages(unittest.TestCase):
                     self.assertIsNone(paragraphs[0].find(f"{W}pPr/{W}pageBreakBefore"),
                                       f"{name}: {texts(paragraphs[0])}")
 
-        # Every paragraph of these documents' bodies fits one line in Carlito, Calibri's twin,
-        # so that the lines they count are the lines Word draws.
+        # Every line of these documents' bodies, a paragraph or a part of one between line
+        # breaks, fits the width in Carlito, Calibri's twin, so that the lines they count are
+        # the lines Word draws.
         # A cell is half the text's width, less its margins of 108 twips on either side.
         width = rules.TEXT_W / 20
         cell_width = (rules.TEXT_W // 2 - 2 * 108) / 20
+
+        def body_lines(p):
+            found = [""]
+            for element in p.iter():
+                if element.tag == f"{W}t":
+                    found[-1] += element.text or ""
+                elif element.tag == f"{W}br":
+                    found.append("")
+            return found
+
         for name in by_name:
             if not name.startswith(("E-footnote-", "E-endnote-")):
                 continue
@@ -5370,7 +5382,577 @@ class Packages(unittest.TestCase):
             in_cells = {id(p) for tc in body.iter(f"{W}tc") for p in tc.iter(f"{W}p")}
             for p in body.iter(f"{W}p"):
                 room = cell_width if id(p) in in_cells else width
-                self.assertLess(carlito_width(texts(p)) + 12, room, f"{name}: {texts(p)}")
+                for value in body_lines(p):
+                    self.assertLess(carlito_width(value) + 12, room, f"{name}: {value}")
+
+    # Batch 13.
+
+    def batch_13(self, name):
+        """The parts of a batch 13 document, its body's children and its compatibility
+        mode."""
+        parts = self.doc_parts(name)
+        body = ElementTree.fromstring(parts["word/document.xml"]).find(f"{W}body")
+        settings = ElementTree.fromstring(parts["word/settings.xml"])
+        mode = [s.get(f"{W}val") for s in settings.iter(f"{W}compatSetting")
+                if s.get(f"{W}name") == "compatibilityMode"]
+        return parts, body, mode
+
+    @staticmethod
+    def b13_texts(element):
+        return "".join(t.text or "" for t in element.iter(f"{W}t"))
+
+    @staticmethod
+    def b13_lines(paragraph):
+        """The parts of a paragraph between its line breaks."""
+        found = [""]
+        for element in paragraph.iter():
+            if element.tag == f"{W}t":
+                found[-1] += element.text or ""
+            elif element.tag == f"{W}br":
+                found.append("")
+        return found
+
+    def b13_sections(self, parts, body):
+        """Each section's label, w:sectPr, and header and footer parts by their kind."""
+        rels = ElementTree.fromstring(parts["word/_rels/document.xml.rels"])
+        targets = {r.get("Id"): r.get("Target") for r in rels}
+        paragraphs = body.findall(f"{W}p")
+        sects = [p.find(f"{W}pPr/{W}sectPr") for p in paragraphs]
+        found, label = [], None
+        for p, sect in zip(paragraphs, sects):
+            if self.b13_texts(p).startswith("Case "):
+                label = self.b13_texts(p)
+            if sect is not None:
+                found.append((label, sect))
+        found.append((label, body.find(f"{W}sectPr")))
+        out = []
+        for label, sect in found:
+            stories = {}
+            for ref in sect:
+                if ref.tag in (f"{W}headerReference", f"{W}footerReference"):
+                    rid = ref.get("{http://schemas.openxmlformats.org/officeDocument/2006/"
+                                  "relationships}id")
+                    stories[ref.tag[len(W):-len("Reference")]] = ElementTree.fromstring(
+                        parts[f"word/{targets[rid]}"])
+            out.append((label, sect, stories))
+        return out
+
+    @staticmethod
+    def b13_story_lines(story):
+        """The lines of a header or footer: (height in points, count) of each paragraph of
+        exact line spacing outside tables, in order."""
+        found = []
+        for p in story.findall(f"{W}p"):
+            line = p.find(f"{W}pPr/{W}spacing")
+            if line is not None and line.get(f"{W}lineRule") == "exact":
+                count = len(p.findall(f".//{W}br")) + 1
+                found.append((int(line.get(f"{W}line")) / 20, count))
+        return found
+
+    def test_header_cut_documents_have_the_markup_their_labels_name(self):
+        def size(sect):
+            pg = sect.find(f"{W}pgSz")
+            return int(pg.get(f"{W}w")), int(pg.get(f"{W}h"))
+
+        def margins(sect):
+            mar = sect.find(f"{W}pgMar")
+            return {k: int(mar.get(f"{W}{k}")) for k in ("top", "bottom", "header", "footer")}
+
+        sizes = {"A4": (rules.PAGE_W, rules.PAGE_H), "A5": rules.A5, "Letter": rules.LETTER,
+                 "A3": rules.A3}
+
+        # Every section's body is one line: its label fits the section's width in Carlito,
+        # Calibri's twin, so that the body asks for the room of one line only.
+        for doc in self.docs:
+            if not doc.name.startswith("E-header-cut-"):
+                continue
+            parts, body, _ = self.batch_13(doc.name)
+            for label, sect, _ in self.b13_sections(parts, body):
+                mar = sect.find(f"{W}pgMar")
+                width = (size(sect)[0] - int(mar.get(f"{W}left")) - int(mar.get(f"{W}right"))) / 20
+                self.assertLess(carlito_width(label) + 12, width, f"{doc.name}: {label}")
+
+        # Threshold: headers of 24 to 40 lines on A5, no footers, the room each label names.
+        for name, body_line in (("E-header-cut-threshold", 12), ("E-header-cut-threshold-24", 24)):
+            parts, body, _ = self.batch_13(name)
+            found = self.b13_sections(parts, body)
+            self.assertEqual(len(found), 17, name)
+            for count, (label, sect, stories) in zip(range(24, 41), found):
+                self.assertEqual(size(sect), rules.A5, label)
+                self.assertEqual(set(stories), {"header"}, label)
+                self.assertEqual(self.b13_story_lines(stories["header"]), [(12, count)], label)
+                m = margins(sect)
+                room = (rules.A5[1] - m["bottom"] - m["header"]) / 20 - 12 * count
+                self.assertIn(f"header of {count} lines, {room:.1f} pt left", label)
+            for p in body.findall(f"{W}p"):
+                line = p.find(f"{W}pPr/{W}spacing")
+                self.assertEqual((line.get(f"{W}line"), line.get(f"{W}lineRule")),
+                                 (str(body_line * 20), "exact"), name)
+
+        # The others: the header, footer, distance and page each label names, and an uncut
+        # header and footer that leave the body less room than a line.
+        expected = {
+            "E-header-cut-distance": [((12, 33),), ((12, 35),), ((12, 33),)],
+            "E-header-cut-page-sizes": [((12, 40),), ((12, 50),)],
+            "E-header-cut-line-heights": [((16, 30),), ((8, 60),), ((15, 32),)],
+        }
+        for name, headers in expected.items():
+            parts, body, _ = self.batch_13(name)
+            found = self.b13_sections(parts, body)
+            self.assertEqual(len(found), len(headers), name)
+            for header, (label, sect, stories) in zip(headers, found):
+                lines = self.b13_story_lines(stories["header"])
+                self.assertEqual(tuple(lines), header, label)
+                (height, count), = lines
+                self.assertIn(f"header of {count} lines" if "page-sizes" not in name
+                              else f"header and footer of {count} lines each", label)
+                if name == "E-header-cut-line-heights":
+                    self.assertIn(f"of exact {height:g} pt", label)
+                footer = self.b13_story_lines(stories["footer"])
+                self.assertEqual(footer, [(12, count if "page-sizes" in name else 33)], label)
+                m = margins(sect)
+                self.assertIn(f"{m['header'] / 20:g} pt from the edge" if "distance" in name
+                              else "", label)
+                page = next(k for k, v in sizes.items() if v == size(sect))
+                self.assertTrue(label.endswith(f"on {page}") if "page-sizes" in name
+                                else page == "A4", label)
+                header_end = m["header"] / 20 + height * count
+                footer_start = (size(sect)[1] - m["footer"]) / 20 - 12 * footer[0][1]
+                room = max(0.0, footer_start - header_end)
+                if name == "E-header-cut-distance":
+                    self.assertIn(f"{room:.1f} pt left", label)
+                else:
+                    self.assertEqual(room, 0, label)
+
+        # The table: 10 lines, 30 rows of exact 12 pt, a line, over a footer of 33 lines.
+        parts, body, _ = self.batch_13("E-header-cut-table")
+        (label, _, stories), = self.b13_sections(parts, body)
+        header = stories["header"]
+        self.assertEqual([child.tag[len(W):] for child in header], ["p", "tbl", "p"])
+        rows = header.find(f"{W}tbl").findall(f"{W}tr")
+        self.assertEqual(len(rows), 30)
+        self.assertEqual({(r.find(f"{W}trPr/{W}trHeight").get(f"{W}val"),
+                           r.find(f"{W}trPr/{W}trHeight").get(f"{W}hRule")) for r in rows},
+                         {("240", "exact")})
+        self.assertEqual(self.b13_story_lines(header)[0], (12, 10))
+        self.assertEqual(self.b13_story_lines(stories["footer"]), [(12, 33)])
+        self.assertIn("header of 10 lines and 30 table rows of 12 pt", label)
+
+        # The first line: a line, then a table row, of exact 400 pt in header and footer.
+        parts, body, _ = self.batch_13("E-header-cut-first-line")
+        (line_label, _, lines), (row_label, _, rows) = self.b13_sections(parts, body)
+        self.assertIn("header and footer of a 400 pt line, then a 12 pt line", line_label)
+        self.assertIn("header and footer of a table of a 400 pt row and a 12 pt row", row_label)
+        for kind in ("header", "footer"):
+            first, second = lines[kind].findall(f"{W}p")
+            self.assertEqual(first.find(f"{W}pPr/{W}spacing").get(f"{W}line"), "8000")
+            self.assertEqual(second.find(f"{W}pPr/{W}spacing").get(f"{W}line"), "240")
+            table = rows[kind].find(f"{W}tbl")
+            heights = [(r.find(f"{W}trPr/{W}trHeight").get(f"{W}val"),
+                        r.find(f"{W}trPr/{W}trHeight").get(f"{W}hRule"))
+                       for r in table.findall(f"{W}tr")]
+            self.assertEqual(heights, [("8000", "exact"), ("240", "exact")])
+            self.assertEqual(rows[kind][0].tag, f"{W}tbl", "the table comes first")
+
+        # The margins: fixed (negative) margins of 420 and 415 pt, headers of 30 and 10 lines
+        # ending above the body; 30 lines are taller than 0.4 of the page, 10 are not.
+        parts, body, _ = self.batch_13("E-header-cut-margins")
+        found = self.b13_sections(parts, body)
+        for count, (label, sect, stories) in zip((30, 10), found):
+            m = margins(sect)
+            self.assertEqual((m["top"], m["bottom"]), (-8400, -8300), label)
+            self.assertIn(f"fixed margins {-m['top'] / 20:g} and {-m['bottom'] / 20:g} pt", label)
+            self.assertEqual(set(stories), {"header"}, label)
+            self.assertEqual(self.b13_story_lines(stories["header"]), [(12, count)], label)
+            self.assertIn(f"header of {count} lines", label)
+            room = (rules.PAGE_H + m["top"] + m["bottom"]) / 20
+            self.assertIn(f"({room:.1f} pt left)", label)
+            self.assertLess(m["header"] / 20 + 12 * count, -m["top"] / 20, label)
+            self.assertEqual(12 * count > 0.4 * rules.PAGE_H / 20, count == 30, label)
+
+    def test_exact_row_margin_cases_have_the_markup_their_labels_name(self):
+        _, body, _ = self.batch_13("E-table-row-exact-margins")
+        labels = [self.b13_texts(p) for p in body.findall(f"{W}p")
+                  if self.b13_texts(p).startswith("Case ")]
+        tables = body.findall(f"{W}tbl")
+        self.assertEqual(len(tables), len(labels))
+        for label, table in zip(labels, tables):
+            row = table.findall(f"{W}tr")[1]
+            height = row.find(f"{W}trPr/{W}trHeight")
+            self.assertEqual((height.get(f"{W}val"), height.get(f"{W}hRule")), ("800", "exact"))
+            self.assertIn("row 2 is exactly 40 pt high", label)
+            first = row.find(f"{W}tc")
+            own = {side.tag[len(W):]: side.get(f"{W}w")
+                   for side in first.findall(f"{W}tcPr/{W}tcMar/*")}
+            table_mar = {side.tag[len(W):]: side.get(f"{W}w")
+                         for side in table.findall(f"{W}tblPr/{W}tblCellMar/*")}
+            vertical = {k: v for k, v in table_mar.items() if k in ("top", "bottom")}
+            if "its first cell has top and bottom margins of 10 pt" in label:
+                self.assertEqual(own, {"top": "200", "bottom": "200"})
+            elif "a top margin of 10 pt" in label:
+                self.assertEqual(own, {"top": "200"})
+            elif "a bottom margin of 10 pt" in label:
+                self.assertEqual(own, {"bottom": "200"})
+            else:
+                self.assertEqual(own, {}, label)
+            self.assertEqual(vertical, {"top": "200", "bottom": "200"}
+                             if "the table's cell margins are 10 pt" in label else {}, label)
+            lines = len(first.findall(f"{W}p"))
+            self.assertEqual(lines, 6 if "holds 6 lines" in label else 1, label)
+        self.assertEqual(len(labels), 6)
+
+    def test_sym_plain_font_cases_have_the_markup_their_labels_name(self):
+        _, body, _ = self.batch_13("E-sym-plain-font")
+        paragraphs = body.findall(f"{W}p")
+        self.assertEqual(len(paragraphs), 20)
+        for label_p, case in zip(paragraphs[::2], paragraphs[1::2]):
+            label = self.b13_texts(label_p)
+            (symbol,) = case.iter(f"{W}sym")
+            font, code = symbol.get(f"{W}font"), symbol.get(f"{W}char")
+            self.assertIn(f"a w:sym of {font} {code}", label)
+            self.assertIn(font, ("Noto Sans", "Liberation Sans"))
+            runs = case.findall(f"{W}r")
+            self.assertEqual([self.b13_texts(r) for r in runs],
+                             ["Hamburgefontsiv", "", "Hamburgefontsiv"], label)
+            self.assertIsNone(runs[0].find(f"{W}rPr"), "the halves are in the default, Calibri")
+            indent = case.find(f"{W}pPr/{W}ind")
+            narrow = "at the end of a line" in label
+            self.assertEqual(indent is not None, narrow, label)
+            if narrow:
+                self.assertEqual(rules.TEXT_W - int(indent.get(f"{W}right")), 3000)
+                self.assertIn("150 pt wide", label)
+
+    def test_greek_caps_cases_have_the_markup_their_labels_name(self):
+        _, body, _ = self.batch_13("E-greek-caps")
+        paragraphs = body.findall(f"{W}p")
+        texts = {"letters with tonos and dialytika": rules.GREEK_TONOS,
+                 "combining U+0301": rules.GREEK_COMBINING,
+                 "capitals typed with their tonos": rules.GREEK_CAPITALS,
+                 "polytonic": rules.GREEK_POLYTONIC}
+        cases = {}
+        for label_p, case in zip(paragraphs[::2], paragraphs[1::2]):
+            label = self.b13_texts(label_p)
+            (r,) = case.findall(f"{W}r")
+            fonts = r.find(f"{W}rPr/{W}rFonts")
+            self.assertEqual(fonts.get(f"{W}ascii"), "Noto Sans", label)
+            toggles = {e.tag[len(W):] for e in r.find(f"{W}rPr")} & {"caps", "smallCaps"}
+            lang = r.find(f"{W}rPr/{W}lang")
+            cases[label] = (self.b13_texts(r), toggles, None if lang is None
+                            else lang.get(f"{W}val"))
+        labels = list(cases)
+        self.assertEqual(len(labels), 13)
+        for n, label in enumerate(labels, 1):
+            value, toggles, lang = cases[label]
+            self.assertTrue(label.startswith(f"Case {n:02d}: "), label)
+            if "the same in w:smallCaps" in label:
+                before = cases[labels[n - 2]]
+                self.assertEqual((value, toggles, lang), (before[0], {"smallCaps"}, before[2]))
+                continue
+            if "with w:lang" in label:
+                k = int(label.split("case 0")[1][0])
+                model = cases[labels[k - 1]]
+                self.assertEqual((value, toggles), model[:2], label)
+                self.assertIn(f"w:lang {lang}", label)
+                continue
+            self.assertIsNone(lang, label)
+            self.assertEqual(toggles, {"caps"} if "w:caps" in label else {"smallCaps"}, label)
+            (expected,) = [v for words, v in texts.items() if words in label]
+            self.assertEqual(value, expected, label)
+        self.assertIn("Μάιος", rules.GREEK_TONOS)
+
+        def marks(text):
+            """Each letter of text with the combining marks its canonical decomposition has."""
+            letters = []
+            for c in unicodedata.normalize("NFD", text):
+                if unicodedata.combining(c):
+                    letters[-1][1].add(c)
+                elif not c.isspace():
+                    letters.append((c, set()))
+            return letters
+
+        tonos, dialytika = "\u0301", "\u0308"
+        precomposed = [c for c in rules.GREEK_TONOS if not c.isspace()]
+        self.assertEqual(len(precomposed), len(marks(rules.GREEK_TONOS)), "precomposed only")
+        with_tonos = [base for base, m in marks(rules.GREEK_TONOS) if tonos in m]
+        self.assertGreaterEqual(len(with_tonos), 8)
+        self.assertTrue(all(base.islower() for base in with_tonos))
+        self.assertEqual(sum(dialytika in m for _, m in marks(rules.GREEK_TONOS)), 4)
+        self.assertEqual(sum(m == {tonos, dialytika} for _, m in marks(rules.GREEK_TONOS)), 2)
+        self.assertNotEqual(unicodedata.normalize("NFC", rules.GREEK_COMBINING),
+                            rules.GREEK_COMBINING, "the accents are combining marks")
+        self.assertEqual(rules.GREEK_COMBINING.count(tonos), 8)
+        self.assertEqual(unicodedata.normalize("NFC", rules.GREEK_COMBINING),
+                         "άέήίόύώ Μάιος", "the letters of the precomposed case")
+        capitals = [base for base, m in marks(rules.GREEK_CAPITALS) if tonos in m]
+        self.assertGreaterEqual(len(capitals), 7)
+        self.assertTrue(all(base.isupper() for base in capitals))
+        polytonic = set().union(*(m for _, m in marks(rules.GREEK_POLYTONIC)))
+        self.assertTrue(polytonic & {"\u0313", "\u0314"}, "a breathing")
+        self.assertIn("\u0342", polytonic, "a perispomeni")
+        for name, text in (("capitals", rules.GREEK_CAPITALS),
+                           ("polytonic", rules.GREEK_POLYTONIC)):
+            letters = [c for c in text if not c.isspace()]
+            self.assertEqual(len(letters), len(marks(text)), f"{name}: precomposed only")
+        for text in (rules.GREEK_TONOS, rules.GREEK_CAPITALS):
+            accented = [c for c in text if tonos in unicodedata.normalize("NFD", c)]
+            self.assertTrue(all(0x0370 <= ord(c) <= 0x03FF for c in accented),
+                            "letters with tonos of Greek and Coptic, not their oxia twins")
+
+    def test_batch_13_cell_mark_cases_have_the_markup_their_labels_name(self):
+        parts, body, _ = self.batch_13("E-cell-mark-height-picture")
+        styles = ElementTree.fromstring(parts["word/styles.xml"])
+        defaults = styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")
+        self.assertEqual(defaults.find(f"{W}rFonts").get(f"{W}ascii"), "Liberation Sans")
+        self.assertEqual(defaults.find(f"{W}sz").get(f"{W}val"), "22")
+
+        def mark(p):
+            size = p.find(f"{W}pPr/{W}rPr/{W}sz")
+            return None if size is None else size.get(f"{W}val")
+
+        (table,) = body.findall(f"{W}tbl")
+        cells = table.findall(f"{W}tr/{W}tc")
+        self.assertEqual([mark(c.find(f"{W}p")) for c in cells], ["18", "22", "40"])
+        wp = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+        for c in cells:
+            (p,) = c.findall(f"{W}p")
+            self.assertEqual(self.b13_texts(p), "", "only the picture")
+            (extent,) = p.iter(f"{wp}extent")
+            self.assertEqual(int(extent.get("cy")), 20 * 12700)
+        pictures = [p for p in body.findall(f"{W}p") if list(p.iter(f"{wp}inline"))]
+        self.assertEqual([mark(p) for p in pictures], ["18", "22", "40"])
+        ids = [d.get("id") for d in body.iter(f"{wp}docPr")]
+        self.assertEqual(len(ids), len(set(ids)))
+
+        parts, body, _ = self.batch_13("E-cell-mark-height-merged")
+        styles = ElementTree.fromstring(parts["word/styles.xml"])
+        defaults = styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")
+        self.assertEqual(defaults.find(f"{W}sz").get(f"{W}val"), "18")
+        labels = [self.b13_texts(p) for p in body.findall(f"{W}p")
+                  if self.b13_texts(p).startswith("Case ")]
+        self.assertEqual(len(labels), 2)
+        self.assertIn("rows 2 and 3 hold 8 pt text with 9 pt paragraph marks (the document "
+                      "default), their second and third cells merged vertically", labels[0])
+        merged, plain = body.findall(f"{W}tbl")
+        for table, is_merged in ((merged, True), (plain, False)):
+            rows = table.findall(f"{W}tr")
+            self.assertEqual(len(rows), 4)
+            for r in (rows[0], rows[3]):
+                runs = list(r.iter(f"{W}r"))
+                self.assertTrue(runs)
+                self.assertTrue(all(run.find(f"{W}rPr/{W}sz") is None for run in runs),
+                                "rows 1 and 4 are in the 9 pt default")
+            for r in rows[1:3]:
+                for c in r.findall(f"{W}tc"):
+                    merge = c.find(f"{W}tcPr/{W}vMerge")
+                    continued = merge is not None and merge.get(f"{W}val") is None
+                    sizes = {None if (s := run.find(f"{W}rPr/{W}sz")) is None else s.get(f"{W}val")
+                             for run in c.iter(f"{W}r")}
+                    self.assertEqual(sizes, set() if continued else {"16"}, "8 pt text")
+                    self.assertIsNone(c.find(f"{W}p/{W}pPr"), "the mark takes the default")
+            merges = [[None if (m := c.find(f"{W}tcPr/{W}vMerge")) is None
+                       else m.get(f"{W}val", "continue") for c in r.findall(f"{W}tc")]
+                      for r in rows]
+            if is_merged:
+                self.assertEqual(merges[1:3], [[None, "restart", "restart"],
+                                               [None, "continue", "continue"]])
+            else:
+                self.assertEqual({m for row in merges for m in row}, {None})
+
+    def test_batch_13_note_documents_have_the_markup_their_labels_name(self):
+        body_height = (rules.PAGE_H - 2 * rules.MARGIN) / 20
+
+        def load(name):
+            parts, body, mode = self.batch_13(name)
+            notes = {e.get(f"{W}id"): e for e in ElementTree.fromstring(
+                parts["word/footnotes.xml"]).findall(f"{W}footnote")}
+            return body, mode, notes
+
+        def refs(element):
+            return [r.get(f"{W}id") for r in element.iter(f"{W}footnoteReference")]
+
+        def note_lines(note):
+            return sum(len(self.b13_lines(p)) for p in note.findall(f"{W}p"))
+
+        def height(p):
+            line = p.find(f"{W}pPr/{W}spacing")
+            return int(line.get(f"{W}line")) / 20
+
+        def pages(body):
+            """The body's paragraphs, a list per page started by w:pageBreakBefore or a
+            section break."""
+            found = [[]]
+            for p in body.findall(f"{W}p"):
+                if p.find(f"{W}pPr/{W}pageBreakBefore") is not None:
+                    found.append([])
+                found[-1].append(p)
+                if p.find(f"{W}pPr/{W}sectPr") is not None:
+                    found.append([])
+            return [page for page in found if page]
+
+        def left(page, reference_line):
+            """The room below the line at reference_line of a page: the body's height less
+            the lines above it and its own."""
+            return body_height - sum(height(p) for p in page[:reference_line + 1])
+
+        # The modes, and E-footnote-no-room-14 as E-footnote-no-room but for the mode.
+        for name in ("E-footnote-no-room-14", "E-footnote-cut-lines-14"):
+            self.assertEqual(self.batch_13(name)[2], ["14"], name)
+        for name in ("E-footnote-no-room", "E-footnote-cut-lines"):
+            self.assertEqual(self.batch_13(name)[2], ["15"], name)
+        a = self.doc_parts("E-footnote-no-room")
+        b = self.doc_parts("E-footnote-no-room-14")
+        self.assertEqual(a["word/document.xml"], b["word/document.xml"])
+        self.assertEqual(a["word/footnotes.xml"], b["word/footnotes.xml"])
+
+        # Space after: 32 pt left in both cases, a note of one line with 12 pt after in
+        # section 1, without in section 2.
+        body, _, notes = load("E-footnote-space-after")
+        found = pages(body)
+        self.assertEqual(len(found), 2)
+        for n, page in enumerate(found, 1):
+            (at,) = [k for k, p in enumerate(page) if refs(p)]
+            self.assertAlmostEqual(left(page, at), 32)
+            self.assertIn("32 pt left" if n == 1 else "the same note", self.b13_texts(page[0]))
+            (note_id,) = refs(page[at])
+            spacing = notes[note_id].find(f"{W}p/{W}pPr/{W}spacing")
+            self.assertEqual(None if spacing is None else spacing.get(f"{W}after"),
+                             "240" if n == 1 else None)
+            self.assertEqual(note_lines(notes[note_id]), 1)
+        self.assertIsNotNone(found[0][-1].find(f"{W}pPr/{W}sectPr"), "a section of its own")
+
+        # After a note: line 1 references a note of one line, then a 3-line note with
+        # widow control (the default) and the room the label names.
+        body, _, notes = load("E-footnote-no-room-after-note")
+        for page, room in zip(pages(body), rules.AFTER_NOTE_CASES):
+            first, second = refs(page[0]), [r for p in page[1:] for r in refs(p)]
+            self.assertEqual((len(first), len(second)), (1, 1))
+            self.assertEqual(note_lines(notes[first[0]]), 1)
+            self.assertEqual(note_lines(notes[second[0]]), 3)
+            self.assertIsNone(notes[second[0]].find(f".//{W}widowControl"))
+            (at,) = [k for k, p in enumerate(page) if refs(p) and k > 0]
+            self.assertAlmostEqual(left(page, at), room)
+            self.assertIn(f"{room} pt left", self.b13_texts(page[0]))
+
+        # The first case leaves room for one line of the second note under the separator
+        # and the first note, the second for none.
+        separator, note_line = 13.4, 12.2
+        self.assertEqual([int((room - separator - note_line) // note_line)
+                          for room in rules.AFTER_NOTE_CASES], [1, 0])
+
+        # Longer than a page: 120 lines from the line after the label, 40 lines after it.
+        body, _, notes = load("E-footnote-longer-than-page")
+        paragraphs = body.findall(f"{W}p")
+        self.assertEqual(refs(paragraphs[1]), ["1"])
+        self.assertEqual(note_lines(notes["1"]), 120)
+        self.assertEqual(len(paragraphs) - 3, 40)
+
+        # Widow room: 55 pt below the reference line, a 4-line note, then a short line.
+        body, _, notes = load("E-footnote-widow-room")
+        page = body.findall(f"{W}p")
+        (at,) = [k for k, p in enumerate(page) if refs(p)]
+        self.assertAlmostEqual(left(page, at), 55)
+        self.assertEqual(note_lines(notes["1"]), 4)
+        self.assertEqual(self.b13_texts(page[at + 1]), "Case 01: a short line")
+        # 55 pt hold the separator (13.4 pt) and three lines of 12.2 pt, not four.
+        self.assertLess(13.4 + 3 * 12.2, 55)
+        self.assertGreater(13.4 + 4 * 12.2, 55)
+
+        # Cut lines: a paragraph of four lines without widow control, line 2 referencing a
+        # note of 20 lines and line 3 one of one line, 100 pt below line 2.
+        for name in ("E-footnote-cut-lines", "E-footnote-cut-lines-14"):
+            body, _, notes = load(name)
+            page = body.findall(f"{W}p")
+            (at,) = [k for k, p in enumerate(page) if refs(p)]
+            four = page[at]
+            self.assertEqual(four.find(f"{W}pPr/{W}widowControl").get(f"{W}val"), "0")
+            values = self.b13_lines(four)
+            self.assertEqual(len(values), 4)
+            per_line, line = [[]], 0
+            for element in four.iter():
+                if element.tag == f"{W}br":
+                    per_line.append([])
+                elif element.tag == f"{W}footnoteReference":
+                    per_line[-1].append(element.get(f"{W}id"))
+            self.assertEqual(per_line, [[], ["1"], ["2"], []])
+            self.assertEqual((note_lines(notes["1"]), note_lines(notes["2"])), (20, 1))
+            above = sum(height(p) for p in page[:at])
+            self.assertAlmostEqual(body_height - above - 24, 100)
+
+        # Rest beside text: 60 pt below each reference line, a 50-line note, then 12 lines
+        # kept together, or 6 kept with the next 6.
+        body, _, notes = load("E-footnote-rest-beside-text")
+        found = pages(body)
+        for n, page in enumerate(found[:2], 1):
+            (at,) = [k for k, p in enumerate(page) if refs(p)]
+            self.assertAlmostEqual(left(page, at), 60)
+            self.assertEqual(note_lines(notes[str(n)]), 50)
+            after = [p for p in page[at + 1:]
+                     if not self.b13_texts(p).startswith((f"Case {n:02d}: ", "End of"))]
+            self.assertEqual(self.b13_texts(page[at + len(after) + 1]),
+                             f"Case {n:02d}: the line after")
+            if n == 1:
+                (kept,) = after
+                self.assertIsNotNone(kept.find(f"{W}pPr/{W}keepLines"))
+                self.assertEqual(len(self.b13_lines(kept)), 12)
+                self.assertIn("12 lines kept together", self.b13_texts(page[0]))
+            else:
+                first, second = after
+                self.assertIsNotNone(first.find(f"{W}pPr/{W}keepNext"))
+                self.assertIsNone(second.find(f"{W}pPr/{W}keepNext"))
+                self.assertEqual([len(self.b13_lines(p)) for p in after], [6, 6])
+                self.assertIn("6 lines kept with the next 6", self.b13_texts(page[0]))
+
+    def test_link_cases_have_the_markup_their_labels_name(self):
+        _, body, _ = self.batch_13("E-link-boxes")
+        links = list(body.iter(f"{W}hyperlink"))
+        starts = {b.get(f"{W}name"): b for b in body.iter(f"{W}bookmarkStart")}
+        ends = {b.get(f"{W}id") for b in body.iter(f"{W}bookmarkEnd")}
+        # Every link goes to a bookmark of the document, each bookmark is closed, and each
+        # link's text is coloured and underlined.
+        self.assertEqual([a.get(f"{W}anchor") for a in links],
+                         [f"Target_{c}" for c in "ABCDE"])
+        self.assertEqual(set(starts), {f"Target_{c}" for c in "ABCDE"})
+        self.assertEqual({b.get(f"{W}id") for b in starts.values()}, ends)
+        for a in links:
+            (r,) = a.findall(f"{W}r")
+            self.assertEqual(r.find(f"{W}rPr/{W}color").get(f"{W}val"), "0563C1")
+            self.assertEqual(r.find(f"{W}rPr/{W}u").get(f"{W}val"), "single")
+        paragraphs = {self.b13_texts(p)[:7]: p for p in body.findall(f"{W}p")}
+        for case, line in (("Case 01", None), ("Case 02", ("360", "auto")),
+                           ("Case 03", ("600", "exact")), ("Case 04", None)):
+            spacing = paragraphs[case].find(f"{W}pPr/{W}spacing")
+            self.assertEqual(None if spacing is None else (spacing.get(f"{W}line"),
+                                                           spacing.get(f"{W}lineRule")), line)
+        # Case 04's link is longer than a line of the text's width in Calibri's twin.
+        (long_link,) = paragraphs["Case 04"].iter(f"{W}hyperlink")
+        self.assertGreater(carlito_width(self.b13_texts(long_link)), rules.TEXT_W / 20)
+        self.assertLess(carlito_width(self.b13_texts(long_link)), 2 * rules.TEXT_W / 20 - 100)
+        # Case 05's link is in a table cell.
+        (cell_link,) = [a for tc in body.iter(f"{W}tc") for a in tc.iter(f"{W}hyperlink")]
+        self.assertEqual(cell_link.get(f"{W}anchor"), "Target_E")
+        # The targets: no length at a paragraph's start (A) and in mid-line (C), around words
+        # in mid-line (B, E) and around a whole paragraph's words (D), on a page of their own.
+        targets = {self.b13_texts(p)[:8]: p for p in body.findall(f"{W}p")
+                   if self.b13_texts(p).startswith("Target ")}
+        self.assertIsNotNone(targets["Target A"].find(f"{W}pPr/{W}pageBreakBefore"))
+
+        def around(p):
+            """The text before, inside and after the paragraph's bookmark."""
+            parts, where = ["", "", ""], 0
+            for element in p:
+                if element.tag == f"{W}bookmarkStart":
+                    where = 1
+                elif element.tag == f"{W}bookmarkEnd":
+                    where = 2
+                else:
+                    parts[where] += self.b13_texts(element)
+            return [bool(value) for value in parts]
+
+        self.assertEqual(around(targets["Target A"]), [False, False, True])
+        self.assertEqual(around(targets["Target B"]), [True, True, True])
+        self.assertEqual(around(targets["Target C"]), [True, False, True])
+        self.assertEqual(around(targets["Target D"]), [False, True, False])
+        self.assertEqual(around(targets["Target E"]), [True, True, True])
 
     def test_pictures_are_typed_png_parts_that_resolve(self):
         # Every VML picture of every document is Word's picture frame, and every VML text box
