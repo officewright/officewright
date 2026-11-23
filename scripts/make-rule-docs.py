@@ -7519,6 +7519,809 @@ def link_boxes() -> Doc:
     )
 
 
+# Batch 14, part A: the hypotheses #572 leaves (#586), no-break spaces and narrowed spaces in
+# justified lines (#601, #497), the settings' endnote numbering (#587), rows tied by vertically
+# merged cells (#582), the pages of footnotes past the text (#604), number formats past the
+# references of #498 (#546), and the height of highlights and run shading (#346).
+
+# How far Word drops a subscript (#586 item 1): the sizes of the issue, 12, 24, 36, 48 and 72 pt
+# and every point from 20 to 48, in four fonts whose descents and OS/2 subscript offsets differ.
+SUBSCRIPT_DROP_SIZES = [12, *range(20, 49), 72]
+SUBSCRIPT_DROP_FONTS = ("Calibri", "Liberation Sans", "Noto Sans", BARCODE_FONT)
+SUBSCRIPT = '<w:vertAlign w:val="subscript"/>'
+
+
+def font_props(font: str, size: float) -> str:
+    """The run properties of text in font at size points."""
+    f = attr(font)
+    hp = half_points(size)
+    return (f'<w:rFonts w:ascii="{f}" w:hAnsi="{f}" w:eastAsia="{f}" w:cs="{f}"/>'
+            f'<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>')
+
+
+def subscript_drop() -> Doc:
+    # E-superscript, -sizes and -steps (Calibri and Liberation Sans, 8 to 48 pt) fit both a
+    # drop by the descent and a fixed share of the size. The label is Calibri 11 pt; the
+    # sample, "Base" and the subscript "123", is in the case's font and size, so the line
+    # holds no other text of that font. Each font starts a page.
+    body, n = "", 0
+    for k, font in enumerate(SUBSCRIPT_DROP_FONTS):
+        for size in SUBSCRIPT_DROP_SIZES:
+            n += 1
+            props = font_props(font, size)
+            body += labelled(n, f"{font} {size} pt, subscript", styled_run("Base", props),
+                             styled_run("123", props + SUBSCRIPT),
+                             page_break_before=k > 0 and size == SUBSCRIPT_DROP_SIZES[0])
+    return Doc(
+        "E-subscript-drop",
+        "The baseline shift of subscript text at 12 pt, at every point from 20 to 48 pt and "
+        "at 72 pt, in Calibri, Liberation Sans, Noto Sans and Libre Barcode 128, one font "
+        "after the other: whether the drop follows the font's descent, its OS/2 subscript "
+        "offset or a fixed share of the size",
+        body,
+    )
+
+
+# The last lines of a chain kept with the next that cannot move (#586 item 2). Lines of exact
+# 12 pt, 58 to a page, as in E-keepnext-break; every label is the first line of its case and
+# fits one line. Widow control is set on every paragraph, since the document defaults turn it
+# on: off where the case repeats a known render with one thing changed, on where the label
+# says so.
+def kept_lines(prefix: str, count: int) -> list[str]:
+    return [f"{prefix}, line {k}" for k in range(1, count + 1)]
+
+
+def kept_break(n: int, after: int, widow: bool) -> str:
+    """The kept paragraph of E-keepnext-break case 02: one line, a page break, and after
+    lines more."""
+    return page_para(run(f"Case {n:02d} kept: A") + page_break_run()
+                     + lines(kept_lines(f"Case {n:02d} kept", after)),
+                     keep_next=True, widow_control=widow)
+
+
+def together(n: int, count: int, widow: bool, **props) -> str:
+    return page_para(lines(kept_lines(f"Case {n:02d} together", count)), keep_lines=True,
+                     widow_control=widow, **props)
+
+
+def keepnext_last_lines() -> Doc:
+    # E-keepnext-break, case 02 (widow control off): the last line of a kept paragraph that a
+    # page break inside it keeps from moving goes to the page of the 3 lines kept together
+    # after it. Case 01 is that case with widow control on; cases 02 and 03 a kept paragraph
+    # that can move (it starts mid-page, 51 + 6 lines leave one line for the 3); case 04 one
+    # that starts a page through w:pageBreakBefore (56 + 3 lines are more than 58); case 05
+    # the 56 lines after the break followed by 58 kept together, a page's worth; case 06 a
+    # table whose first row of 3 lines may not split after 56 lines; case 07 a chain of a
+    # 10-line paragraph and 55 one-line paragraphs from the top of a page.
+    off, on = {"widow_control": False}, {"widow_control": True}
+    body = filler(20, "Case 01: 20 lines, then a kept paragraph with a page break and 56 lines; "
+                  "widow control on", **on)
+    body += kept_break(1, 56, True) + together(1, 3, True)
+    for n, widow in ((2, False), (3, True)):
+        state = "on" if widow else "off"
+        body += filler(51, f"Case {n:02d}: 51 lines, a kept paragraph of 6 lines, 3 lines kept "
+                       f"together; widow control {state}", page_break_before=True,
+                       widow_control=widow)
+        body += page_para(lines(kept_lines(f"Case {n:02d} kept", 6)), keep_next=True,
+                          widow_control=widow)
+        body += together(n, 3, widow)
+    body += page_para(lines(["Case 04: kept, 56 lines from page break before; 3 lines kept "
+                             "together follow; widow control off"]
+                            + kept_lines("Case 04 kept", 56)[1:]),
+                      keep_next=True, page_break_before=True, **off)
+    body += together(4, 3, False)
+    body += filler(20, "Case 05: 20 lines, a kept paragraph with a page break and 56 lines, "
+                   "58 kept together; widow off", page_break_before=True, **off)
+    body += kept_break(5, 56, False) + together(5, 58, False)
+    body += page_para(lines(["Case 06: kept, 56 lines from page break before; then a table, "
+                             "its row 1 may not split; widow off"]
+                            + kept_lines("Case 06 kept", 56)[1:]),
+                      keep_next=True, page_break_before=True, **off)
+    rows = [([cell(page_para(lines(kept_lines("Case 06 row 1", 3)), **off)),
+              cell(page_para(run("Case 06 row 1, second cell"), **off))], "<w:cantSplit/>"),
+            [cell(page_para(run("Case 06 row 2"), **off)),
+             cell(page_para(run("Case 06 row 2, second cell"), **off))]]
+    body += rule_table(rows, HALF_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+    body += page_para(run("Case 06: the paragraph after the table"), **off)
+    body += page_para(lines(["Case 07: from a page's top, kept 10 lines, then 55 one-line "
+                             "paragraphs, 54 kept; widow off"]
+                            + kept_lines("Case 07 kept", 10)[1:]),
+                      keep_next=True, page_break_before=True, **off)
+    body += one_liners("Case 07 chain", 54, keep_next=True, **off)
+    body += page_para(run("Case 07 chain 55, not kept with the next"), **off)
+    return Doc(
+        "E-keepnext-last-lines",
+        "The last lines of a chain kept with the next whose next paragraph does not fit below "
+        "it: E-keepnext-break case 02 with widow control on, a kept paragraph of 6 lines "
+        "mid-page without and with widow control, one of 56 lines from page break before, "
+        "56 lines after a page break before 58 kept together, a table whose first row may "
+        "not split, and a chain of a 10-line paragraph and one-line paragraphs longer than a "
+        "page",
+        body + page_para(run("End of the document.")),
+    )
+
+
+def keepnext_last_lines_section() -> Doc:
+    # #586 item 2, case 7: the chain of E-keepnext-last-lines case 04 (a kept paragraph of 56
+    # lines, then 3 lines kept together, no page break inside), here kept from moving by the
+    # start of a section on the next page instead of page break before: once with widow
+    # control off, as case 04, and once on, as case 01.
+    body = page_para(run("Two cases, each a chain at the start of a section on the next page"),
+                     sect=section())
+    for n, widow in ((1, False), (2, True)):
+        state = "on" if widow else "off"
+        body += page_para(lines([f"Case {n:02d}: a section starts with a kept paragraph of 56 "
+                                 f"lines; 3 lines kept together; widow {state}"]
+                                + kept_lines(f"Case {n:02d} kept", 56)[1:]),
+                          keep_next=True, widow_control=widow)
+        body += together(n, 3, widow, sect=section() if n == 1 else None)
+    return Doc(
+        "E-keepnext-last-lines-section",
+        "A chain kept with the next at the start of a section on the next page: a kept "
+        "paragraph of 56 lines and 3 lines kept together, which do not fit a page, without "
+        "and with widow control",
+        body,
+        last_section=section(),
+    )
+
+
+# Multiple line spacing at the foot of a page (#586 item 3). A single line of Calibri 11 pt is
+# its OS/2 Windows ascent and descent, 1950 and 550 of 2048 units (Carlito's are the same), and
+# a footnote's line of 10 pt the same share of 10 pt. The room multiple spacing adds goes below
+# a line's text; the room at least spacing adds goes above it, and a line of exact height has
+# its baseline at 0.8 of its height (lines.rs, from E-line-exact), with the descent below it.
+CALIBRI_ASCENT, CALIBRI_DESCENT = 1950 / 2048, 550 / 2048
+CALIBRI_11_LINE = (CALIBRI_ASCENT + CALIBRI_DESCENT) * 11
+NOTE_LINE = (CALIBRI_ASCENT + CALIBRI_DESCENT) * 10
+BODY_TEXT = (PAGE_H - 2 * MARGIN) / 20
+EXACT_20 = spacing(line=("exact", 20))
+# (label, w:spacing of the case's lines, the first line's height, where in the second line its
+# text ends), the spacing given as (w:lineRule, w:line).
+FOOT_SPACINGS = [
+    ("spaced 3 lines (w:line 720)", ("auto", 720), 3 * CALIBRI_11_LINE, CALIBRI_11_LINE),
+    ("spaced 1.15 lines (w:line 276)", ("auto", 276), 1.15 * CALIBRI_11_LINE, CALIBRI_11_LINE),
+    ("at least 40 pt", ("atLeast", 40), 40, 40),
+    ("exactly 40 pt", ("exact", 40), 40, 0.8 * 40 + CALIBRI_DESCENT * 11),
+]
+
+
+def exact_twips(value: int) -> str:
+    """An empty paragraph exactly value twips tall, without widow control."""
+    return para("", space=f'<w:spacing w:line="{value}" w:lineRule="exact"/>',
+                widow_control=False)
+
+
+def foot_case(n: int, spaced: tuple, side: int, where: str, note_id: int) -> tuple[str, str]:
+    """A page of one case: lines of exact 20 pt from the top of the body (or of a table cell
+    under a 20 pt label and the table's 0.5 pt top border, below which Word starts the cell's
+    first line in E-footnote-table's render), an empty paragraph of exact
+    height, a whole number of twips, that puts the end of the text of the case's second line
+    side pt from the limit
+    (the bottom margin, or the top of one footnote line under its separator), the case's two
+    lines, and a paragraph after them; widow control off. Returns the page's paragraphs and
+    the note, if any."""
+    label, (rule, value), first, text_end = spaced
+    off = {"widow_control": False}
+    limit = BODY_TEXT - (CALIBRI_11_LINE + NOTE_LINE if where == "note" else 0)
+    start = 20 + 0.5 if where == "cell" else 0
+    top = limit + side - text_end - first
+    count = int((top - start - 1) // 20)
+    room = round((top - start - 20 * count) * 20)
+    limit_name = "the footnotes" if where == "note" else "the bottom margin"
+    place = " in a cell" if where == "cell" else ""
+    title = (f"Case {n:02d}: {label}{place}; line 2's text ends 1 pt "
+             f"{'above' if side < 0 else 'below'} {limit_name}")
+    case_lines = para(lines(kept_lines(f"Case {n:02d} {label}", 2)),
+                      space=spacing(line=(rule, value)), **off)
+    after = page_para(run(f"Case {n:02d}: the paragraph after"), space=EXACT_20, **off)
+    fill = [f"Case {n:02d} filler line {k}" for k in range(1, count + 1)]
+    if where == "cell":
+        content = (page_para(lines(fill), space=EXACT_20, **off) + exact_twips(room) + case_lines
+                   + page_para(lines(kept_lines(f"Case {n:02d} more of the cell", 3)),
+                               space=EXACT_20, **off))
+        table_xml = rule_table([[cell(content), cell(page_para(run(f"Case {n:02d} second cell"),
+                                                               space=EXACT_20, **off))]],
+                               HALF_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+        page = page_para(run(title), space=EXACT_20, page_break_before=n > 1, **off) + table_xml
+        return page + after, ""
+    reference = note_reference(note_id) if where == "note" else ""
+    first_line = page_para(run(title) + reference + line_break_run()
+                           + lines(fill[1:]), space=EXACT_20, page_break_before=n > 1, **off)
+    note_xml = note(run(f" Footnote {note_id}, one line.")) if where == "note" else ""
+    return first_line + exact_twips(room) + case_lines + after, note_xml
+
+
+def line_multiple_foot(mode: int) -> Doc:
+    # E-line-multiple (mode 15) keeps a line spaced 3 lines whose text fits, the room below
+    # its text reaching 3.7 pt past the bottom margin. Here the text of the second of two
+    # lines ends 1 pt above and 1 pt below the bottom margin, spaced 3 and 1.15 lines, then
+    # the same above a footnote of one line and in a table cell cut across pages, and
+    # lines of at least and of exactly 40 pt placed the same way: an exact 40 pt line whose
+    # text ends 1 pt above the margin reaches 4.0 pt past it, an at least one does not.
+    body, notes, n = "", [], 0
+    for where, spacings in (("body", FOOT_SPACINGS[:2]), ("note", FOOT_SPACINGS[:2]),
+                            ("cell", FOOT_SPACINGS[:2]), ("body", FOOT_SPACINGS[2:])):
+        for spaced in spacings:
+            for side in (-1, 1):
+                n += 1
+                page, note_xml = foot_case(n, spaced, side, where, len(notes) + 1)
+                body += page
+                if note_xml:
+                    notes.append(note_xml)
+    suffix = "" if mode == 15 else f"-{mode}"
+    return Doc(
+        f"E-line-multiple-foot{suffix}",
+        "The last of two lines spaced 3 and 1.15 lines whose text ends 1 pt above and 1 pt "
+        "below the bottom margin: whether the room the spacing adds below the text may reach "
+        "past the body; the same above a footnote and in a table cell cut across pages, and "
+        "lines of at least and exactly 40 pt placed so; widow control off; in compatibility "
+        f"mode {mode}",
+        body + page_para(run("End of the document."), widow_control=False),
+        footnotes=tuple(notes),
+        mode=mode,
+    )
+
+
+def table_header_repeat_off() -> Doc:
+    # E-table-header-repeat-tall: header rows kept whole that take more than a page are left
+    # off the table's last pages, and the paragraph after the table goes to a new page. Case
+    # 01 is E-table-header-repeat-single-tall (a header row of 60 lines, which Word cuts over
+    # two pages) with 50 body rows, which go on to a page after the header row's last; case 02
+    # header rows that fit a page with room for one short row below them, and a body row of
+    # 10 lines that may not split, which does not fit under them on the next page either;
+    # cases 03 to 05 the table of -tall with 30 body rows, followed at once by a second
+    # table, by an empty paragraph ending the section before a continuous one, and by a
+    # paragraph with 24 pt before.
+    header = "<w:tblHeader/>"
+
+    def head(n: int, r: int, count: int) -> tuple:
+        return ([cell(numbered_lines(f"Case {n:02d} head {r}", count)),
+                 cell(para(run(f"Case {n:02d} head {r}b"))),
+                 cell(para(run(f"Case {n:02d} head {r}c")))], header)
+
+    def rows(n: int, count: int) -> list:
+        return [row_cells([f"Case {n:02d} body {r:02d}a", f"body {r:02d}b", f"body {r:02d}c"])
+                for r in range(1, count + 1)]
+
+    def table_of(rows_xml: list) -> str:
+        return rule_table(rows_xml, EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True,
+                          border_eighths=48)
+
+    def label(n: int, value: str) -> str:
+        return para(run(f"Case {n:02d}: {value}"), page_break_before=n > 1)
+
+    tall = "2 header rows of 35 lines, 30 body rows, then"
+    body = (label(1, "row 1 is a header row of 60 lines; 50 body rows follow, then a paragraph")
+            + table_of([head(1, 1, 60)] + rows(1, 50))
+            + para(run("Case 01: the paragraph after the table")))
+    tall_row = ([cell(numbered_lines("Case 02 tall row", 10)), cell(para(run("tall row b"))),
+                 cell(para(run("tall row c")))], "<w:cantSplit/>")
+    body += (label(2, "header rows 1 and 2 of 22 lines each, a body row of 1 line, one of 10 "
+                   "that may not split")
+             + table_of([head(2, 1, 22), head(2, 2, 22)] + rows(2, 1) + [tall_row])
+             + para(run("Case 02: the paragraph after the table")))
+    second = rule_table([row_cells([f"Case 03 second table, row {r}", f"row {r}b"])
+                         for r in range(1, 4)], HALF_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+    body += (label(3, f"{tall} at once a second table of 2 columns")
+             + table_of([head(3, 1, 35), head(3, 2, 35)] + rows(3, 30)) + second
+             + para(run("Case 03: the paragraph after the second table")))
+    body += (label(4, f"{tall} a continuous section break")
+             + table_of([head(4, 1, 35), head(4, 2, 35)] + rows(4, 30))
+             + para(sect=section())
+             + para(run("Case 04: the first paragraph of the continuous section")))
+    body += (label(5, f"{tall} a paragraph with 24 pt before")
+             + table_of([head(5, 1, 35), head(5, 2, 35)] + rows(5, 30))
+             + para(run("Case 05: the paragraph after the table, 24 pt before"),
+                    space=spacing(before=24)))
+    return Doc(
+        "E-table-header-repeat-off",
+        "Tables that go on without their header rows (w:tblHeader): a header row of 60 lines "
+        "with 50 body rows, then a paragraph; header rows just under a page and a body row "
+        "that may not split, with the table ending on the next page; and two header rows of "
+        "35 lines followed by a second table, by a continuous section break and by a "
+        "paragraph with space before",
+        body + para(run("End of the document.")),
+        last_section=section(kind="continuous"),
+    )
+
+
+# No-break spaces in justified lines (#601). Each case's first line holds 14 words of
+# Liberation Sans 11 pt, about 30 pt narrower than the text, before "information", which does
+# not fit even with the spaces narrowed by a fifth; "~" stands for the case's space and "-" for
+# a w:noBreakHyphen. The lines were set by their advances in Liberation Sans, which the test
+# measures.
+JUSTIFY_FONT = "Liberation Sans"
+NBSP_SPACES = ("\u00a0", "\u202f", "\u2007")
+NBSP_LINES = {
+    "\u00a0": (
+        "during order there state each~already follow group before point word heard since about",
+        "place earth been because~~~since know home most even-~move times same state have",
+        "each~three~much~bring~many~above~house~paper~where~better~earth~years~family~home",
+    ),
+    "\u202f": (
+        "years water round whole thing~since come earth though bring which found house study",
+        "world never need carry~~~open young house found name-~group came which great other",
+        "when~often~leave~before~times~heard~bring~during~while~because~home~house~stand~each",
+    ),
+    "\u2007": (
+        "being made show follow found~good heard great years seem were answer stand three",
+        "many came need what~~~often paper letter study again-~could round found some well",
+        "two~both~carry~their~place~times~room~bring~home~leave~short~water~know~large",
+    ),
+}
+NBSP_NAMES = {"\u00a0": "no-break space U+00A0", "\u202f": "narrow no-break space U+202F",
+              "\u2007": "figure space U+2007"}
+
+
+def justified_runs(value: str, props: str) -> str:
+    """One run of value, with a w:noBreakHyphen at every U+2011 in it."""
+    inner = "<w:noBreakHyphen/>".join(text(piece) for piece in value.split("\u2011"))
+    return f"<w:r><w:rPr>{props}</w:rPr>{inner}</w:r>"
+
+
+def justify_nbsp(mode: int) -> Doc:
+    props = font_props(JUSTIFY_FONT, 11)
+    body, n = "", 0
+    for space in NBSP_SPACES:
+        name = NBSP_NAMES[space]
+        for shape, template in enumerate(NBSP_LINES[space]):
+            n += 1
+            words = template.replace("-", " ").replace("~", " ").split()
+            if shape == 0:
+                at = template.split("~")[0].split()[-1]
+                what = f"one {name} after \"{at}\""
+            elif shape == 1:
+                at = template.split("~")[0].split()[-1]
+                what = f"three {name} after \"{at}\", one after a non-breaking hyphen"
+            else:
+                what = f"only {name} between the {len(words)} words of line 1"
+            line = template.replace("-", "\u2011").replace("~", space)
+            body += para(run(f"Case {n:02d}: {what}"), space=spacing(before=6))
+            body += para(justified_runs(line + " information ends the case.", props), jc="both")
+    return Doc(
+        f"E-justify-nbsp-{mode}",
+        "Justified lines of Liberation Sans 11 pt that need their gaps widened, holding a "
+        "no-break space (U+00A0) between two words, three in a row and one after a "
+        "non-breaking hyphen (w:noBreakHyphen), and only no-break spaces; the same with the "
+        "narrow no-break space U+202F and the figure space U+2007: whether they widen as the "
+        f"spaces do; in compatibility mode {mode}",
+        body,
+        mode=mode,
+    )
+
+
+# The endnote numbering of the settings (#587): Word ignores the settings' w:footnotePr
+# (E-footnote-numbering-settings); whether it takes their w:endnotePr where a section has none.
+def endnote_numbering_settings() -> Doc:
+    def refs(first: int) -> list[str]:
+        return [run(f"Line {k} holds a reference") + note_reference(first + k - 1, "endnote")
+                for k in (1, 2)]
+
+    pages = [
+        ([[run("Section 1: no w:endnotePr in the section")] + refs(1)], section()),
+        ([[run("Section 2: lowerLetter in the section's w:endnotePr")] + refs(3)],
+         section(notes=section_notes(endnotes=note_props(fmt="lowerLetter")))),
+    ]
+    return Doc(
+        "E-endnote-numbering-settings",
+        "Endnote numbers set by the document-wide w:endnotePr of the settings (upper Roman "
+        "from 3, restarting in each section, at the end of the document): in a section "
+        "without w:endnotePr and in one whose w:endnotePr gives lower-case letters only, two "
+        "references each",
+        note_pages(pages),
+        endnotes=tuple(note(run(f" Endnote {k}, one line."), kind="endnote") for k in range(1, 5)),
+        endnote_props=note_props(pos="docEnd", fmt="upperRoman", start=3, restart="eachSect"),
+        last_section=pages[-1][1],
+    )
+
+
+# Rows tied by vertically merged cells (#582). Three columns of Liberation Sans 11 pt text with
+# all borders; a merge's text is one paragraph of the lines its label names.
+RESTART = '<w:vMerge w:val="restart"/>'
+GO_ON = "<w:vMerge/>"
+
+
+def merge_text(value: str, count: int, **props) -> str:
+    return para(lines([f"{value}, line {k}" for k in range(1, count + 1)]), **props)
+
+
+def merged_only_row(n: int, merge: int, own: int, *, margins: bool = False,
+                    before: bool = False, height: str = "") -> str:
+    """Row 2 holds only merged cells: the rest of a merge from row 1, a merge of merge lines
+    starting (with top and bottom cell margins of 4 pt, or 6 pt space before its text) and
+    one of one line starting; row 3 has a cell of own lines and the two merges' rest; height
+    is row 2's w:trHeight."""
+    tc_mar = ('<w:tcMar><w:top w:w="80" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/>'
+              "</w:tcMar>") if margins else ""
+    space = {"space": spacing(before=6)} if before else {}
+    rows = [
+        [cell(para(run(f"Case {n:02d} merge from row 1")), RESTART),
+         cell(para(run("Row 1 b"))), cell(para(run("Row 1 c")))],
+        ([cell(para(), GO_ON),
+          cell(merge_text(f"Case {n:02d} merge from row 2", merge, **space), RESTART + tc_mar),
+          cell(para(run("Merge from row 2")), RESTART)], height),
+        [cell(merge_text("Row 3 own", own)), cell(para(), GO_ON), cell(para(), GO_ON)],
+        row_cells(["Row 4 a", "Row 4 b", "Row 4 c"]),
+    ]
+    return rule_table(rows, EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+
+
+def tall_merge(n: int, height: str = "") -> str:
+    """A merge of 5 lines over rows 2 and 3, which have cells of one line of their own;
+    height is the w:trHeight of rows 2 and 3."""
+    rows = [
+        row_cells(["Row 1 a", "Row 1 b", "Row 1 c"]),
+        ([cell(merge_text(f"Case {n:02d} merge", 5), RESTART), cell(para(run("Row 2 own b"))),
+          cell(para(run("Row 2 own c")))], height),
+        ([cell(para(), GO_ON), cell(para(run("Row 3 own b"))), cell(para(run("Row 3 own c")))],
+         height),
+        row_cells(["Row 4 a", "Row 4 b", "Row 4 c"]),
+    ]
+    return rule_table(rows, EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+
+
+def continuations_only(n: int, first: int) -> str:
+    """Row 1 starts three merges, the first of first lines; row 2 holds only their rest."""
+    rows = [
+        [cell(merge_text(f"Case {n:02d} merge a", first), RESTART),
+         cell(para(run("Merge b")), RESTART), cell(para(run("Merge c")), RESTART)],
+        [cell(para(), GO_ON), cell(para(), GO_ON), cell(para(), GO_ON)],
+        row_cells(["Row 3 a", "Row 3 b", "Row 3 c"]),
+    ]
+    return rule_table(rows, EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+
+
+def table_vmerge_heights(mode: int) -> Doc:
+    # generated/invoice-ru: a row holding the rest of a one-line merge and the start of a
+    # merge of one line is a line of that text high, and the row after it as tall as its own
+    # text. #578 gives such a row the first line of the merges that start in it, with their
+    # cell margins, and lets a merge taller than its rows make the last of them taller.
+    at_least = '<w:trHeight w:val="400" w:hRule="atLeast"/>'
+    exact = '<w:trHeight w:val="400" w:hRule="exact"/>'
+    cases = [(f"row 2 holds only merged cells, its merge {merge} line{'s' * (merge > 1)}; "
+              f"row 3's own cell {own} line{'s' * (own > 1)}",
+              lambda n, m=merge, o=own: merged_only_row(n, m, o))
+             for own in (1, 3) for merge in (1, 2, 3)]
+    cases += [
+        ("as case 02, the merge's cell with 4 pt top and bottom margins (w:tcMar)",
+         lambda n: merged_only_row(n, 2, 1, margins=True)),
+        ("as case 02, the merge's text with 6 pt space before",
+         lambda n: merged_only_row(n, 2, 1, before=True)),
+        ("a merge of 5 lines over rows 2 and 3, which have cells of 1 line of their own",
+         tall_merge),
+        ("row 2 holds only the rest of three merges of 1 line from row 1",
+         lambda n: continuations_only(n, 1)),
+        ("row 2 holds only the rest of three merges from row 1, the first of 3 lines",
+         lambda n: continuations_only(n, 3)),
+        ("as case 03, row 2 at least 20 pt (w:trHeight)",
+         lambda n: merged_only_row(n, 3, 1, height=at_least)),
+        ("as case 03, row 2 exactly 20 pt (w:trHeight)",
+         lambda n: merged_only_row(n, 3, 1, height=exact)),
+        ("as case 09, rows 2 and 3 at least 20 pt (w:trHeight)",
+         lambda n: tall_merge(n, at_least)),
+        ("as case 09, rows 2 and 3 exactly 20 pt (w:trHeight)",
+         lambda n: tall_merge(n, exact)),
+    ]
+    body = ""
+    for n, (label, make) in enumerate(cases, 1):
+        # Cases 07 and 12 start a page, so that no table is cut over pages.
+        body += para(run(f"Case {n:02d}: {label}"), page_break_before=n in (7, 12),
+                     space=spacing(before=12)) + make(n)
+    suffix = "" if mode == 15 else f"-{mode}"
+    return Doc(
+        f"E-table-vmerge-heights{suffix}",
+        "The heights of table rows tied by vertically merged cells (w:vMerge): a row of only "
+        "merged cells starting a merge of 1, 2 and 3 lines, with the next row's own cell of 1 "
+        "and 3 lines; that merge with cell margins and with space before; a merge of 5 lines "
+        "over two rows of one line; a row of only continuations; and rows of at least and "
+        f"exact height; Liberation Sans; in compatibility mode {mode}",
+        body + para(run("End of the document.")),
+        mode=mode,
+        run_default_fonts=" ".join(f'w:{slot}="{CELL_FONT}"'
+                                   for slot in ("ascii", "hAnsi", "eastAsia", "cs")),
+    )
+
+
+# Narrowed spaces in justified lines (#497, #606). Each case's first line is a line of words of
+# Liberation Sans 11 pt and the word after it, which fits on the line only if the line's spaces,
+# the one before that word included, narrow by the share the label names; the label also says
+# how much of the word reaches past the margin at the spaces' natural width, as a share of its
+# own width. Cases 01 to 05 need 5 to 30 % with a long word; cases 06 to 14 about 10 and about
+# 20 % with words of different widths; cases 15 to 21 the same share of a word, with 5 to 25
+# spaces. The words were set by their advances in Liberation Sans, which the test measures;
+# its advances fall near steps of 0.61 pt, so the shares are near, not at, round numbers.
+NARROW_CASES = [
+    # (the first line's words, the next word, its share of the spaces, its share past the end)
+    ("more shall clear paper round carry follow found them learn other went differ came",
+     "information", 5.5, 4.3),
+    ("great know word letter went what think could leave because here must place plain",
+     "information", 9.9, 7.8),
+    ("home here even which under years much young each stand make might line about",
+     "information", 19.9, 15.7),
+    ("open been family often before sound page letter point seem learn while heard differ",
+     "information", 25.7, 20.2),
+    ("study bring hand about page being short came name never even sound each would",
+     "information", 30.0, 23.6),
+    ("think mother together room never before while which follow every where plain again "
+     "white", "two", 9.8, 24.6),
+    ("thing home early close page stand went must there place administrations much read "
+     "along", "be", 9.9, 34.6),
+    ("came here great have order home good administrations earth point learn write again "
+     "began", "at", 9.9, 46.4),
+    ("while responsibilities story here even there name open carry think state study should "
+     "began", "is", 9.9, 53.2),
+    ("show short family thing spell room today have what keep already most understandings "
+     "want", "a", 9.9, 69.0),
+    ("water round simple them below make world show above must same where people after",
+     "should", 19.8, 26.2),
+    ("open learn them were clear have many come near administrations here order even house",
+     "time", 19.9, 40.9),
+    ("because during hand began count thing round above would when work every leave mother",
+     "the", 20.0, 56.0),
+    ("name together sound second clear without under differ what figure never years where "
+     "room", "on", 19.9, 69.6),
+    ("you point and went call the left side later she kind line said next best this we that "
+     "who boy", "time", 9.9, 29.2),
+    ("above change together should already could mother during electroencephalograph paper",
+     "time", 20.0, 29.4),
+    ("through misinterpretations because together uncharacteristically house "
+     "interdepartmental", "time", 28.3, 29.2),
+    ("institutionalisation internationalisation leave electroencephalograph "
+     "compartmentalisation", "time", 39.8, 29.3),
+    ("he of my in is its start way go next day you will put up no by right be now part to "
+     "year for as", "the", 10.3, 51.5),
+    ("might without short which plain much compartmentalisation should need home whole there",
+     "the", 21.5, 51.6),
+    ("straightforwardness question because responsibilities enough experimentation page "
+     "group", "the", 30.0, 47.9),
+]
+
+
+def justify_narrow(mode: int) -> Doc:
+    props = font_props(JUSTIFY_FONT, 11)
+    body = ""
+    for n, (words, word, share, past) in enumerate(NARROW_CASES, 1):
+        count = len(words.split())
+        body += para(run(f"Case {n:02d}: {count} spaces narrowed {share:.1f} % hold \"{word}\", "
+                         f"{past:.1f} % of it past the margin"), space=spacing(before=6))
+        body += para(styled_run(f"{words} {word} and the second line ends the case.", props),
+                     jc="both")
+    suffix = "" if mode == 15 else f"-{mode}"
+    return Doc(
+        f"E-justify-narrow{suffix}",
+        "Justified lines of Liberation Sans 11 pt whose next word fits only if their spaces "
+        "narrow by about 5, 10, 20, 25 and 30 %; at about 10 and 20 %, next words of different "
+        "widths, so that from a quarter to seven tenths of the word reaches past the margin; "
+        "and the same word as far past the margin with 5 to 25 spaces: how far Word narrows "
+        f"the spaces to keep the word; in compatibility mode {mode}",
+        body,
+        mode=mode,
+    )
+
+
+# The pages of footnotes past the last page of text (#604): section 1 has one line; section 2,
+# continuous and with a title page, has one line that references a note of 12 lines of exact
+# 120 pt. Page 1 has room for five of them below the two lines and the separator, each later
+# page for five below the continuation separator, so the note runs onto two more pages.
+def footnote_pages_section() -> Doc:
+    def header(name: str, label: str) -> tuple[str, str]:
+        return header_part(name, page_para(run(label)))
+
+    first = (("headerReference", "default", "header1.xml"),
+             ("footerReference", "default", "footer1.xml"))
+    second = (("headerReference", "default", "header2.xml"),
+              ("headerReference", "first", "header3.xml"),
+              ("footerReference", "default", "footer2.xml"),
+              ("footerReference", "first", "footer3.xml"))
+    body = (para(run("Section 1: one line"), sect=section(refs=first))
+            + para(run("Section 2: continuous, a title page; this line references a note of 12 "
+                       "lines of 120 pt") + note_reference(1)))
+    return Doc(
+        "E-footnote-pages-section",
+        "A footnote of 12 lines of exact 120 pt that runs two pages past the last line of "
+        "text, referenced from a continuous section with a title page after a section of one "
+        "line: which section's headers and footers the note's pages take, and how they count "
+        "in SECTIONPAGES",
+        body,
+        headers=(header("header1.xml", "Header of section 1, default"),
+                 counting_footer("footer1.xml", "Footer of section 1, default: page"),
+                 header("header2.xml", "Header of section 2, default"),
+                 header("header3.xml", "Header of section 2, first page"),
+                 counting_footer("footer2.xml", "Footer of section 2, default: page"),
+                 counting_footer("footer3.xml", "Footer of section 2, first page: page")),
+        footnotes=(note(note_lines("Footnote 1", 12), space=spacing(line=("exact", 120))),),
+        last_section=section(kind="continuous", refs=second, title_page=True),
+    )
+
+
+# Number formats past what E-number-formats and E-number-formats-letters show (#546). Each case
+# is a section of one page whose numbers start where its label says; PAGE fields show the
+# number in the formats the label names, with \* Arabic beside them.
+def number_cases(cases: list[tuple[int, str | None, list[str]]], first: int = 1) -> list:
+    """Sections for (page start, page number format, \\* switches of PAGE)."""
+    sections = []
+    for n, (start, page_format, switches) in enumerate(cases, first):
+        what = "Chicago page numbers" if page_format else "page numbers"
+        contents = [run(f"Case {n:02d}: {what} restarted at {start}")]
+        for switch in switches:
+            instr = f"PAGE \\* {switch}" if switch else "PAGE"
+            contents.append(run(f"{instr}: ") + field(instr))
+        sections.append((contents, section(page_start=start, page_format=page_format)))
+    return sections
+
+
+def number_formats_limits() -> Doc:
+    words = ["CardText", "OrdText", "DollarText", "Arabic"]
+    cases = [(999999, None, words), (1000000, None, words)]
+    cases += [(start, None, ["Hex", "Arabic"]) for start in (32767, 32768, 65536)]
+    cases += [(start, "chicago", ["", "Arabic"]) for start in (118, 120, 121, 200, 256, 257, 1000)]
+    cases += [(start, None, ["ROMAN", "Arabic"]) for start in (64999, 65000, 100000)]
+    cases += [(27, None, ["CardText \\* Caps", "OrdText \\* Upper", "Arabic"])]
+    sections = number_cases(cases)
+    return Doc(
+        "E-number-formats-limits",
+        "PAGE fields past the limits of the references: numbers in words (CardText, OrdText, "
+        "DollarText) at 999999 and 1000000, Hex at 32767, 32768 and 65536, Chicago page "
+        "numbers restarted at 118, 120, 121, 200, 256, 257 and 1000, ROMAN at 64999, 65000 and "
+        "100000, and CardText with \\* Caps and OrdText with \\* Upper at 27",
+        sectioned(sections),
+        last_section=sections[-1][1],
+    )
+
+
+GERMAN_STARTS = [0, 1, 3, 7, 8, 16, 17, 21, 100, 101, 1000, 1001, 1665, 999999]
+LANGUAGES = (("French", "fr-FR"), ("Spanish", "es-ES"), ("Russian", "ru-RU"))
+
+
+def number_formats_languages() -> Doc:
+    def in_language(switch: str, name: str, lang: str) -> str:
+        return (run(f"PAGE \\* {switch} in {name}: ")
+                + complex_field(f"PAGE \\* {switch}", "1", f'<w:lang w:val="{lang}"/>'))
+
+    sections = []
+    for n, start in enumerate(GERMAN_STARTS, 1):
+        contents = [run(f"Case {n:02d}: page numbers restarted at {start}")]
+        contents += [in_language(s, "German", "de-DE") for s in ("CardText", "OrdText", "Ordinal")]
+        contents += [run("PAGE \\* Arabic: ") + field("PAGE \\* Arabic")]
+        sections.append((contents, section(page_start=start)))
+    n = len(GERMAN_STARTS) + 1
+    contents = [run(f"Case {n:02d}: page numbers restarted at 27"),
+                in_language("DollarText", "German", "de-DE")]
+    contents += [in_language(s, name, lang) for name, lang in LANGUAGES
+                 for s in ("CardText", "Ordinal")]
+    sections.append((contents, section(page_start=27)))
+    return Doc(
+        "E-number-formats-languages",
+        "PAGE fields in words and ordinals in German (CardText, OrdText, Ordinal) at 0, 1, 3, "
+        "7, 8, 16, 17, 21, 100, 101, 1000, 1001, 1665 and 999999, and DollarText in German, "
+        "and CardText and Ordinal in French, Spanish and Russian at 27, each field's runs in "
+        "the language",
+        sectioned(sections),
+        last_section=sections[-1][1],
+    )
+
+
+# List labels and note numbers in the formats whose fields E-number-formats shows (#546, case 7
+# and the comments of 2026-11-09 and 2026-11-10): lists from w:start 0, 781 and 116, labels in
+# words and ordinals from 27 in a German paragraph, and footnotes numbered by their sections
+# from 781, 0, 116 and 27.
+def start_level(start: int, fmt: str) -> str:
+    return level(0, fmt, "%1.", left=720, hanging=720, suffix="space").replace(
+        '<w:start w:val="1"/>', f'<w:start w:val="{start}"/>', 1)
+
+
+LABEL_LISTS = [
+    # (format, w:start, items, the languages of the paragraph's runs and of its mark)
+    ("lowerLetter", 0, 3, None, None), ("lowerLetter", 781, 3, None, None),
+    ("upperRoman", 0, 3, None, None), ("upperRoman", 781, 3, None, None),
+    ("cardinalText", 0, 3, None, None), ("cardinalText", 781, 3, None, None),
+    ("chicago", 116, 3, None, None),
+    ("ordinal", 27, 2, "de-DE", "de-DE"), ("ordinal", 27, 2, "de-DE", "en-US"),
+    ("cardinalText", 27, 2, "de-DE", "de-DE"), ("cardinalText", 27, 2, "de-DE", "en-US"),
+    ("ordinalText", 27, 2, "de-DE", "de-DE"), ("ordinalText", 27, 2, "de-DE", "en-US"),
+]
+NOTE_NUMBERINGS = [
+    # (format, w:numStart, references, the language of the references)
+    ("lowerLetter", 781, 3, None), ("lowerLetter", 0, 2, None), ("upperRoman", 0, 2, None),
+    ("chicago", 116, 3, None), ("cardinalText", 27, 2, "de-DE"),
+]
+
+
+def number_formats_labels() -> Doc:
+    numbering, body = [], ""
+    for n, (fmt, start, items, lang, mark) in enumerate(LABEL_LISTS, 1):
+        numbering.append(abstract_num(n, f"{0x14A00000 + n:08X}", [start_level(start, fmt)]))
+        where = f", its runs in {lang} and its mark in {mark}" if lang else ""
+        body += para(run(f"Case {n:02d}: a list in {fmt} from w:start {start}, {items} items"
+                         f"{where}"), space=spacing(before=6))
+        props = f'<w:lang w:val="{lang}"/>' if lang else ""
+        for k in range(1, items + 1):
+            body += para(styled_run(f"Case {n:02d} item {k}", props), list_item=(n, 0),
+                         mark=f'<w:lang w:val="{mark}"/>' if mark else None)
+    numbering += [num(n, n) for n in range(1, len(LABEL_LISTS) + 1)]
+    pages, first = [], 1
+    for n, (fmt, start, count, lang) in enumerate(NOTE_NUMBERINGS, len(LABEL_LISTS) + 1):
+        style = reference_style("footnote")
+        if lang:
+            style = style.replace("</w:rPr>", f'<w:lang w:val="{lang}"/></w:rPr>')
+        where = f", the references in {lang}" if lang else ""
+        contents = [run(f"Case {n:02d}: footnotes in {fmt} from w:numStart {start}{where}")]
+        contents += [run(f"Line {k} holds a reference")
+                     + f'<w:r>{style}<w:footnoteReference w:id="{first + k - 1}"/></w:r>'
+                     for k in range(1, count + 1)]
+        first += count
+        pages.append(([contents], section(notes=section_notes(note_props(
+            fmt=fmt, start=start, restart="eachSect")))))
+    return Doc(
+        "E-number-formats-labels",
+        "List labels in lowerLetter, upperRoman and cardinalText from w:start 0 and 781 and in "
+        "chicago from 116, labels in ordinal, cardinalText and ordinalText from 27 in a German "
+        "paragraph whose mark is German or English, and footnotes numbered in lowerLetter "
+        "from 781 and 0, in upperRoman from 0, in chicago from 116 and in cardinalText from 27 "
+        "with German references",
+        body + note_pages([([[run("End of the lists")]], section())] + pages),
+        numbering="".join(numbering),
+        footnotes=tuple(note(run(f" Footnote {k}, one line.")) for k in range(1, first)),
+        last_section=pages[-1][1],
+    )
+
+
+# The height of highlights and run shading (#346): every case once with a yellow highlight and
+# once with run shading D9D9D9; Calibri 11 pt unless the label names a font.
+HIGHLIGHT_YELLOW = '<w:highlight w:val="yellow"/>'
+MARKS = (("highlight yellow", HIGHLIGHT_YELLOW), ("run shading D9D9D9", RUN_SHADING))
+RAISED_6 = '<w:position w:val="12"/>'
+
+
+def marked_lines(mark: str, count: int = 2) -> str:
+    inner = "<w:br/>".join(text(f"marked text, line {k}") for k in range(1, count + 1))
+    return f"<w:r><w:rPr>{mark}</w:rPr>{inner}</w:r>"
+
+
+def highlight_spacing() -> Doc:
+    size_6 = '<w:sz w:val="12"/><w:szCs w:val="12"/>'
+    size_20 = '<w:sz w:val="40"/><w:szCs w:val="40"/>'
+    cases = [
+        ("two lines spaced 1.15 lines", lambda m: [marked_lines(m)],
+         {"space": spacing(line=("auto", 276))}),
+        ("two lines spaced 1.5 lines", lambda m: [marked_lines(m)],
+         {"space": spacing(line=("auto", 360))}),
+        ("two lines spaced 2 lines", lambda m: [marked_lines(m)],
+         {"space": spacing(line=("auto", 480))}),
+        ("at least 24 pt spacing", lambda m: [styled_run("marked text", m)],
+         {"space": spacing(line=("atLeast", 24))}),
+        ("a 6 pt run between plain 11 pt runs",
+         lambda m: [styled_run("plain ", ""), styled_run("marked 6 pt", size_6 + m),
+                    styled_run(" plain", "")], {}),
+        ("an 11 pt run beside a plain 20 pt run",
+         lambda m: [styled_run("marked text", m), styled_run(" PLAIN 20", size_20)], {}),
+        ("an 11 pt run, the paragraph mark 20 pt", lambda m: [styled_run("marked text", m)],
+         {"mark": size_20}),
+        *((f"{font} 12 pt", lambda m, f=font: [styled_run("marked text", font_props(f, 12) + m)],
+           {}) for font in ("Times New Roman", "Arial", "Cambria")),
+        ("lowered 6 pt (w:position -12)",
+         lambda m: [styled_run("base ", ""),
+                    styled_run("lowered", '<w:position w:val="-12"/>' + m)], {}),
+        ("beside a plain run raised 6 pt (w:position 12)",
+         lambda m: [styled_run("marked", m), styled_run(" raised", RAISED_6)], {}),
+        ("a tab raised 6 pt (w:position 12)",
+         lambda m: [styled_run("before", m), tab_run(RAISED_6 + m), styled_run("after", m)], {}),
+    ]
+    body, n = "", 0
+    for label, samples, props in cases:
+        for kind, mark in MARKS:
+            n += 1
+            body += labelled(n, f"{kind}, {label}", *samples(mark), **props)
+    return Doc(
+        "E-highlight-spacing",
+        "The box of a yellow highlight and of run shading D9D9D9 on two lines spaced 1.15, "
+        "1.5 and 2 lines, at least 24 pt, a 6 pt run between 11 pt runs, an 11 pt run beside "
+        "a 20 pt run and with a 20 pt paragraph mark, Times New Roman, Arial and Cambria at "
+        "12 pt, text lowered 6 pt, text beside a raised run, and a raised tab",
+        body,
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -7731,6 +8534,23 @@ def documents() -> list[Doc]:
         footnote_cut_lines(14),
         footnote_rest_beside_text(),
         link_boxes(),
+        subscript_drop(),
+        keepnext_last_lines(),
+        keepnext_last_lines_section(),
+        *(line_multiple_foot(mode) for mode in (15, 14, 12, 11)),
+        table_header_repeat_off(),
+        justify_nbsp(14),
+        justify_nbsp(15),
+        endnote_numbering_settings(),
+        table_vmerge_heights(15),
+        table_vmerge_heights(14),
+        justify_narrow(15),
+        justify_narrow(14),
+        footnote_pages_section(),
+        number_formats_limits(),
+        number_formats_languages(),
+        number_formats_labels(),
+        highlight_spacing(),
     ]
 
 
