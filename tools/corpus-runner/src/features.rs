@@ -28,7 +28,7 @@ pub enum Class {
 /// Words of the messages of `feature-unsupported` entries, each with the required feature
 /// it degrades, or `None` for an entry that degrades none. The first line whose words the
 /// message contains classes it.
-pub const MESSAGES: [(&str, Option<&str>); 131] = [
+pub const MESSAGES: [(&str, Option<&str>); 132] = [
     // Paragraphs: borders and shading (phase 1).
     ("paragraph borders are not drawn", Some("paragraph borders")),
     ("a shading pattern of stripes or crosses", Some("shading")),
@@ -122,6 +122,7 @@ pub const MESSAGES: [(&str, Option<&str>); 131] = [
     ("tables do not wrap around floating objects", None),
     ("a line beside a floating object whose room changes", None),
     ("go around a floating object it positions from a line", None),
+    ("a line does not go around a floating object it holds", None),
     ("text in columns is laid out in one column", None),
     ("a continuous section with another page size", None),
     ("the document grid", None),
@@ -334,6 +335,11 @@ mod tests {
                 "the lines of a paragraph go around a floating object it positions from a line \
                  or a character as if it were positioned from its first line and the column's \
                  start",
+                Class::NotRequired,
+            ),
+            (
+                "a line does not go around a floating object it holds where going around it \
+                 would take the object to the next page: it runs over or under it",
                 Class::NotRequired,
             ),
             (
