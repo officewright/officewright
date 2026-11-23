@@ -1540,12 +1540,13 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         // picture whose line ends where Word's does; E-textbox-spacing: lines of inline
         // text boxes). So it is in table cells, in the body and in a header, in modes 14
         // and 15 alike (E-cell-mark-height and -14: 9 pt text with marks and breaks of 11
-        // and 20 pt). A line with none of them has the height of its break, and the last
-        // line of a paragraph that of the mark too, such as an empty line. In a table cell
-        // a line of an inline picture or text box alone takes them too, though Word's
-        // pictures in the cells of form-gsa-reseller-form and form-gsa-pacs-series-form
-        // sit 1.3 pt lower than ours: a hypothesis until E-cell-mark-height-picture has a
-        // render.
+        // and 20 pt); in modes 11 and 12 too, and on a line of text with an inline picture
+        // or text box in a cell, hypotheses until Word renders them. A line with none of
+        // them has the height of its break, and the last line of a paragraph that of the
+        // mark too, such as an empty line. In a table cell a line of an inline picture or
+        // text box alone takes them too, though Word's pictures in the cells of
+        // form-gsa-reseller-form and form-gsa-pacs-series-form sit 1.3 pt lower than ours:
+        // a hypothesis until E-cell-mark-height-picture has a render.
         if !(text || object) || (self.cell && !text) {
             for metrics in breaks {
                 extent.add(metrics, Pt(0.0));

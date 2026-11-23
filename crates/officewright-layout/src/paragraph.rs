@@ -589,6 +589,15 @@ mod tests {
             ObjectContent::Picture(Picture::new(image)),
             Size::new(Pt(40.0), Pt(30.0)),
         ))]);
+        // A line of 10 pt text beside that picture is as tall in a cell as out of one: the
+        // 20 pt mark adds nothing to it (a hypothesis for cells).
+        let beside = Paragraph::new(big).with_inlines([
+            Inline::text("A", small),
+            Inline::Object(InlineObject::new(
+                ObjectContent::Picture(Picture::new(image)),
+                Size::new(Pt(40.0), Pt(30.0)),
+            )),
+        ]);
         // A line holding only the anchor of a floating picture, which takes no room in it,
         // has the mark's height.
         let anchored = Paragraph::new(big).with_inlines([Inline::anchored(AnchoredObject::new(
@@ -646,6 +655,12 @@ mod tests {
         assert!(
             !in_cell.is_empty() && in_cell.iter().all(|height| *height > 30.0),
             "{in_cell:?}"
+        );
+        let out_of_cell = heights(&beside, false);
+        assert!(
+            out_of_cell.len() == 1 && close(&heights(&beside, true), &out_of_cell),
+            "{out_of_cell:?}, {:?}",
+            heights(&beside, true)
         );
         for cell in [false, true] {
             assert!(
