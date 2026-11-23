@@ -2401,7 +2401,7 @@ mod tests {
     #[test]
     fn links_to_a_checked_target_share_it_and_the_file_finds_it_once() {
         // 3,000 links over two pages to one checked URI, then one to a URI checked
-        // separately that equals it, and 1,000 to a checked destination.
+        // separately that equals it, and 1,000 on both pages to a checked destination.
         let mut doc = Document::new();
         doc.set_compression(Compression::None);
         let site = LinkTarget::Uri("https://example.com/long".to_owned());
@@ -2419,19 +2419,33 @@ mod tests {
         last.add_destination("top", Pt(0.0), Pt(800.0)).unwrap();
         last.add_checked_link(Pt(0.0), Pt(0.0), Pt(10.0), Pt(10.0), &site.check().unwrap())
             .unwrap();
-        for _ in 0..1_000 {
+        for _ in 0..500 {
             last.add_checked_link(Pt(0.0), Pt(0.0), Pt(10.0), Pt(10.0), &top)
+                .unwrap();
+        }
+        let first = doc.page_mut(0).unwrap();
+        for _ in 0..500 {
+            first
+                .add_checked_link(Pt(0.0), Pt(0.0), Pt(10.0), Pt(10.0), &top)
                 .unwrap();
         }
         // Every link of the first target keeps that one.
         let shared: std::collections::HashSet<*const Target> = doc
             .pages
             .iter()
-            .flat_map(|page| &page.links)
-            .take(3_000)
+            .flat_map(|page| page.links.iter().take(1_500))
             .map(Link::shared_target)
             .collect();
         assert_eq!(shared.len(), 1);
+        // Checks of one target are equal, as are equal checks, and print without the
+        // bytes.
+        assert_eq!(checked, checked.clone());
+        assert_eq!(checked, site.check().unwrap());
+        assert_ne!(checked, top);
+        assert_eq!(
+            format!("{checked:?}"),
+            "CheckedLinkTarget { kind: \"uri\", bytes: 24 }"
+        );
         // The file writes the URI once, and finds an action by hashing a target only for
         // the three that the links do not share: the first, the equal URI and "top", whose
         // name it looks up once among the destinations.

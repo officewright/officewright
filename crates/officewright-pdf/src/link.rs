@@ -2,6 +2,7 @@
 //! and the `/Dests` name tree of the catalog (12.3.2.3).
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fmt::Write as _;
 use std::hash::{BuildHasher, RandomState};
 use std::ops::Range;
@@ -88,8 +89,31 @@ impl LinkTarget {
 ///
 /// One of the drawing primitives the layout engine paints with: public, but exempt from
 /// semantic versioning until officewright 1.0 (feature `unstable-drawing`).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CheckedLinkTarget(Arc<Target>);
+
+impl fmt::Debug for CheckedLinkTarget {
+    /// Its kind and the length of its checked form, not the bytes, which may be 32767.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (kind, bytes) = match self.0.as_ref() {
+            Target::Uri(uri) => ("uri", uri.len()),
+            Target::Destination(key) => ("destination", key.len()),
+        };
+        f.debug_struct("CheckedLinkTarget")
+            .field("kind", &kind)
+            .field("bytes", &bytes)
+            .finish()
+    }
+}
+
+impl PartialEq for CheckedLinkTarget {
+    /// Whether both go to one place: the same check, or equal ones.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+    }
+}
+
+impl Eq for CheckedLinkTarget {}
 
 /// A link of a page, checked and in the form the file stores.
 #[derive(Clone, Debug)]
