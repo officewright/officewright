@@ -1067,7 +1067,14 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     break;
                 };
                 if self.start_section(next, section, pending_break)? {
-                    kept_top = true;
+                    // Word 2013 and later keep the space above the first paragraph of a
+                    // section that starts a page (`E-space-before-top.docx`, mode 15);
+                    // Word 2010 drops it, as at the top of any other page
+                    // (contract-ec-data-processing-clauses-el, mode 14: the first
+                    // paragraph after its cover's next-page section break sits at the
+                    // top margin). Modes 11 and 12 as mode 14: a hypothesis until Word
+                    // renders them.
+                    kept_top = self.document.settings().compat_mode() >= CompatMode::Word2013;
                     broke_page = true;
                     pending_break = false;
                 }
@@ -1558,8 +1565,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             let bare = empty && !self.holds_continued_notes();
             // Space above: between this paragraph and the one above it on the page, or
             // its own below a table; at the top of a page only at the start of the
-            // document or of a section. Word's render of `E-space-before-top.docx`:
-            // dropped after flowing and after page breaks alike.
+            // document, or of a section in mode 15 (`keeps_space`). Word's render of
+            // `E-space-before-top.docx`: dropped after flowing and after page breaks alike.
             let gap = if first > 0 {
                 0.0
             } else if let Some(above) = self.above.filter(|_| !empty).and_then(|i| flow.get(i)) {
@@ -5944,10 +5951,11 @@ mod tests {
 
     #[test]
     fn space_above_is_kept_at_the_top_of_a_page_only_where_a_document_or_section_starts() {
-        // Word's render of `E-space-before-top.docx`: kept at the start of the document
-        // and of a section on a new page; dropped after flowing, after a page break, and
-        // for a page break before.
-        let document = document(|style| {
+        // Word's render of `E-space-before-top.docx` (mode 15): kept at the start of the
+        // document and of a section on a new page; dropped after flowing, after a page
+        // break, and for a page break before. Before mode 15 it is dropped at the start of
+        // a section too (contract-ec-data-processing-clauses-el, mode 14).
+        let sections = |style| {
             let mut first = vec![lines(style, 1, spacing(24.0, 0.0))];
             first.extend((0..7).map(|_| lines(style, 1, spacing(0.0, 0.0))));
             // Flows to page 2.
@@ -5970,12 +5978,33 @@ mod tests {
                 Section::new(setup()).with_blocks(first),
                 Section::new(setup()).with_blocks(vec![lines(style, 1, spacing(24.0, 0.0))]),
             ]
-        });
-        let laid = pages(&document);
-        let tops: Vec<f64> = laid.iter().map(|page| page[0].2).collect();
-        assert_eq!(tops, [44.0, 20.0, 20.0, 20.0, 44.0], "{laid:?}");
-        // The paragraph that ends in a page break shares page 3 with the one before it.
-        assert_eq!(laid[2].iter().map(|f| f.0).collect::<Vec<_>>(), [9, 10]);
+        };
+        for (mode, section_top) in [
+            (CompatMode::Word2003, 20.0),
+            (CompatMode::Word2007, 20.0),
+            (CompatMode::Word2010, 20.0),
+            (CompatMode::Word2013, 44.0),
+        ] {
+            let mut document =
+                Document::new(crate::ir::DocumentSettings::default().with_compat_mode(mode));
+            let style = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0)),
+            );
+            for section in sections(style) {
+                document.add_section(section);
+            }
+            let laid = pages(&document);
+            let tops: Vec<f64> = laid.iter().map(|page| page[0].2).collect();
+            assert_eq!(
+                tops,
+                [44.0, 20.0, 20.0, 20.0, section_top],
+                "{mode:?}: {laid:?}"
+            );
+            // The paragraph that ends in a page break shares page 3 with the one before it.
+            assert_eq!(laid[2].iter().map(|f| f.0).collect::<Vec<_>>(), [9, 10]);
+        }
     }
 
     #[test]
