@@ -690,25 +690,25 @@
       "text_score": 0.9764
     },
     "tests/corpus/business/form-ec-state-aid-notification-bg.docx": {
-      "line_agreement": 0.9257,
-      "page_break_agreement": 0.3889,
-      "ssim_mean": 0.7289,
-      "ssim_min": 0.5775,
-      "text_score": 0.9049
+      "line_agreement": 0.9498,
+      "page_break_agreement": 0.4444,
+      "ssim_mean": 0.733,
+      "ssim_min": 0.587,
+      "text_score": 0.9366
     },
     "tests/corpus/business/form-ec-state-aid-notification-de.docx": {
-      "line_agreement": 0.8579,
-      "page_break_agreement": 0.3158,
-      "ssim_mean": 0.6523,
+      "line_agreement": 0.8939,
+      "page_break_agreement": 0.6316,
+      "ssim_mean": 0.6713,
       "ssim_min": 0.0,
-      "text_score": 0.7781
+      "text_score": 0.8804
     },
     "tests/corpus/business/form-ec-state-aid-notification-el.docx": {
-      "line_agreement": 0.8231,
-      "page_break_agreement": 0.1053,
-      "ssim_mean": 0.6601,
-      "ssim_min": 0.5112,
-      "text_score": 0.6633
+      "line_agreement": 0.8529,
+      "page_break_agreement": 0.1579,
+      "ssim_mean": 0.6701,
+      "ssim_min": 0.5649,
+      "text_score": 0.7153
     },
     "tests/corpus/business/form-gsa-dira-dias-template.docx": {
       "line_agreement": 0.9027,
@@ -1291,11 +1291,11 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-footnote-table.docx": {
-      "line_agreement": 0.9562,
-      "page_break_agreement": 0.75,
-      "ssim_mean": 0.9879,
-      "ssim_min": 0.9752,
-      "text_score": 0.8302
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.996,
+      "ssim_min": 0.9918,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-footnote-two-notes.docx": {
       "line_agreement": 1.0,

@@ -71,7 +71,26 @@ use crate::lines::{PieceKind, inline_at};
 use crate::lists::Counters;
 use crate::paragraph::ParagraphLayout;
 use crate::report::{Location, ReportKind, Step};
-use crate::tables;
+use crate::tables::{self, Prepared, TrialLine};
+
+/// The steps of the search for the room of a table's piece whose footnotes start on its
+/// page: each halves what is left of the room, to well under a point.
+const ROOM_STEPS: usize = 32;
+
+/// How near the room its notes leave the search must land for the piece to take that room
+/// exactly: far more than the search's last step, far less than a line.
+const SNAP: f64 = 1e-3;
+
+/// How a piece of a table goes on its page with its footnotes ([`Pager::table_room`]):
+/// the notes it references, the bottom of the page's notes with them from the top of
+/// their room, the least room that puts it (`None` for a piece that puts nothing), and
+/// whether one of its notes is cut.
+struct TableFit {
+    notes: Vec<NoteId>,
+    end: f64,
+    room: Option<f64>,
+    cut: bool,
+}
 
 /// A place in the content of a note: before line `line` of part `part`, where a table has
 /// only line 0, or, past the last part, its end.
@@ -454,8 +473,7 @@ pub(super) type NoteLayouts<'d> = HashMap<NoteId, Vec<(u64, Option<u32>, Rc<Note
 /// The special notes laid out, by the bits of their width.
 pub(super) type Specials<'d> = HashMap<(u64, Special), Rc<NoteLayout<'d>>>;
 
-/// Whether `table` references a footnote in a cell, nested tables' included, where the
-/// notes are not laid out yet.
+/// Whether `table` references a footnote in a cell, nested tables' included.
 pub(super) fn has_footnote(document: &crate::ir::Document, table: &Table, depth: usize) -> bool {
     table
         .rows()
@@ -468,6 +486,17 @@ pub(super) fn has_footnote(document: &crate::ir::Document, table: &Table, depth:
                 depth < crate::ir::MAX_TABLE_DEPTH && has_footnote(document, table, depth + 1)
             }
         })
+}
+
+/// Whether a table nested in a cell of `table` references a footnote in a cell, where the
+/// notes are not laid out yet.
+pub(super) fn nested_footnote(document: &crate::ir::Document, table: &Table) -> bool {
+    table
+        .rows()
+        .iter()
+        .flat_map(|row| row.cells())
+        .flat_map(|cell| cell.blocks())
+        .any(|block| matches!(block, Block::Table(nested) if has_footnote(document, nested, 1)))
 }
 
 /// Whether `inlines` reference a footnote, and with `results` the stored results of their
@@ -860,6 +889,316 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 }
             }
         }
+        self.put_footnotes(notes, section, end)
+    }
+
+    /// The footnotes that `lines` reference and no page holds yet, in order, each with the
+    /// first of `lines` that references it.
+    fn lines_footnotes<'l>(&self, lines: &[TrialLine<'l, 'd>]) -> Vec<(NoteId, usize)> {
+        let mut seen = HashSet::new();
+        let mut notes = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            for note in self.line_footnotes(line.paragraph, line.layout, line.line) {
+                if seen.insert(note) {
+                    notes.push((note, index));
+                }
+            }
+        }
+        notes
+    }
+
+    /// The room in `room` below `top` that the piece of `laid`, a band of `prepared`, a
+    /// table of section `section`, may take with `flags` ([`Prepared::piece`]) beside the
+    /// footnotes its cells' lines reference, and those notes.
+    ///
+    /// The piece takes the lines that fit above their notes, as a paragraph does
+    /// (`pages::footnotes`' rules for a paragraph's lines): the row is cut where the notes
+    /// of the lines it takes start on the page; a note is cut only where it does not fit
+    /// whole under the line that references it, after the notes of the lines of its cell
+    /// down to that line, as in the body, and of those that a piece ending right under that
+    /// line on a page of its own takes in the other cells: those that need no more room,
+    /// their cells' margins and the borders below included, down to where a page may end in
+    /// their paragraphs (widow control, lines kept together), or, where no cell can end
+    /// there, as many lines of each cell as fit, at least one, whatever widow control says;
+    /// a band no page cuts under a line (of several rows, a row of exact height or a row
+    /// Word could not hold, `Prepared::cuts`) goes whole, its notes cut where they do not
+    /// fit under it; and then the piece takes nothing of that note's cell after its
+    /// paragraph (a later paragraph or a nested table), nor, in Word 2013 and later, a line
+    /// below the cut note's line that references a note after it, which goes wholly to the
+    /// next page; the line of the cut note, and the lines of other cells beside it, keep
+    /// the notes they reference after it, which go wholly to the next page. Where that
+    /// leaves out a line whose note cannot start even right under it, Word 2013 and later
+    /// cut the row above it, and older modes keep it, and the lines after it as far as they
+    /// fit above the notes before, but nothing of its cell after its paragraph, and their
+    /// notes go wholly to the next page. Word's render of `E-footnote-table.docx` (mode 15)
+    /// shows a row cut three lines higher for a note of its third line. Hypotheses until a
+    /// Word render: the older modes' rule in a table; that with notes in more cells of a
+    /// row the cut comes as high as their notes need in every cell; that a note cut keeps
+    /// nothing of the other cells from the page but, in Word 2013 and later, a line below
+    /// the cut note's line that references a later note, as a later line of its own cell;
+    /// and that a row's least height is filled only as far as the room its notes leave.
+    /// On a page that holds nothing else, where not even the least piece leaves its notes
+    /// room to start, the least piece goes on and its notes wholly to the next page. The
+    /// room found is the least that puts the piece found, so that a piece filled to a
+    /// least height takes exactly the room its notes leave.
+    pub(super) fn table_room(
+        &mut self,
+        (prepared, laid): (&Prepared<'d, '_>, &tables::LaidBand<'d>),
+        (top, room): (f64, f64),
+        flags: (bool, bool),
+        section: usize,
+    ) -> Result<(f64, Vec<NoteId>)> {
+        let fits = |pager: &mut Self, room: f64| {
+            pager.table_fits((prepared, laid), (top, room), flags, section)
+        };
+        if let Some(fit) = fits(self, room)? {
+            return Ok((room, fit.notes));
+        }
+        let Some(mut best) = fits(self, 0.0)? else {
+            let notes = prepared
+                .trial(laid, Some(0.0), flags)
+                .map(|trial| self.note_ids(&trial.lines))
+                .unwrap_or_default();
+            return Ok((0.0, notes));
+        };
+        // The most room whose piece's notes start on the page: fewer lines leave their
+        // notes more room, so a search halving the room finds it.
+        let (mut low, mut high) = (0.0, room);
+        for _ in 0..ROOM_STEPS {
+            let middle = (low + high) / 2.0;
+            match fits(self, middle)? {
+                Some(found) => {
+                    low = middle;
+                    best = found;
+                }
+                None => high = middle,
+            }
+        }
+        // The room the notes found leave the piece, exactly, where it puts the same: a
+        // row filled to its least height then takes all of it, not what the search's last
+        // step lands on, a little over or under it.
+        let exact = self.body()?.bottom.0 - top - best.end;
+        if (exact - low).abs() <= SNAP && exact <= room {
+            if let Some(found) = fits(self, exact)? {
+                if found.notes == best.notes {
+                    best = found;
+                    low = exact;
+                }
+            }
+        }
+        let modern = self.document.settings().compat_mode() >= CompatMode::Word2013;
+        if modern || best.cut {
+            return Ok((best.room.unwrap_or(low), best.notes));
+        }
+        // Before Word 2013 the lines after go on as far as they fit above those notes,
+        // their notes, which cannot start, going wholly to the next page; but nothing of
+        // the cell of the first such line after its paragraph, as a page takes no later
+        // paragraph after a note it sends wholly on.
+        let deferred = |pager: &Self, room: f64| {
+            let trial = prepared.trial(laid, Some(room), flags)?;
+            let referenced = pager.lines_footnotes(&trial.lines);
+            let index = referenced
+                .iter()
+                .position(|(note, _)| !best.notes.contains(note))?;
+            let line = *referenced
+                .get(index)
+                .and_then(|&(_, first)| trial.lines.get(first))?;
+            let earlier: Vec<NoteId> = referenced
+                .iter()
+                .take(index + 1)
+                .map(|&(note, _)| note)
+                .collect();
+            Some((line, trial.last.get(line.cell).copied().flatten(), earlier))
+        };
+        let kept = |pager: &Self, room: f64| {
+            deferred(pager, room).is_none_or(|(line, last, _)| last <= Some(line.part))
+        };
+        // Only a line whose note cannot start even right under it stays: one the piece
+        // leaves out because no page may end under it (its widow control), while its note
+        // could start there, goes to the next page with its paragraph, as in the body.
+        let bottom = self.body()?.bottom.0 - top;
+        if let Some((line, _, earlier)) = deferred(self, room) {
+            if let Some(under) = line.room {
+                if self.notes_plan(earlier, bottom - under, section)?.is_some() {
+                    return Ok((best.room.unwrap_or(low), best.notes));
+                }
+            }
+        }
+        let mut above = (room - (best.end - self.notes_end())).max(low);
+        if !kept(self, above) {
+            let mut high = above;
+            above = low;
+            for _ in 0..ROOM_STEPS {
+                let middle = (above + high) / 2.0;
+                if kept(self, middle) {
+                    above = middle;
+                } else {
+                    high = middle;
+                }
+            }
+        }
+        Ok(prepared
+            .trial(laid, Some(above), flags)
+            .map_or((above, Vec::new()), |trial| {
+                (trial.room(), self.note_ids(&trial.lines))
+            }))
+    }
+
+    /// How `notes`, footnotes of section `section` that no page holds yet, go on the page
+    /// under the page's notes in the room `left` above the bottom of the body; `None`
+    /// where one of them cannot start there.
+    fn notes_plan(
+        &mut self,
+        notes: Vec<NoteId>,
+        left: f64,
+        section: usize,
+    ) -> Result<Option<Plan<'d>>> {
+        let waiting = self.waiting(notes, section)?;
+        let tail = self.footnotes.last().and_then(PageNotes::tail);
+        let rules = Rules {
+            defer: false,
+            force: false,
+        };
+        self.plan(tail, waiting, left, section, rules)
+    }
+
+    /// The footnotes `lines` reference and no page holds yet, in order.
+    fn note_ids(&self, lines: &[TrialLine<'_, 'd>]) -> Vec<NoteId> {
+        self.lines_footnotes(lines)
+            .into_iter()
+            .map(|(note, _)| note)
+            .collect()
+    }
+
+    /// The bottom of the notes the current page holds, from the top of their room.
+    fn notes_end(&self) -> f64 {
+        self.footnotes
+            .last()
+            .and_then(PageNotes::tail)
+            .map_or(0.0, |tail| tail.bottom)
+    }
+
+    /// How the piece of `laid` that `room` below `top` takes goes on the current page with
+    /// its footnotes: `None` where one of them cannot start under the page's notes, where
+    /// it cuts a note that fits whole under the line that references it, or where it
+    /// takes a line or a nested table that a note it cuts keeps off the page
+    /// ([`table_room`](Self::table_room)).
+    fn table_fits(
+        &mut self,
+        (prepared, laid): (&Prepared<'d, '_>, &tables::LaidBand<'d>),
+        (top, room): (f64, f64),
+        flags: (bool, bool),
+        section: usize,
+    ) -> Result<Option<TableFit>> {
+        let end = self.notes_end();
+        let Some(trial) = prepared.trial(laid, Some(room), flags) else {
+            return Ok(Some(TableFit {
+                notes: Vec::new(),
+                end,
+                room: None,
+                cut: false,
+            }));
+        };
+        let referenced = self.lines_footnotes(&trial.lines);
+        let notes: Vec<NoteId> = referenced.iter().map(|(note, _)| *note).collect();
+        if notes.is_empty() {
+            return Ok(Some(TableFit {
+                notes,
+                end,
+                room: Some(trial.room()),
+                cut: false,
+            }));
+        }
+        let bottom = self.body()?.bottom.0 - top;
+        let Some(plan) = self.notes_plan(notes.clone(), bottom - trial.room(), section)? else {
+            return Ok(None);
+        };
+        // The first note that does not end on the page is cut, and those after it go
+        // wholly to the next page: the piece takes nothing of the cut note's cell after
+        // its paragraph, nor, in Word 2013 and later, a line below the cut note's line
+        // that references a note after it, while the lines of other cells beside it keep
+        // their notes, as the cut note's line does.
+        let modern = self.document.settings().compat_mode() >= CompatMode::Word2013;
+        if let Some(cut) = plan.notes.iter().position(|placed| !placed.ends()) {
+            let Some(&(_, at)) = referenced.get(cut) else {
+                return Ok(None);
+            };
+            let Some(line) = trial.lines.get(at) else {
+                return Ok(None);
+            };
+            let after = trial
+                .last
+                .get(line.cell)
+                .copied()
+                .flatten()
+                .is_some_and(|part| part > line.part);
+            let later_note = referenced.iter().skip(cut + 1).any(|&(_, first)| {
+                trial
+                    .lines
+                    .get(first)
+                    .is_some_and(|other| other.top >= line.bottom - EPSILON)
+            });
+            if after || (modern && later_note) {
+                return Ok(None);
+            }
+            // A note is cut only by its own line, where it does not fit whole under it,
+            // as in a paragraph: where it would end whole in the room under that line, the
+            // piece takes no more, wherever a page may end and whatever height the row has.
+            if let Some(under) = line.room {
+                // The notes up to the cut one that a piece ending right under that line
+                // takes: in the cut note's cell, those of every line down to that line, as
+                // the body weighs the lines of a paragraph above a note's; in the other
+                // cells, those of the lines that the piece of that room on a page of its
+                // own takes: a cell's lines down to where a page may end in its paragraphs
+                // (widow control, lines kept together), or, where no cell can end there, as
+                // many lines of each cell as fit, at least one, whatever widow control
+                // says, as a page that holds nothing else puts them.
+                let beside: HashSet<NoteId> = prepared
+                    .trial(laid, Some(under), (true, true))
+                    .map(|piece| {
+                        let lines: Vec<TrialLine<'_, 'd>> = piece
+                            .lines
+                            .iter()
+                            .filter(|other| other.cell != line.cell)
+                            .copied()
+                            .collect();
+                        self.note_ids(&lines).into_iter().collect()
+                    })
+                    .unwrap_or_default();
+                let earlier = referenced
+                    .iter()
+                    .take(cut + 1)
+                    .filter(|&&(note, first)| {
+                        trial.lines.get(first).is_some_and(|other| {
+                            other.cell == line.cell && other.bottom <= line.bottom + EPSILON
+                        }) || beside.contains(&note)
+                    })
+                    .map(|&(note, _)| note);
+                if let Some(plan) = self.notes_plan(earlier.collect(), bottom - under, section)? {
+                    if plan.notes.last().is_some_and(|placed| placed.ends()) {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        let cut = plan.notes.iter().any(|placed| !placed.ends());
+        Ok(Some(TableFit {
+            notes,
+            end: plan.tail.map_or(end, |tail| tail.bottom),
+            room: Some(trial.room()),
+            cut,
+        }))
+    }
+
+    /// Puts on the current page `notes`, footnotes of section `section` that no page
+    /// holds yet, referenced by what ends at `end`: whole where they fit, else cut or
+    /// wholly on the next page.
+    pub(super) fn put_footnotes(
+        &mut self,
+        notes: Vec<NoteId>,
+        section: usize,
+        end: f64,
+    ) -> Result<()> {
         if notes.is_empty() {
             return Ok(());
         }
