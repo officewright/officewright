@@ -915,7 +915,7 @@ class Import(unittest.TestCase):
         geometry = json.loads((folder / "geometry.json").read_text(encoding="utf-8"))
         self.assertEqual(geometry["fonts_rasterized_with"][0]["face_in_collection"], 1)
 
-    def test_refuses_fonts_word_embedded(self):
+    def test_refuses_a_font_part_that_no_font_table_entry_leads_to(self):
         record = self.add_result(rules.documents()[0])
         resaved = self.results / record["resaved_file"]
         with zipfile.ZipFile(resaved, "a") as archive:
@@ -927,8 +927,45 @@ class Import(unittest.TestCase):
              b"</w:font>"),
         ]})
         message = self.refused()
-        self.assertIn("word/fonts/font1.odttf is an embedded font", message)
-        self.assertIn("word/fontTable.xml has embedRegular", message)
+        self.assertIn("word/fonts/font1.odttf is an embedded font that no font table entry "
+                      "names", message)
+        self.assertIn("word/fontTable.xml: the embedRegular of 'Calibri' names no font "
+                      "relationship of its part", message)
+
+    def embedded_font_result(self):
+        doc = next(d for d in rules.documents() if d.name == "E-embedded-font")
+        return doc, self.add_result(doc)
+
+    def test_imports_a_copy_that_embeds_an_ofl_test_font_and_names_it(self):
+        # Word's copy embeds the test font the input embeds, as the input does.
+        doc, record = self.embedded_font_result()
+        self.run_import()
+        resaved = self.corpus / "resaved" / "word-rules" / f"{doc.name}.docx"
+        self.assertEqual(resaved.read_bytes(), rules.package(doc))
+        sources = (self.corpus / "SOURCES.md").read_text(encoding="utf-8")
+        rows = sources.splitlines()
+        (row,) = [r for r in rows if r.startswith(f"| reference/word-rules/{doc.name}/")]
+        self.assertIn(
+            "; fonts the re-saved copy embeds, OFL test fonts: "
+            "tests/fonts/liberation/LiberationMono-Regular.ttf (SHA-256 "
+            "f2b83c763e8afd21709333370bed4774337fae82267937e2b5aea7e2fbd922c1)", row)
+        # Rows of copies that embed nothing say nothing of embedded fonts.
+        (other,) = [r for r in rows if r.startswith("| reference/word-rules/E-line-fonts/")]
+        self.assertNotIn("embeds", other)
+
+    def test_refuses_a_copy_that_embeds_another_font_naming_its_part(self):
+        # A synthetic font where Word's copy has the test font, obfuscated with the same key.
+        doc, record = self.embedded_font_result()
+        key = rules.EMBEDDED_MONO.key
+        foreign = sfnt("ForeignSans", "Foreign Sans")
+        self.change_resaved(record, {"word/fonts/font1.odttf": [
+            (rules.obfuscated(rules.EMBEDDED_MONO.data(), key), rules.obfuscated(foreign, key)),
+        ]})
+        message = self.refused()
+        self.assertIn(
+            "word/fonts/font1.odttf, the embedRegular of 'Liberation Mono', is not one of the "
+            f"OFL test fonts THIRD-PARTY-NOTICES.md names (SHA-256 {sha256(foreign)})", message)
+        self.assertFalse((self.corpus / "resaved").exists())
 
     def test_refuses_a_page_count_pdftotext_does_not_find(self):
         self.bbox = BBOX.replace('<page width="595.320000" height="841.920000"></page>', "", 1)
@@ -3673,6 +3710,167 @@ class PageOrder(unittest.TestCase):
 
     def test_no_fonts(self):
         self.assertEqual(importer.not_embedded(PDFFONTS.split("-")[0]), [])
+
+
+class EmbeddedFonts(unittest.TestCase):
+    """embedded_fonts(): a re-saved copy may embed only the OFL test fonts the notices name
+    (#145), on the parts of E-embedded-font, which embeds Liberation Mono Regular."""
+
+    MONO = "tests/fonts/liberation/LiberationMono-Regular.ttf"
+    MONO_SHA256 = "f2b83c763e8afd21709333370bed4774337fae82267937e2b5aea7e2fbd922c1"
+    PART = "word/fonts/font1.odttf"
+    FOREIGN = sfnt("ForeignSans", "Foreign Sans")
+
+    def setUp(self):
+        self.doc = next(d for d in rules.documents() if d.name == "E-embedded-font")
+        self.parts = dict(rules.parts(self.doc))
+        self.allowed = importer.ofl_test_fonts()
+        self.key = rules.EMBEDDED_MONO.key
+        self.font = (importer.ROOT / self.MONO).read_bytes()
+
+    def check(self, parts=None):
+        return importer.embedded_fonts(self.parts if parts is None else parts, self.allowed)
+
+    def replaced(self, name, old, new):
+        parts = dict(self.parts)
+        self.assertIn(old, parts[name])
+        parts[name] = parts[name].replace(old, new)
+        return parts
+
+    def test_the_test_fonts_are_the_font_files_the_notices_name_under_the_ofl(self):
+        self.assertEqual(self.allowed[self.MONO_SHA256], self.MONO)
+        self.assertEqual(
+            self.allowed["f6418f708baede9789daef5d458c0f53d2a888af9820e8062934e504fedc6595"],
+            "tests/fonts/carlito/Carlito-Regular.ttf")
+        # Every font file of both folders, and no license file.
+        files = sorted(p.relative_to(importer.ROOT).as_posix()
+                       for folder in ("tests/fonts", "tests/fonts-word")
+                       for p in (importer.ROOT / folder).rglob("*")
+                       if p.suffix in (".ttf", ".otf"))
+        self.assertEqual(sorted(self.allowed.values()), files)
+        for digest, path in self.allowed.items():
+            self.assertEqual(sha256((importer.ROOT / path).read_bytes()), digest, path)
+
+    def test_only_a_section_under_the_ofl_names_a_test_font_and_only_with_its_hash(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        fonts = root / "tests" / "fonts"
+        fonts.mkdir(parents=True)
+        files = {name: sfnt(name) for name in ("Open", "Other", "Changed", "Gone")}
+        for name, data in files.items():
+            if name != "Gone":
+                (fonts / f"{name}.ttf").write_bytes(data)
+
+        def listed(name, digest=None):
+            return f"`tests/fonts/{name}.ttf`\n  (SHA-256 `{digest or sha256(files[name])}`)"
+
+        (root / "THIRD-PARTY-NOTICES.md").write_text(
+            "# Notices\n\n### Open\n\n- Files: " + listed("Open") + ", " + listed("Gone")
+            + ", " + listed("Changed", "0" * 64) + "\n- License: SIL Open Font\n  License 1.1.\n\n"
+            "### Other\n\n- Files: " + listed("Other") + "\n- License: Apache-2.0.\n",
+            encoding="utf-8")
+        self.assertEqual(importer.ofl_test_fonts(root),
+                         {sha256(files["Open"]): "tests/fonts/Open.ttf"})
+
+    def test_the_rule_document_embeds_a_test_font(self):
+        self.assertEqual(self.check(), ([], [importer.EmbeddedFont(
+            self.PART, "Liberation Mono", self.MONO, self.MONO_SHA256)]))
+
+    def test_a_package_without_fonts_has_none(self):
+        self.assertEqual(self.check(dict(rules.parts(rules.documents()[0]))), ([], []))
+
+    def test_a_foreign_font_is_refused_by_its_part(self):
+        parts = dict(self.parts)
+        parts[self.PART] = rules.obfuscated(self.FOREIGN, self.key)
+        self.assertEqual(self.check(parts), ([
+            f"{self.PART}, the embedRegular of 'Liberation Mono', is not one of the OFL test "
+            f"fonts THIRD-PARTY-NOTICES.md names (SHA-256 {sha256(self.FOREIGN)})"], []))
+
+    def test_a_test_font_changed_after_its_first_32_bytes_is_refused(self):
+        # As a subset of the font would be.
+        changed = bytearray(self.font)
+        changed[1000] ^= 1
+        parts = dict(self.parts)
+        parts[self.PART] = rules.obfuscated(bytes(changed), self.key)
+        problems, fonts = self.check(parts)
+        self.assertEqual(fonts, [])
+        self.assertIn(f"(SHA-256 {sha256(bytes(changed))})", problems[0])
+
+    def test_the_key_de_obfuscates_the_part(self):
+        # The same part read with another key is another font; stored plain, with or without
+        # a key, it is the test font.
+        other = self.replaced("word/fontTable.xml", self.key.encode(),
+                              b"{11111111-2222-3333-4444-555555555555}")
+        self.assertEqual(self.check(other)[1], [])
+        plain = dict(self.parts)
+        plain[self.PART] = self.font
+        self.assertEqual(len(self.check(plain)[1]), 1)
+        no_key = self.replaced("word/fontTable.xml", f' w:fontKey="{self.key}"'.encode(), b"")
+        self.assertEqual(self.check(no_key)[0], [
+            f"{self.PART}, the embedRegular of 'Liberation Mono', is not one of the OFL test "
+            f"fonts THIRD-PARTY-NOTICES.md names (SHA-256 {sha256(self.parts[self.PART])})"])
+        no_key[self.PART] = self.font
+        self.assertEqual(len(self.check(no_key)[1]), 1)
+        self.assertEqual(self.check(no_key)[0], [])
+        foreign = dict(no_key)
+        foreign[self.PART] = self.FOREIGN
+        self.assertEqual(self.check(foreign)[1], [])
+
+    def test_the_key_takes_the_pairs_of_digits_from_the_last(self):
+        self.assertEqual(importer.font_key("{00010203-0405-0607-0809-0A0B0C0D0E0F}"),
+                         bytes(range(15, -1, -1)))
+        for value in ("00010203-0405-0607-0809-0A0B0C0D0E0F", "{0}", " {00010203-0405-0607-"
+                      "0809-0A0B0C0D0E0F}", "{00010203-0405-0607-0809-0A0B0C0D0E0G}"):
+            self.assertIsNone(importer.font_key(value), value)
+        bad = self.replaced("word/fontTable.xml", self.key.encode(), b"{0}")
+        self.assertEqual(self.check(bad), ([
+            "word/fontTable.xml: the embedRegular of 'Liberation Mono' has a w:fontKey that is "
+            "not a GUID"], []))
+
+    def test_a_font_part_no_entry_names_is_refused_wherever_it_is(self):
+        # Even the test font: nothing says how to read a part no entry names.
+        for name in ("word/fonts/font2.odttf", "word/Fonts/font1.odttf", "word/FONTS/font2.dat"):
+            parts = dict(self.parts)
+            parts[name] = self.parts[self.PART]
+            # A part of word/fonts/ in any case, also when its content type is not a font's.
+            parts["[Content_Types].xml"] = parts["[Content_Types].xml"].replace(
+                b"</Types>", b'<Override PartName="/word/FONTS/font2.dat" '
+                b'ContentType="application/octet-stream"/></Types>')
+            self.assertEqual(self.check(parts)[0],
+                             [f"{name} is an embedded font that no font table entry names"], name)
+        # A part outside word/fonts/ that a font content type or a font relationship marks.
+        typed = self.replaced("[Content_Types].xml", b"</Types>",
+                              b'<Override PartName="/word/media/a.bin" ContentType="application/'
+                              b'vnd.openxmlformats-officedocument.obfuscatedFont"/></Types>')
+        typed["word/media/a.bin"] = self.FOREIGN
+        related = self.replaced(
+            "word/_rels/document.xml.rels", b"</Relationships>",
+            b'<Relationship Id="rId99" Type="http://schemas.openxmlformats.org/officeDocument/'
+            b'2006/relationships/font" Target="media/b.bin"/></Relationships>')
+        related["word/media/b.bin"] = self.FOREIGN
+        for parts, name in ((typed, "word/media/a.bin"), (related, "word/media/b.bin")):
+            self.assertEqual(self.check(parts)[0],
+                             [f"{name} is an embedded font that no font table entry names"], name)
+
+    def test_an_entry_that_leads_to_no_font_part_is_refused(self):
+        entry = "word/fontTable.xml: the embedRegular of 'Liberation Mono'"
+        rels = "word/_rels/fontTable.xml.rels"
+        cases = [
+            (self.replaced("word/fontTable.xml", b'r:id="rId1"', b'r:id="rId7"'),
+             f"{entry} names no font relationship of its part"),
+            (self.replaced(rels, b"relationships/font\"", b"relationships/image\""),
+             f"{entry} names no font relationship of its part"),
+            (self.replaced(rels, b'Target="fonts/font1.odttf"', b'Target="fonts/gone.odttf"'),
+             f"{entry} is in word/fonts/gone.odttf, which the package does not have"),
+            (self.replaced(rels, b'Target="fonts/font1.odttf"',
+                           b'Target="file:///font.ttf" TargetMode="External"'),
+             f"{entry} is in a file outside the package, which the package does not have"),
+        ]
+        for parts, problem in cases:
+            with self.subTest(problem):
+                problems, fonts = self.check(parts)
+                self.assertIn(problem, problems)
+                self.assertEqual(fonts, [])
 
 
 if __name__ == "__main__":

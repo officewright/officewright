@@ -142,13 +142,20 @@ class References(unittest.TestCase):
         group, name = folder.parent.name, folder.name
         return CORPUS / "resaved" / group / f"{name}.docx", CORPUS / group / f"{name}.docx"
 
-    def test_re_saved_copies_carry_no_personal_data_or_embedded_fonts(self):
+    def test_re_saved_copies_carry_no_personal_data_and_embed_only_test_fonts(self):
+        allowed = importer.ofl_test_fonts()
         for folder in folders():
             resaved, _ = self.resaved(folder)
             with self.subTest(document=f"{folder.parent.name}/{folder.name}"):
                 problems = importer.docx_privacy_problems(resaved)
-                problems += importer.embedded_font_problems(importer.read_parts(resaved))
-                self.assertEqual(problems, [])
+                font_problems, embedded = importer.embedded_fonts(
+                    importer.read_parts(resaved), allowed)
+                self.assertEqual(problems + font_problems, [])
+                # The row names the test fonts the copy embeds, and only a copy that embeds
+                # some has such a note.
+                said = [note for note in self.notes(folder)
+                        if note.startswith("fonts the re-saved copy embeds")]
+                self.assertEqual(said, [importer.embedded_note(embedded)] if embedded else [])
 
     def row(self, folder):
         key = f"| reference/{folder.parent.name}/{folder.name}/ |"

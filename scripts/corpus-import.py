@@ -14,7 +14,8 @@ under WSL). For every <name>.json there the script checks that
     (a second check, independent of the one on Windows);
   - the re-saved copy names no language and no number format the input did not have
     (they would say where Word ran), unless --allow-locale accepts them;
-  - Word embedded no font in the re-saved copy;
+  - the re-saved copy embeds no font but the OFL test fonts that THIRD-PARTY-NOTICES.md
+    names with their SHA-256, each compared once de-obfuscated (#145);
   - Word kept the compatibility mode of the input, and pdfinfo and pdftotext count the pages
     Word counted.
 
@@ -114,6 +115,21 @@ REFERENCE_HEADER = "| File | Rendered from | Application and version | Date | No
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 WORD_URI = "http://schemas.microsoft.com/office/word"
+
+# Embedded fonts (ECMA-376 Part 1, §17.8): the elements of a font table entry that embed its
+# faces, the relationship types of their parts (Transitional and Strict), and ST_Guid, the
+# type of w:fontKey. A re-saved copy may embed only the OFL test fonts that the notices name
+# with their SHA-256 (ofl_test_fonts).
+FONT_FACES = ("embedRegular", "embedBold", "embedItalic", "embedBoldItalic")
+FONT_RELATIONSHIPS = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/font",
+)
+GUID = re.compile(r"\{[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}")
+OFL_NOTICE = "License: SIL Open Font License 1.1"
+NOTICED_FONT = re.compile(
+    r"`(tests/fonts(?:-word)?/[^`]+\.(?:ttf|otf|ttc))` \(SHA-256 `([0-9a-f]{64})`\)"
+)
 
 # Values written into the Markdown table: nothing that could break a row.
 VERSION = re.compile(r"^[0-9][0-9.]*$")
@@ -784,19 +800,170 @@ def locale_problems(original: dict[str, bytes], resaved: dict[str, bytes]) -> li
     return problems
 
 
-def embedded_font_problems(parts: dict[str, bytes]) -> list[str]:
-    """Fonts Word embedded in a package: they must not reach the repository."""
-    problems = [f"{name} is an embedded font" for name in parts if name.startswith("word/fonts/")]
-    for name in ("word/fontTable.xml", "word/settings.xml"):
-        if name not in parts:
+def ofl_test_fonts(root: Path = ROOT) -> dict[str, str]:
+    """The fonts a re-saved copy may embed (#145): the SHA-256 of each font file of
+    tests/fonts and tests/fonts-word that a section of THIRD-PARTY-NOTICES.md under the SIL
+    Open Font License 1.1 lists with that SHA-256, and that is there with it, mapped to the
+    file's path. Only these fonts are already in the repository, under a license that lets
+    a document carry them."""
+    notices = (root / "THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+    fonts = {}
+    for section in re.split(r"\n(?=#{1,6} )", notices):
+        flat = re.sub(r"\s+", " ", section)
+        if OFL_NOTICE not in flat:
             continue
-        for element in ElementTree.fromstring(parts[name]).iter():
-            if local_name(element.tag) in (
-                "embedRegular", "embedBold", "embedItalic", "embedBoldItalic",
-                "embedTrueTypeFonts",
-            ):
-                problems.append(f"{name} has {local_name(element.tag)}")
-    return problems
+        for path, digest in NOTICED_FONT.findall(flat):
+            file = root / path
+            if file.is_file() and sha256(file) == digest:
+                fonts[digest] = path
+    return fonts
+
+
+@dataclass(frozen=True)
+class EmbeddedFont:
+    """A font a package embeds that is one of the OFL test fonts: its part, the w:name of
+    the font table entry that embeds it, and the test font it is, by path and SHA-256."""
+
+    part: str
+    font: str
+    file: str
+    sha256: str
+
+
+def font_key(value: str) -> bytes | None:
+    """The 16 bytes of a w:fontKey, a GUID in braces: the pairs of its hexadecimal digits
+    read from the last to the first (ECMA-376 Part 1, §17.8.1); None for another value."""
+    if not GUID.fullmatch(value):
+        return None
+    return bytes.fromhex(value[1:-1].replace("-", ""))[::-1]
+
+
+def font_program(data: bytes, key: bytes) -> bytes:
+    """The font of an embedded font part (§17.8.1): its first 32 bytes XORed with the key,
+    twice over, and the rest as it is."""
+    return bytes(b ^ key[i % 16] for i, b in enumerate(data[:32])) + data[32:]
+
+
+def package_relationships(
+    parts: dict[str, bytes],
+) -> dict[str, dict[str, tuple[str, str | None]]]:
+    """The relationships of every part that has some ("" for the package), by id: the type
+    and the part it leads to, as named in the package, or None for a target outside it."""
+    names = {name.casefold(): name for name in parts}
+    out: dict[str, dict[str, tuple[str, str | None]]] = {}
+    for name, data in parts.items():
+        folder, _, file = name.rpartition("/")
+        if not (file.casefold().endswith(".rels") and folder.rpartition("/")[2] == "_rels"):
+            continue
+        base = folder.rpartition("/")[0]
+        source = posixpath.join(base, file[: -len(".rels")]) if base else file[: -len(".rels")]
+        entries = {}
+        for rel in ElementTree.fromstring(data):
+            if local_name(rel.tag) != "Relationship":
+                continue
+            target, part = rel.get("Target", ""), None
+            if rel.get("TargetMode") != "External":
+                path = target[1:] if target.startswith("/") else posixpath.join(base, target)
+                # Part names match without case (ECMA-376 Part 2); a target the package does
+                # not have keeps its name, to be reported.
+                resolved = posixpath.normpath(path)
+                part = resolved if resolved in parts else names.get(resolved.casefold(), resolved)
+            entries[rel.get("Id", "")] = (rel.get("Type", ""), part)
+        out[source] = entries
+    return out
+
+
+def font_typed_parts(parts: dict[str, bytes]) -> set[str]:
+    """The parts that [Content_Types].xml gives a font's content type (one that names a
+    font and is not XML: obfuscatedFont, x-fontdata, x-font-ttf, font/ttf ...)."""
+    data = next((d for n, d in parts.items() if n.casefold() == "[content_types].xml"), None)
+    if data is None:
+        return set()
+    defaults, overrides = {}, {}
+    for entry in ElementTree.fromstring(data):
+        kind = entry.get("ContentType", "").casefold()
+        if local_name(entry.tag) == "Default":
+            defaults[entry.get("Extension", "").casefold()] = kind
+        elif local_name(entry.tag) == "Override":
+            overrides[entry.get("PartName", "").lstrip("/").casefold()] = kind
+
+    def font_type(kind: str) -> bool:
+        return "font" in kind and not kind.endswith("xml")
+
+    def kind_of(name: str) -> str:
+        default = defaults.get(name.rpartition(".")[2].casefold(), "")
+        return overrides.get(name.casefold(), default)
+
+    return {name for name in parts if font_type(kind_of(name))}
+
+
+def embedded_fonts(
+    parts: dict[str, bytes], allowed: dict[str, str]
+) -> tuple[list[str], list[EmbeddedFont]]:
+    """The fonts a package embeds, checked against allowed (SHA-256 to file, as
+    ofl_test_fonts() gives them): the problems, each naming its part, and the fonts that are
+    allowed. Every element that embeds a font (w:embedRegular and the others) must lead
+    through a font relationship of its part to a part of the package, and that part's bytes,
+    de-obfuscated with its w:fontKey (or as they are, for a part stored plain), must be an
+    allowed font. A part that holds a font otherwise (under word/fonts/, the target of a
+    font relationship, or of a font content type) that no such element names is refused,
+    since nothing says how to read it."""
+    problems: list[str] = []
+    fonts: list[EmbeddedFont] = []
+    relationships = package_relationships(parts)
+    holding = {name for name in parts if name.casefold().startswith("word/fonts/")}
+    holding |= font_typed_parts(parts)
+    for entries in relationships.values():
+        for kind, target in entries.values():
+            if kind in FONT_RELATIONSHIPS and target in parts:
+                holding.add(target)
+    named = set()
+    for name, data in parts.items():
+        if not name.casefold().endswith(".xml"):
+            continue
+        for font in ElementTree.fromstring(data).iter():
+            if local_name(font.tag) != "font":
+                continue
+            family = next((v for k, v in font.attrib.items() if local_name(k) == "name"), "")
+            for element in font:
+                face = local_name(element.tag)
+                if face not in FONT_FACES:
+                    continue
+                what = f"{name}: the {face} of {family!r}"
+                attributes = {local_name(k): v for k, v in element.attrib.items()}
+                rel = relationships.get(name, {}).get(attributes.get("id", ""))
+                if rel is None or rel[0] not in FONT_RELATIONSHIPS:
+                    problems.append(f"{what} names no font relationship of its part")
+                    continue
+                part = rel[1]
+                if part is None or part not in parts:
+                    problems.append(f"{what} is in {part or 'a file outside the package'}, "
+                                    "which the package does not have")
+                    continue
+                named.add(part)
+                candidates = [parts[part]]
+                if "fontKey" in attributes:
+                    key = font_key(attributes["fontKey"])
+                    if key is None:
+                        problems.append(f"{what} has a w:fontKey that is not a GUID")
+                        continue
+                    # A writer may store the font plain even with a key: either reading of
+                    # the bytes must be an allowed font.
+                    candidates.insert(0, font_program(parts[part], key))
+                digests = [hashlib.sha256(c).hexdigest() for c in candidates]
+                found = next((d for d in digests if d in allowed), None)
+                if found is None:
+                    problems.append(
+                        f"{part}, the {face} of {family!r}, is not one of the OFL test fonts "
+                        f"THIRD-PARTY-NOTICES.md names (SHA-256 {digests[0]})"
+                    )
+                    continue
+                fonts.append(EmbeddedFont(part, family, allowed[found], found))
+    problems += [
+        f"{part} is an embedded font that no font table entry names"
+        for part in sorted(holding - named)
+    ]
+    return problems, fonts
 
 
 def png_from_pgm(data: bytes) -> bytes:
@@ -2462,6 +2629,16 @@ def style_notes(geometry: dict) -> list[str]:
     ]
 
 
+def embedded_note(embedded: list[EmbeddedFont]) -> str:
+    """The SOURCES.md note on the OFL test fonts a re-saved copy embeds, each once, by the
+    file of tests/fonts or tests/fonts-word it is and its SHA-256 (which ofl_test_fonts()
+    took from THIRD-PARTY-NOTICES.md, so nothing Word wrote reaches the row)."""
+    files = dict.fromkeys((font.file, font.sha256) for font in embedded)
+    return "fonts the re-saved copy embeds, OFL test fonts: " + ", ".join(
+        f"{file} (SHA-256 {digest})" for file, digest in files
+    )
+
+
 def reference_row(
     group: str,
     record: dict,
@@ -2471,6 +2648,7 @@ def reference_row(
     formatting_note: str = "",
     locale_accepted: list[str] | None = None,
     styles: list[str] | None = None,
+    embedded: list[EmbeddedFont] | None = None,
 ) -> str:
     base = Path(record["file"]).stem
     windows = record["windows_version"]
@@ -2494,6 +2672,8 @@ def reference_row(
     ]
     if locale_accepted:
         notes.append(locale_note(locale_accepted))
+    if embedded:
+        notes.append(embedded_note(embedded))
     if formatting_note:
         notes.append(formatting_note)
     # tests/corpus-tools reads the notes back by splitting the cell at "; ".
@@ -2539,6 +2719,8 @@ class Checked:
     # formatting.json, from make-reference.ps1 format 3 on, and its SOURCES.md note.
     formatting: bytes | None = None
     formatting_note: str = ""
+    # The OFL test fonts the re-saved copy embeds.
+    embedded: tuple[EmbeddedFont, ...] = ()
 
 
 def check_result(
@@ -2548,6 +2730,7 @@ def check_result(
     tools: Tools,
     allow_locale: bool = False,
     fonts: dict[str, list[FontFace]] | None = None,
+    test_fonts: dict[str, str] | None = None,
 ) -> Checked:
     record = load_record(json_path)
     results = json_path.parent
@@ -2568,7 +2751,9 @@ def check_result(
         original_parts = read_parts(original)
         resaved_parts = read_parts(resaved)
         problems = docx_privacy_problems(resaved)
-        problems += embedded_font_problems(resaved_parts)
+        allowed = ofl_test_fonts() if test_fonts is None else test_fonts
+        font_problems, embedded = embedded_fonts(resaved_parts, allowed)
+        problems += font_problems
         # Accepted only by the maintainer's --allow-locale, and then named in SOURCES.md, so
         # that tests/corpus-tools can tell an accepted trace from a later change.
         accepted = locale_problems(original_parts, resaved_parts)
@@ -2657,9 +2842,12 @@ def check_result(
     if record["script_version"] >= 3:
         formatting, formatting_note = checked_formatting(record, results, resaved_parts, group)
     row = reference_row(
-        group, record, drawn, poppler, dropped, formatting_note, accepted, style_notes(geometry)
+        group, record, drawn, poppler, dropped, formatting_note, accepted, style_notes(geometry),
+        embedded,
     )
-    return Checked(record, pdf, resaved, row, geometry, drawn, formatting, formatting_note)
+    return Checked(
+        record, pdf, resaved, row, geometry, drawn, formatting, formatting_note, tuple(embedded)
+    )
 
 
 def checked_formatting(
@@ -2719,6 +2907,7 @@ def import_results(
     if not (corpus / group).is_dir():
         raise Refused(f"tests/corpus/{group} does not exist")
     fonts = font_index(font_dirs or [])
+    test_fonts = ofl_test_fonts()
     records = sorted(
         p
         for p in results.glob("*.json")
@@ -2730,7 +2919,9 @@ def import_results(
     errors = []
     for path in records:
         try:
-            checked.append(check_result(path, group, corpus, tools, allow_locale, fonts))
+            checked.append(
+                check_result(path, group, corpus, tools, allow_locale, fonts, test_fonts)
+            )
         except Refused as error:
             errors.append(str(error))
     if errors:
