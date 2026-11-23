@@ -1,7 +1,8 @@
 //! Links and the named destinations they go to: link annotations (ISO 32000-1, 12.5.6.5)
 //! and the `/Dests` name tree of the catalog (12.3.2.3).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fmt::Write as _;
 use std::hash::{BuildHasher, RandomState};
 use std::ops::Range;
@@ -13,6 +14,14 @@ use crate::document::{MAX_POSITION, check_position, number, push_string};
 use crate::glyphs::MAX_STRING_BYTES;
 use crate::path::check_range;
 use crate::{Error, Result};
+
+#[cfg(test)]
+thread_local! {
+    /// How many links' destinations the writer has looked up on this thread among the
+    /// names, for the tests that bound that work.
+    pub(crate) static DESTINATIONS_LOOKED_UP: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
 
 /// The smallest side of a link: smaller ones would round to 0 in the four decimals the
 /// file stores.
@@ -44,6 +53,67 @@ pub enum LinkTarget {
     /// [`add_destination`](crate::Page::add_destination) says.
     Destination(String),
 }
+
+impl LinkTarget {
+    /// The target checked once, for the links that
+    /// [`Page::add_checked_link`](crate::Page::add_checked_link) adds to it.
+    ///
+    /// ```
+    /// use officewright_pdf::{Document, LinkTarget, PageSize, Pt};
+    ///
+    /// let mut doc = Document::new();
+    /// let site = LinkTarget::Uri("https://example.com/".to_owned()).check()?;
+    /// // A link over three lines: three rectangles to the one checked target.
+    /// let page = doc.add_page(PageSize::A4)?;
+    /// for line in 0..3 {
+    ///     let y = Pt(700.0 - 14.0 * f64::from(line));
+    ///     page.add_checked_link(Pt(72.0), y, Pt(300.0), Pt(14.0), &site)?;
+    /// }
+    /// assert!(doc.to_bytes()?.starts_with(b"%PDF-1.4"));
+    /// # Ok::<(), officewright_pdf::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OutOfRange`] if the URI or name is empty or longer than 32767 bytes as
+    /// written ([`LinkTarget`], [`Page::add_destination`](crate::Page::add_destination)).
+    pub fn check(&self) -> Result<CheckedLinkTarget> {
+        Ok(CheckedLinkTarget(Arc::new(Target::check(self)?)))
+    }
+}
+
+/// A [`LinkTarget`] checked once ([`LinkTarget::check`]), in the form the file stores:
+/// the links that [`Page::add_checked_link`](crate::Page::add_checked_link) adds to it, on
+/// any page of any document, take it without checking, hashing or copying it again, so
+/// that a target costs its length once, however many links go there. Cloning it is cheap.
+///
+/// One of the drawing primitives the layout engine paints with: public, but exempt from
+/// semantic versioning until officewright 1.0 (feature `unstable-drawing`).
+#[derive(Clone)]
+pub struct CheckedLinkTarget(Arc<Target>);
+
+impl fmt::Debug for CheckedLinkTarget {
+    /// Its kind and the length of its checked form, not the bytes, which may be 32767.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (kind, bytes) = match self.0.as_ref() {
+            Target::Uri(uri) => ("uri", uri.len()),
+            Target::Destination(key) => ("destination", key.len()),
+        };
+        f.debug_struct("CheckedLinkTarget")
+            .field("kind", &kind)
+            .field("bytes", &bytes)
+            .finish()
+    }
+}
+
+impl PartialEq for CheckedLinkTarget {
+    /// Whether both go to one place: the same check, or equal ones.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+    }
+}
+
+impl Eq for CheckedLinkTarget {}
 
 /// A link of a page, checked and in the form the file stores.
 #[derive(Clone, Debug)]
@@ -141,9 +211,23 @@ impl Link {
         })
     }
 
+    /// A link of the corners `rect` ([`Self::rect`]) to `target`, checked before.
+    pub(crate) fn checked(rect: [f64; 4], target: &CheckedLinkTarget) -> Self {
+        Self {
+            rect,
+            target: Arc::clone(&target.0),
+        }
+    }
+
     /// Where the link goes.
     pub(crate) fn target(&self) -> &Target {
         &self.target
+    }
+
+    /// Where the link goes, as the links of one checked target share it: links that
+    /// share it go to one target, while links that do not may still go to equal ones.
+    pub(crate) fn shared_target(&self) -> *const Target {
+        Arc::as_ptr(&self.target)
     }
 
     /// The key of the destination the link goes to; `None` for a URI.
@@ -272,8 +356,16 @@ impl<'a> Destinations<'a> {
                 }
             }
         }
+        // A target the links share is looked up once, so that a name many links go to
+        // costs its length once (#621).
+        let mut looked_up: HashSet<*const Target> = HashSet::new();
         for (page, (_, links)) in pages.into_iter().enumerate() {
-            for key in links.iter().filter_map(Link::destination) {
+            let shared = links
+                .iter()
+                .filter(|link| looked_up.insert(link.shared_target()));
+            for key in shared.filter_map(Link::destination) {
+                #[cfg(test)]
+                DESTINATIONS_LOOKED_UP.with(|looked_up| looked_up.set(looked_up.get() + 1));
                 if entries
                     .binary_search_by(|(known, _)| known.key.as_slice().cmp(key))
                     .is_err()

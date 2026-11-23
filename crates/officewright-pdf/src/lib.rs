@@ -60,7 +60,7 @@ pub use glyphs::{GlyphRun, PlacedGlyph};
 #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
 pub use image::Image;
 #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
-pub use link::LinkTarget;
+pub use link::{CheckedLinkTarget, LinkTarget};
 #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
 pub use officewright_core::Color;
 pub use officewright_core::{PageSize, Pt};
