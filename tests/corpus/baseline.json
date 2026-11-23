@@ -579,25 +579,25 @@
   },
   "scores": {
     "tests/corpus/business/contract-ec-data-processing-clauses-bg.docx": {
-      "line_agreement": 0.9928,
+      "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9302,
-      "ssim_min": 0.6543,
-      "text_score": 0.9999
+      "ssim_mean": 0.9524,
+      "ssim_min": 0.904,
+      "text_score": 1.0
     },
     "tests/corpus/business/contract-ec-data-processing-clauses-de.docx": {
       "line_agreement": 0.9929,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9386,
-      "ssim_min": 0.6535,
+      "ssim_mean": 0.9564,
+      "ssim_min": 0.916,
       "text_score": 0.9999
     },
     "tests/corpus/business/contract-ec-data-processing-clauses-el.docx": {
-      "line_agreement": 0.9708,
-      "page_break_agreement": 0.6,
-      "ssim_mean": 0.8086,
-      "ssim_min": 0.4983,
-      "text_score": 0.9236
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.943,
+      "ssim_min": 0.9005,
+      "text_score": 1.0
     },
     "tests/corpus/business/contract-gsa-user-agreement.docx": {
       "line_agreement": 1.0,
@@ -610,13 +610,13 @@
       "page_break_agreement": 0.6667,
       "ssim_mean": 0.7727,
       "ssim_min": 0.6331,
-      "text_score": 0.8114
+      "text_score": 0.8115
     },
     "tests/corpus/business/contract-hhs-sow-usability-testing.docx": {
-      "line_agreement": 0.8756,
+      "line_agreement": 0.8822,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.511,
-      "ssim_min": 0.4448,
+      "ssim_mean": 0.5111,
+      "ssim_min": 0.4453,
       "text_score": 0.6136
     },
     "tests/corpus/business/contract-hhs-teaming-agreement.docx": {
@@ -655,18 +655,18 @@
       "text_score": 0.9049
     },
     "tests/corpus/business/form-ec-state-aid-notification-de.docx": {
-      "line_agreement": 0.8489,
+      "line_agreement": 0.8579,
       "page_break_agreement": 0.3158,
-      "ssim_mean": 0.6519,
+      "ssim_mean": 0.6524,
       "ssim_min": 0.0,
-      "text_score": 0.778
+      "text_score": 0.7781
     },
     "tests/corpus/business/form-ec-state-aid-notification-el.docx": {
-      "line_agreement": 0.8105,
+      "line_agreement": 0.8231,
       "page_break_agreement": 0.1053,
-      "ssim_mean": 0.612,
-      "ssim_min": 0.0,
-      "text_score": 0.5925
+      "ssim_mean": 0.6606,
+      "ssim_min": 0.5112,
+      "text_score": 0.6633
     },
     "tests/corpus/business/form-gsa-dira-dias-template.docx": {
       "line_agreement": 0.9027,
@@ -709,11 +709,11 @@
       "text_score": 0.0084
     },
     "tests/corpus/business/letter-dol-cobra-election-notice.docx": {
-      "line_agreement": 0.8734,
+      "line_agreement": 0.8831,
       "page_break_agreement": 0.875,
-      "ssim_mean": 0.8949,
+      "ssim_mean": 0.8963,
       "ssim_min": 0.6745,
-      "text_score": 0.9314
+      "text_score": 0.9315
     },
     "tests/corpus/business/letter-dol-cobra-general-notice.docx": {
       "line_agreement": 0.8415,
@@ -740,14 +740,14 @@
       "page_break_agreement": 0.2222,
       "ssim_mean": 0.5042,
       "ssim_min": 0.0,
-      "text_score": 0.497
+      "text_score": 0.4971
     },
     "tests/corpus/business/report-hhs-usability-test-report.docx": {
-      "line_agreement": 0.7456,
+      "line_agreement": 0.7491,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.7509,
+      "ssim_mean": 0.751,
       "ssim_min": 0.5781,
-      "text_score": 0.9812
+      "text_score": 0.9813
     },
     "tests/corpus/business/report-usds-tech-challenge-playbook.docx": {
       "line_agreement": 0.4648,
