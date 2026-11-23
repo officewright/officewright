@@ -713,6 +713,12 @@ class Import(unittest.TestCase):
              "cannot read the PDF's links: a link on page 1 goes to no destination"),
             ({"/Dest": 7, "/Rect": [0, 0, 1, 1]},
              "cannot read the PDF's links: a link on page 1 goes to no destination"),
+            # A destination on an object that is none of the PDF's pages.
+            ({"/Dest": ["91 0 R", "/Fit"], "/Rect": [0, 0, 1, 1]},
+             "cannot read the PDF's links: a link on page 1 goes to no destination"),
+            ({"/A": {"/S": "/URI", "/URI": "u:https://example.org/"}, "/Rect": [0, 0, 1, 1],
+              "/QuadPoints": []},
+             "cannot read the PDF's links: a link on page 1 has malformed /QuadPoints"),
         ):
             with self.subTest(message=message, annotation=annotation):
                 self.with_annotations([{"/Subtype": "/Link", **annotation}])
@@ -731,6 +737,8 @@ class Import(unittest.TestCase):
              "cannot read the PDF's links: the named destination Elsewhere is not a destination"),
             (["u:Nowhere", {"/S": "/GoTo"}],
              "cannot read the PDF's links: the named destination Nowhere is not a destination"),
+            (["u:Away", ["300 0 R", "/Fit"]],
+             "cannot read the PDF's links: the named destination Away is not a destination"),
         ):
             with self.subTest(message=message, names=names):
                 self.with_annotations([], catalog={"/Names": {"/Dests": "300 0 R"}},
@@ -743,12 +751,13 @@ class Import(unittest.TestCase):
         doc = rules.documents()[0]
         self.add_result(doc)
         uris = ["u:D:\\reports\\next.docx", "u:d:/reports/next.docx", "u:\\\\server\\share\\a",
-                "u: FILE:///C:/reports/next.docx", "u:https://example.org/a R"]
+                "u: FILE:///C:/reports/next.docx", "u:  D:\\reports\\next.docx",
+                "u:https://example.org/a R"]
         self.with_annotations([{"/Subtype": "/Link", "/Rect": [0, 0, 1, 1],
                                 "/A": {"/S": "/URI", "/URI": uri}} for uri in uris])
         self.run_import()
         self.assertEqual([link["uri"] for link in self.geometry_of(doc)["links"]],
-                         ["file:", "file:", "file:", "file:", "https://example.org/a R"])
+                         ["file:", "file:", "file:", "file:", "file:", "https://example.org/a R"])
 
     def test_qpdf_output_without_a_page_tree_is_refused(self):
         doc = rules.documents()[0]

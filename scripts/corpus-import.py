@@ -33,10 +33,10 @@ tests/corpus/reference/<group>/<name>/ go instead
     numbering properties it dropped, added and changed, the paragraphs whose style it
     changed, and the PDF's link annotations and named destinations (qpdf --json): each
     link's page, rectangle and quadrilaterals in the same points (from the top left of the
-    MediaBox, as pdftotext measures; a turned page is refused) and its target (a URI, a
-    file: URI or local path without its path, a destination, or the kind of its action),
-    each named destination's page and place; every value on a line of its own, without indentation
-    (geometry_text);
+    MediaBox, as pdftotext measures; a turned page is refused) and its target (a URI, with
+    a file: URI or a local path recorded as file: alone, a destination, or the kind of its
+    action), each named destination's page and place; every value on a line of its own,
+    without indentation (geometry_text);
   - formatting.json, from make-reference.ps1 format 3 on: the formatting Word computes for
     every paragraph of every story, with its runs of formatting when Word gave them, and the
     body paragraphs' style ids and names taken from the re-saved copy.
@@ -1939,6 +1939,9 @@ def destination(objects: PdfObjects, value: object, page_numbers: dict[str, int]
         return None
     page_ref = found[0]
     page = page_numbers.get(page_ref) if isinstance(page_ref, str) else None
+    if page is None:
+        # Not one of the PDF's pages: no destination the reader can record.
+        return None
     fit = objects.get(found[1]) if len(found) > 1 else None
     out: dict = {"page": page, "fit": fit[1:] if isinstance(fit, str) else None}
     box = boxes.get(page_ref) if isinstance(page_ref, str) else None
