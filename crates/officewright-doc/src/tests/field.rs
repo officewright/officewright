@@ -12,7 +12,7 @@ fn switch(text: &str) -> FieldToken {
 
 #[test]
 fn divides_an_instruction_into_its_name_arguments_and_switches() {
-    let cases: [(&str, &str, Vec<FieldToken>); 16] = [
+    let cases: [(&str, &str, Vec<FieldToken>); 18] = [
         ("PAGE", "PAGE", vec![]),
         (
             "  PAGE   \\*  roman \\* MERGEFORMAT ",
@@ -87,6 +87,8 @@ fn divides_an_instruction_into_its_name_arguments_and_switches() {
                 argument(r"\1"),
             ],
         ),
+        // Letters that are not Latin make no switch.
+        (r"X \é \ωa", "X", vec![argument(r"\é"), argument(r"\ωa")]),
         // Text in quotes that does not end runs to the end, as does a backslash at the end;
         // a backslash before white space is an argument of its own.
         (r#"X "open \"#, "X", vec![argument(r"open \")]),
@@ -95,6 +97,11 @@ fn divides_an_instruction_into_its_name_arguments_and_switches() {
         ("X \\\ta", "X", vec![argument("\\"), argument("a")]),
         // No name: an instruction that starts with quotes or a switch.
         (r#""PAGE" \h"#, "", vec![argument("PAGE"), switch("h")]),
+        (
+            r#""PAGE" next"#,
+            "",
+            vec![argument("PAGE"), argument("next")],
+        ),
         (r"\l x", "", vec![switch("l"), argument("x")]),
         // White space of any kind divides.
         ("REF\u{a0}a\tb", "REF", vec![argument("a"), argument("b")]),

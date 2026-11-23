@@ -23,7 +23,8 @@
 //! ```
 //!
 //! What the model does not represent yet (equations, and the properties not typed yet)
-//! is kept as it was read; such content shows as `Other` with an [`Opaque`] view. Drawings show as [`RunContent::Drawing`]: their frame and picture are read, and
+//! is kept as it was read; such content shows as `Other` with an [`Opaque`] view.
+//! Drawings show as [`RunContent::Drawing`]: their frame and picture are read, and
 //! [`Drawing::to_xml`] gives a shape, chart or group as written; so do VML drawings
 //! (`w:pict`) as [`RunContent::VmlDrawing`], whose pictures are read, and embedded
 //! objects (`w:object`) as [`RunContent::Object`], whose preview pictures are read.
