@@ -6,6 +6,7 @@ and check the package structure that Word needs to open a file at all.
 """
 
 import dataclasses
+import hashlib
 import importlib.util
 import json
 import re
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import unicodedata
 import unittest
+import uuid
 import zipfile
 import zlib
 from pathlib import Path
@@ -4956,9 +4958,10 @@ class Packages(unittest.TestCase):
         # CT_Settings 17.15.1.78 is a sequence (here the elements the script writes), and so
         # are the document-wide footnote and endnote properties (17.11.12 and 17.11.4): first
         # the properties a section can give its notes too, then the special notes.
-        order = ["zoom", "mirrorMargins", "defaultTabStop", "evenAndOddHeaders",
-                 "characterSpacingControl", "footnotePr", "endnotePr", "compat",
-                 "themeFontLang", "clrSchemeMapping", "decimalSymbol", "listSeparator"]
+        order = ["zoom", "embedTrueTypeFonts", "mirrorMargins", "defaultTabStop",
+                 "evenAndOddHeaders", "characterSpacingControl", "footnotePr", "endnotePr",
+                 "compat", "themeFontLang", "clrSchemeMapping", "decimalSymbol",
+                 "listSeparator"]
         for doc in self.docs:
             settings = part(rules.parts(doc), "word/settings.xml")
             tags = [child.tag.replace(W, "") for child in settings]
@@ -8325,7 +8328,257 @@ class FloatingObjectDocuments(unittest.TestCase):
         self.assertEqual(pages, [1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6])
 
 
+ROOT = Path(__file__).resolve().parents[2]
+LIBERATION_MONO = ROOT / "tests/fonts/liberation/LiberationMono-Regular.ttf"
+REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+
+
 A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+
+def sfnt_tables(data):
+    """The tables of a TrueType font by tag."""
+    (count,) = struct.unpack(">H", data[4:6])
+    tables = {}
+    for i in range(count):
+        tag, _, offset, length = struct.unpack(">4sIII", data[12 + 16 * i : 28 + 16 * i])
+        tables[tag] = data[offset : offset + length]
+    return tables
+
+
+def font_glyphs(data, text):
+    """The glyph of each character of text in the font's (3, 1) cmap of format 4, 0 for a
+    character it does not map."""
+    cmap = sfnt_tables(data)[b"cmap"]
+    (subtables,) = struct.unpack(">H", cmap[2:4])
+    for i in range(subtables):
+        platform, encoding, offset = struct.unpack(">HHI", cmap[4 + 8 * i : 12 + 8 * i])
+        if (platform, encoding) == (3, 1):
+            sub = cmap[offset:]
+    assert struct.unpack(">H", sub[0:2]) == (4,)
+    segments = struct.unpack(">H", sub[6:8])[0] // 2
+    ends = struct.unpack(f">{segments}H", sub[14 : 14 + 2 * segments])
+    at = 16 + 2 * segments
+    starts = struct.unpack(f">{segments}H", sub[at : at + 2 * segments])
+    deltas = struct.unpack(f">{segments}h", sub[at + 2 * segments : at + 4 * segments])
+    ranges_at = at + 4 * segments
+    ranges = struct.unpack(f">{segments}H", sub[ranges_at : ranges_at + 2 * segments])
+    glyphs = []
+    for character in text:
+        code, glyph = ord(character), 0
+        for k in range(segments):
+            if starts[k] <= code <= ends[k]:
+                if ranges[k] == 0:
+                    glyph = (code + deltas[k]) & 0xFFFF
+                else:
+                    place = ranges_at + 2 * k + ranges[k] + 2 * (code - starts[k])
+                    (found,) = struct.unpack(">H", sub[place : place + 2])
+                    glyph = (found + deltas[k]) & 0xFFFF if found else 0
+                break
+        glyphs.append(glyph)
+    return glyphs
+
+
+class EmbeddedFontDocument(unittest.TestCase):
+    """E-embedded-font (#145): text in a font the document embeds, as ECMA-376 Part 1, §17.8
+    has a document embed one; the font is an OFL test font of tests/fonts, named with its
+    SHA-256 in THIRD-PARTY-NOTICES.md."""
+
+    SHA256 = "f2b83c763e8afd21709333370bed4774337fae82267937e2b5aea7e2fbd922c1"
+    FONT = "Liberation Mono"
+
+    def setUp(self):
+        self.doc = next(doc for doc in rules.documents() if doc.name == "E-embedded-font")
+        self.parts = dict(rules.parts(self.doc))
+        self.font = LIBERATION_MONO.read_bytes()
+
+    def texts(self, element):
+        return "".join(t.text or "" for t in element.iter(f"{W}t"))
+
+    def test_the_font_part_is_the_test_font_obfuscated_with_its_key(self):
+        (entry,) = ElementTree.fromstring(self.parts["word/fontTable.xml"])
+        self.assertEqual(entry.get(f"{W}name"), self.FONT)
+        (embed,) = entry
+        self.assertEqual(embed.tag, f"{W}embedRegular")
+        key = embed.get(f"{W}fontKey")
+        # ST_Guid: upper-case hexadecimal digits in braces.
+        self.assertRegex(key, r"^\{[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\}$")
+        # §17.8.1: the key is the GUID's bytes with its pairs of digits in reverse order, and
+        # the first 32 bytes of the font are XORed with it twice over.
+        k = uuid.UUID(key).bytes[::-1]
+        data = self.parts["word/fonts/font1.odttf"]
+        plain = bytes(b ^ k[i % 16] for i, b in enumerate(data[:32])) + data[32:]
+        self.assertEqual(plain, self.font)
+        self.assertEqual(hashlib.sha256(plain).hexdigest(), self.SHA256)
+        self.assertTrue(all(a != b for a, b in zip(data[:32], self.font[:32])))
+        self.assertEqual(data[32:], self.font[32:])
+        # The committed document holds these bytes.
+        committed = dict(rules.stored_parts(rules.OUT_DIR / "E-embedded-font.docx"))
+        self.assertEqual(committed["word/fonts/font1.odttf"], data)
+
+    def test_the_font_is_a_truetype_face_of_that_name_that_may_be_embedded(self):
+        self.assertEqual(self.font[:4], b"\x00\x01\x00\x00")
+        tables = sfnt_tables(self.font)
+        # OS/2 fsType 0: installable embedding, so Word may load the font and embed it again.
+        self.assertEqual(struct.unpack(">H", tables[b"OS/2"][8:10]), (0,))
+        name = tables[b"name"]
+        count, start = struct.unpack(">HH", name[2:6])
+        names = {}
+        for i in range(count):
+            platform, encoding, language, nid, length, offset = struct.unpack(
+                ">HHHHHH", name[6 + 12 * i : 18 + 12 * i])
+            if (platform, encoding, language) == (3, 1, 0x409):
+                names[nid] = name[start + offset : start + offset + length].decode("utf-16-be")
+        # The family the text names, and the Regular face embedRegular says it is.
+        self.assertEqual((names[1], names[2]), (self.FONT, "Regular"))
+
+    def test_the_notices_and_sources_name_the_font_its_hash_and_its_license(self):
+        notices = re.sub(r"\s+", " ", (ROOT / "THIRD-PARTY-NOTICES.md").read_text("utf-8"))
+        start = notices.index("### Liberation Sans, Serif and Mono")
+        section = notices[start : notices.index(" ### ", start)]
+        self.assertIn(f"`tests/fonts/liberation/LiberationMono-Regular.ttf` (SHA-256 "
+                      f"`{self.SHA256}`)", section)
+        self.assertIn("License: SIL Open Font License 1.1", section)
+        committed = next(line for line in rules.SOURCES.read_text("utf-8").splitlines()
+                         if line.startswith("| word-rules/E-embedded-font.docx |"))
+        for row in (committed, rules.sources_row(self.doc)):
+            self.assertEqual(
+                row.split(" | ")[2],
+                "BUSL-1.1 (this repository), but the font it embeds, Liberation Mono Regular "
+                f"(tests/fonts/liberation/LiberationMono-Regular.ttf, SHA-256 {self.SHA256}): "
+                "SIL Open Font License 1.1")
+
+    def test_parts_relationships_and_content_types_hold_together(self):
+        types = ElementTree.fromstring(self.parts["[Content_Types].xml"])
+        defaults = {e.get("Extension"): e.get("ContentType") for e in types.iter(f"{CT}Default")}
+        overrides = {e.get("PartName") for e in types.iter(f"{CT}Override")}
+        self.assertEqual(defaults["odttf"],
+                         "application/vnd.openxmlformats-officedocument.obfuscatedFont")
+        self.assertNotIn("/word/fonts/font1.odttf", overrides)
+        document_rels = ElementTree.fromstring(self.parts["word/_rels/document.xml.rels"])
+        (table,) = [r for r in document_rels if r.get("Type") == REL + "fontTable"]
+        self.assertEqual(table.get("Target"), "fontTable.xml")
+        (font_rel,) = ElementTree.fromstring(self.parts["word/_rels/fontTable.xml.rels"])
+        self.assertEqual(font_rel.get("Type"), REL + "font")
+        self.assertEqual(font_rel.get("Target"), "fonts/font1.odttf")
+        self.assertNotIn("TargetMode", font_rel.attrib)
+        (entry,) = ElementTree.fromstring(self.parts["word/fontTable.xml"])
+        self.assertEqual(entry[0].get(R_ID), font_rel.get("Id"))
+        # The one font part, which nothing but the font table names.
+        self.assertEqual([n for n in self.parts if n.startswith("word/fonts/")],
+                         ["word/fonts/font1.odttf"])
+        for name, data in self.parts.items():
+            if name.endswith(".rels") and name != "word/_rels/fontTable.xml.rels":
+                self.assertNotIn(b"/font\"", data, name)
+        # No other document embeds a font.
+        for doc in rules.documents():
+            if doc.name != self.doc.name:
+                names = [n for n, _ in rules.parts(doc)]
+                self.assertFalse([n for n in names if "fonts/" in n or n.endswith(".odttf")],
+                                 doc.name)
+
+    def test_settings_embed_the_whole_font(self):
+        settings = ElementTree.fromstring(self.parts["word/settings.xml"])
+        tags = [child.tag.replace(W, "") for child in settings]
+        self.assertIn("embedTrueTypeFonts", tags)
+        self.assertEqual(settings.find(f"{W}embedTrueTypeFonts").attrib, {})
+        # Without w:saveSubsetFonts Word embeds each font whole when it saves the document
+        # again; without w:embedSystemFonts it leaves the fonts of Windows out.
+        self.assertNotIn("saveSubsetFonts", tags)
+        self.assertNotIn("embedSystemFonts", tags)
+        mode = settings.find(f"{W}compat/{W}compatSetting[@{W}name='compatibilityMode']")
+        self.assertEqual(mode.get(f"{W}val"), "15")
+
+    def test_every_font_of_the_document_is_the_embedded_one(self):
+        # Every run, the defaults, styles and theme in the one font, so that Word has no
+        # other font to embed when it saves its copy.
+        slots = {f"{W}{slot}" for slot in ("ascii", "hAnsi", "eastAsia", "cs")}
+        for name in ("word/document.xml", "word/styles.xml"):
+            root = ElementTree.fromstring(self.parts[name])
+            for fonts in root.iter(f"{W}rFonts"):
+                self.assertEqual(fonts.attrib, {slot: self.FONT for slot in slots}, name)
+        body = ElementTree.fromstring(self.parts["word/document.xml"]).find(f"{W}body")
+        for r in body.iter(f"{W}r"):
+            self.assertIsNotNone(r.find(f"{W}rPr/{W}rFonts"), self.texts(r))
+        defaults = ElementTree.fromstring(self.parts["word/styles.xml"]).find(
+            f"{W}docDefaults/{W}rPrDefault/{W}rPr/{W}rFonts")
+        self.assertEqual(defaults.get(f"{W}ascii"), self.FONT)
+        theme = ElementTree.fromstring(self.parts["word/theme/theme1.xml"])
+        for kind in ("major", "minor"):
+            collection = theme.find(f"{A}themeElements/{A}fontScheme/{A}{kind}Font")
+            self.assertEqual([(e.tag.replace(A, ""), e.get("typeface")) for e in collection],
+                             [("latin", self.FONT), ("ea", ""), ("cs", self.FONT)])
+        self.assertEqual([e.get(f"{W}name") for e in
+                          ElementTree.fromstring(self.parts["word/fontTable.xml"])], [self.FONT])
+
+    def test_cases_have_the_markup_their_labels_name(self):
+        body = ElementTree.fromstring(self.parts["word/document.xml"]).find(f"{W}body")
+        paragraphs = body.findall(f"{W}p")
+        texts = [self.texts(p) for p in paragraphs]
+        labels = [n for n, value in enumerate(texts) if value.startswith("Case ")]
+        self.assertEqual([texts[n][:8] for n in labels],
+                         ["Case 01:", "Case 02:", "Case 03:", "Case 04:"])
+        self.assertEqual(texts[-1], "End of the document.")
+        # The font's advance is the same for every character used, 1229 of 2048 units, as
+        # the wrapping paragraph says.
+        tables = sfnt_tables(self.font)
+        self.assertEqual(struct.unpack(">H", tables[b"head"][18:20]), (2048,))
+        every = "".join(texts)
+        glyphs = font_glyphs(self.font, every)
+        unmapped = sorted({c for c, g in zip(every, glyphs) if g == 0})
+        self.assertEqual(unmapped, [])
+        advance = {struct.unpack(">H", tables[b"hmtx"][4 * g : 4 * g + 2])[0]
+                   for g in set(glyphs)}
+        self.assertEqual(advance, {1229})
+        width = rules.TEXT_W / 20
+
+        def size(run):
+            return int(run.find(f"{W}rPr/{W}sz").get(f"{W}val")) / 2
+
+        for n in labels:
+            label = paragraphs[n]
+            self.assertIsNotNone(label.find(f"{W}pPr/{W}keepNext"), texts[n])
+            (r,) = label.findall(f"{W}r")
+            # One line: its characters, each 1229/2048 of 11 pt, fit the text's width.
+            self.assertEqual(size(r), 11)
+            self.assertLess(len(texts[n]) * 1229 / 2048 * 11, width - 6, texts[n])
+
+        def sample(n):
+            (r,) = paragraphs[n + 1].findall(f"{W}r")
+            values = [t.text for t in r.findall(f"{W}t")]
+            return paragraphs[n + 1], r, values
+
+        for n, (pt, fill) in zip(labels[:2], ((11, "D9D9D9"), (12, "BFBFBF"))):
+            self.assertIn(f"{pt} pt, single spacing, ten lines, shaded", texts[n])
+            p, r, values = sample(n)
+            self.assertEqual(size(r), pt)
+            self.assertEqual(len(r.findall(f"{W}br")), 9)
+            self.assertEqual(values, [f"{self.FONT} {pt} pt, line {k:02d}: Hamburgefonts gjpqy"
+                                      for k in range(1, 11)])
+            self.assertEqual(p.find(f"{W}pPr/{W}shd").get(f"{W}fill"), fill)
+            self.assertIsNone(p.find(f"{W}pPr/{W}spacing"))
+            for value in values:
+                self.assertLess(len(value) * 1229 / 2048 * pt, width, value)
+        n = labels[2]
+        self.assertIn("11 pt, a paragraph that wraps", texts[n])
+        p, r, values = sample(n)
+        self.assertEqual(size(r), 11)
+        self.assertEqual(r.findall(f"{W}br"), [])
+        # Longer than two lines of the text's width.
+        self.assertGreater(len(values[0]) * 1229 / 2048 * 11, 2 * width)
+        n = labels[3]
+        self.assertIn("11 pt, a Cyrillic line and a Greek line", texts[n])
+        p, r, values = sample(n)
+        self.assertEqual(size(r), 11)
+        self.assertEqual(len(values), 2)
+        for value, script in zip(values, ("CYRILLIC", "GREEK")):
+            letters = [c for c in value if unicodedata.category(c).startswith("L")]
+            self.assertGreater(len(letters), 20)
+            self.assertTrue(all(unicodedata.name(c).startswith(script) for c in letters), value)
+            self.assertLess(len(value) * 1229 / 2048 * 11, width, value)
+        # Nothing breaks the page: the cases share the first page.
+        self.assertEqual([b for b in body.iter(f"{W}br") if b.get(f"{W}type")], [])
+        self.assertEqual(list(body.iter(f"{W}pageBreakBefore")), [])
 R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 
 

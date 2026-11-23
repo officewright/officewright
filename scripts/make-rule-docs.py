@@ -22,6 +22,7 @@ neither on the platform's zlib nor on the time the script ran.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import struct
 import sys
@@ -486,6 +487,13 @@ class Doc:
     # The w:compatSetting elements as written, in place of those of mode and compat_values,
     # for a document about how Word reads their values (#243).
     compat_settings_written: str = ""
+    # The font of every slot of the theme part (major and minor, Latin and complex script),
+    # when not those of THEME_FONTS.
+    theme_font: str = ""
+    # The fonts the document embeds (EmbeddedFont, ECMA-376 Part 1, §17.8), each in a font
+    # part of its own that the font table names; with any, settings.xml turns on
+    # w:embedTrueTypeFonts.
+    embedded_fonts: tuple[EmbeddedFont, ...] = ()
 
 
 def line_fonts_body(fonts: list[str]) -> str:
@@ -10185,6 +10193,108 @@ def theme_font_lang(short: str, tag: str, language: str) -> Doc:
     )
 
 
+# Batch 14, part E. A font the document embeds (#145): text in a font Word does not have
+# installed, which Word can draw only from the document's own copy (ECMA-376 Part 1, §17.8).
+# The font is Liberation Mono Regular of tests/fonts, under the SIL Open Font License 1.1, so
+# the document brings no new third-party file into the repository, and corpus-import.py lets
+# a re-saved copy embed only the OFL test fonts THIRD-PARTY-NOTICES.md names. Word's render
+# shows the embedded font only where Liberation Mono is not installed: make-reference.ps1 then
+# lists it among the fonts Word does not have (fonts_missing of its record).
+
+
+@dataclass(frozen=True)
+class EmbeddedFont:
+    """A font file a document embeds: the w:font it belongs to (name), the element that
+    embeds it (face, a key of FONT_FACES), the w:fontKey it is obfuscated with, and the file,
+    relative to the repository, with its license."""
+
+    name: str
+    face: str
+    key: str
+    path: str
+    license: str
+
+    def data(self) -> bytes:
+        return (ROOT / self.path).read_bytes()
+
+
+# The elements of a w:font that embed its faces, in the order of CT_Font, and the faces.
+FONT_FACES = {"embedRegular": "Regular", "embedBold": "Bold", "embedItalic": "Italic",
+              "embedBoldItalic": "Bold Italic"}
+OBFUSCATED_FONT = "application/vnd.openxmlformats-officedocument.obfuscatedFont"
+# ST_Guid, the type of w:fontKey.
+GUID = re.compile(r"\{[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\}")
+
+
+def font_key(key: str) -> bytes:
+    """The 16 bytes of a w:fontKey: the pairs of hexadecimal digits of the GUID, read from
+    the last to the first (§17.8.1)."""
+    if not GUID.fullmatch(key):
+        raise ValueError(f"{key} is not a GUID as ST_Guid writes one")
+    return bytes.fromhex(key[1:-1].replace("-", ""))[::-1]
+
+
+def obfuscated(data: bytes, key: str) -> bytes:
+    """A font as a document embeds it (§17.8.1): its first 32 bytes XORed with the 16 bytes
+    of the key, twice over, and the rest as it is."""
+    k = font_key(key)
+    return bytes(b ^ k[i % 16] for i, b in enumerate(data[:32])) + data[32:]
+
+
+def font_part(n: int) -> str:
+    """The name of the nth embedded font's part under word/, as Word names it."""
+    return f"fonts/font{n}.odttf"
+
+
+EMBEDDED_MONO = EmbeddedFont(
+    "Liberation Mono",
+    "embedRegular",
+    # A fixed key, so that the bytes do not depend on the run; any GUID would do.
+    "{8A2F6C41-3B7D-4E95-A0C8-5D1F92E64B37}",
+    "tests/fonts/liberation/LiberationMono-Regular.ttf",
+    "SIL Open Font License 1.1",
+)
+EMBEDDED_WRAPPING = (
+    "Every character of this paragraph is drawn from the copy of Liberation Mono that the "
+    "document embeds, a monospaced face whose characters all advance 1229 of its 2048 units, "
+    "so the place where each of its lines ends shows the widths Word gives the embedded font."
+)
+EMBEDDED_CYRILLIC = "Съешь же ещё этих мягких французских булок, да выпей же чаю."
+EMBEDDED_GREEK = "Ξεσκεπάζω την ψυχοφθόρα βδελυγμία."
+
+
+def embedded_font() -> Doc:
+    font = EMBEDDED_MONO.name
+    fonts = " ".join(f'w:{slot}="{attr(font)}"' for slot in ("ascii", "hAnsi", "eastAsia", "cs"))
+
+    def label(n: int, value: str) -> str:
+        return para(run(f"Case {n:02d}: {font} {value}", font, 11), keep_next=True,
+                    space=spacing(before=12))
+
+    body = ""
+    for n, (size, fill) in enumerate(((11, GREY), (12, DARK_GREY)), 1):
+        values = [f"{font} {size} pt, line {k:02d}: Hamburgefonts gjpqy" for k in range(1, 11)]
+        body += label(n, f"{size} pt, single spacing, ten lines, shaded")
+        body += para(lines(values, font, size), shading=fill)
+    body += label(3, "11 pt, a paragraph that wraps") + para(run(EMBEDDED_WRAPPING, font, 11))
+    body += label(4, "11 pt, a Cyrillic line and a Greek line")
+    body += para(lines([EMBEDDED_CYRILLIC, EMBEDDED_GREEK], font, 11))
+    return Doc(
+        "E-embedded-font",
+        f"Whether Word draws text in a font it does not have installed from the copy the "
+        f"document embeds (ECMA-376 §17.8): {font} Regular as word/fonts/font1.odttf, "
+        "obfuscated with a fixed w:fontKey (§17.8.1), with w:embedTrueTypeFonts and without "
+        "w:saveSubsetFonts, so that a re-saved copy keeps the whole font; every run, style, "
+        f"default and theme font in {font}: ten lines at 11 pt and at 12 pt, a paragraph that "
+        "wraps, a line of Cyrillic and one of Greek",
+        body + para(run("End of the document.", font, 11)),
+        run_default_fonts=fonts,
+        theme=True,
+        theme_font=font,
+        embedded_fonts=(EMBEDDED_MONO,),
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -10467,6 +10577,7 @@ def documents() -> list[Doc]:
         whitespace_compat(),
         tab_leader_no_underscore(),
         *(theme_font_lang(*language) for language in THEME_LANGUAGES),
+        embedded_font(),
     ]
 
 
@@ -10539,11 +10650,12 @@ A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
 
 def theme_xml(overrides: tuple[tuple[str, str], ...] = (),
-              scripts: tuple[tuple[str, str], ...] = ()) -> str:
+              scripts: tuple[tuple[str, str], ...] = (), font: str = "") -> str:
     """A theme of this repository: the colours and fonts of THEME_COLORS and THEME_FONTS,
     but for the RGB colours of overrides, the fonts of scripts (Doc.theme_scripts) after
-    them in each collection, as CT_FontCollection orders them, and the smallest format
-    scheme the schema allows (three styles in each list)."""
+    them in each collection, as CT_FontCollection orders them, and, when font is given,
+    that font in every Latin and complex script slot, and the smallest format scheme the
+    schema allows (three styles in each list)."""
     scheme = dict(THEME_COLORS)
     scheme.update((name, f'<a:srgbClr val="{rgb}"/>') for name, rgb in overrides)
     colors = "".join(f"<a:{name}>{color}</a:{name}>" for name, color in scheme.items())
@@ -10551,10 +10663,10 @@ def theme_xml(overrides: tuple[tuple[str, str], ...] = (),
                            for script, typeface in scripts)
 
     def collection(kind: str) -> str:
-        latin = THEME_FONTS[kind]
+        latin = attr(font or THEME_FONTS[kind])
         return (
             f'<a:{kind}Font><a:latin typeface="{latin}"/><a:ea typeface="{THEME_FONTS["ea"]}"/>'
-            f'<a:cs typeface="{THEME_FONTS["cs"]}"/>{supplemental}</a:{kind}Font>'
+            f'<a:cs typeface="{attr(font or THEME_FONTS["cs"])}"/>{supplemental}</a:{kind}Font>'
         )
 
     fill = '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
@@ -10640,6 +10752,9 @@ def settings_xml(doc: Doc) -> str:
     return (
         f'<w:settings xmlns:w="{W_NS}">'
         '<w:zoom w:percent="100"/>'
+        # Fonts embedded whole: without w:saveSubsetFonts, which would let Word keep only the
+        # characters the document uses when it saves the document again.
+        + ("<w:embedTrueTypeFonts/>" if doc.embedded_fonts else "")
         + ("<w:mirrorMargins/>" if doc.mirror_margins else "")
         + '<w:defaultTabStop w:val="720"/>'
         + ("<w:evenAndOddHeaders/>" if doc.even_and_odd_headers else "")
@@ -10656,15 +10771,27 @@ def settings_xml(doc: Doc) -> str:
     )
 
 
-def font_table_xml(fonts: list[str]) -> str:
-    # The symbol font has the symbol character set (w:charset 02), as Word writes it for
-    # Symbol and Wingdings.
-    entries = "".join(
-        f'<w:font w:name="{attr(f)}"><w:charset w:val="02"/></w:font>' if f == SYMBOL_FONT
-        else f'<w:font w:name="{attr(f)}"/>'
-        for f in fonts
-    )
-    return f'<w:fonts xmlns:w="{W_NS}">{entries}</w:fonts>'
+def font_table_xml(fonts: list[str], embedded: tuple[EmbeddedFont, ...] = ()) -> str:
+    """The font table: one w:font per font. The symbol font has the symbol character set
+    (w:charset 02), as Word writes it for Symbol and Wingdings; the nth embedded font names
+    its part through the relationship rIdn of word/_rels/fontTable.xml.rels, which parts()
+    writes, and gives its w:fontKey, the faces of a font in the order of CT_Font."""
+    for font in embedded:
+        if font.name not in fonts:
+            raise ValueError(f"the embedded font {font.name} is not one the document names")
+
+    def entry(f: str) -> str:
+        children = '<w:charset w:val="02"/>' if f == SYMBOL_FONT else ""
+        faces = sorted(enumerate(embedded, 1), key=lambda e: list(FONT_FACES).index(e[1].face))
+        for n, font in faces:
+            if font.name == f:
+                children += f'<w:{font.face} r:id="rId{n}" w:fontKey="{font.key}"/>'
+        return f'<w:font w:name="{attr(f)}">{children}</w:font>' if children else (
+            f'<w:font w:name="{attr(f)}"/>')
+
+    entries = "".join(entry(f) for f in fonts)
+    r = f' xmlns:r="{R_NS}"' if embedded else ""
+    return f'<w:fonts xmlns:w="{W_NS}"{r}>{entries}</w:fonts>'
 
 
 def core_xml(doc: Doc) -> str:
@@ -10779,6 +10906,8 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         '<Default Extension="xml" ContentType="application/xml"/>'
         + "".join(f'<Default Extension="{ext}" ContentType="{MEDIA_TYPES[ext]}"/>'
                   for ext in dict.fromkeys(name.rsplit(".", 1)[1] for name, _ in doc.media))
+        + (f'<Default Extension="odttf" ContentType="{OBFUSCATED_FONT}"/>'
+           if doc.embedded_fonts else "")
         + "".join(f'<Override PartName="{p}" ContentType="{t}"/>' for p, t in overrides)
         + "</Types>"
     )
@@ -10796,13 +10925,13 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         ("word/document.xml", xml_part(document)),
         ("word/styles.xml", xml_part(styles_xml(doc))),
         ("word/settings.xml", xml_part(settings_xml(doc))),
-        ("word/fontTable.xml", xml_part(font_table_xml(fonts))),
+        ("word/fontTable.xml", xml_part(font_table_xml(fonts, doc.embedded_fonts))),
     ]
     if numbering:
         result.append(("word/numbering.xml", xml_part(numbering)))
     if doc.theme:
-        result.append(("word/theme/theme1.xml",
-                       xml_part(theme_xml(doc.theme_overrides, doc.theme_scripts))))
+        theme = theme_xml(doc.theme_overrides, doc.theme_scripts, doc.theme_font)
+        result.append(("word/theme/theme1.xml", xml_part(theme)))
     for name, root in doc.headers:
         result.append((f"word/{name}", xml_part(root)))
     for name, root in notes:
@@ -10814,8 +10943,13 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         rels = part_rels(doc, name, root)
         if rels:
             result.append((f"word/_rels/{name}.rels", xml_part(relationships(rels))))
+    if doc.embedded_fonts:
+        font_rels = [("font", font_part(n)) for n in range(1, len(doc.embedded_fonts) + 1)]
+        result.append(("word/_rels/fontTable.xml.rels", xml_part(relationships(font_rels))))
     xml_parts = list(result)
     result += [(f"word/media/{name}", data) for name, data in doc.media]
+    result += [(f"word/{font_part(n)}", obfuscated(font.data(), font.key))
+               for n, font in enumerate(doc.embedded_fonts, 1)]
     for name, data in xml_parts:
         try:
             minidom.parseString(data)
@@ -10841,9 +10975,15 @@ def stored_parts(path: Path) -> list[tuple[str, bytes]]:
 
 
 def sources_row(doc: Doc) -> str:
+    # A font the document embeds keeps its own license: the row names its file and SHA-256.
+    fonts = "".join(
+        f", but the font it embeds, {font.name} {FONT_FACES[font.face]} ({font.path}, "
+        f"SHA-256 {hashlib.sha256(font.data()).hexdigest()}): {font.license}"
+        for font in doc.embedded_fonts
+    )
     return (
         f"| word-rules/{doc.name}.docx | Written by scripts/make-rule-docs.py "
-        f"| BUSL-1.1 (this repository) | {doc.purpose} |"
+        f"| BUSL-1.1 (this repository){fonts} | {doc.purpose} |"
     )
 
 
