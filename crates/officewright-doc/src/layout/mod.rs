@@ -324,6 +324,7 @@ enum Once {
     TextBoxDash = 1 << 47,
     TextBoxTransparency = 1 << 48,
     TextBoxLineInside = 1 << 49,
+    WrapLeftOut = 1 << 50,
 }
 
 impl<'a> Translator<'a> {
@@ -456,6 +457,8 @@ impl<'a> Translator<'a> {
                         out.push(table.into());
                     }
                 }
+                // Bookmarks show nothing; the IR's marks for them come with #570.
+                Block::BookmarkStart(_) | Block::BookmarkEnd(_) => {}
                 Block::Other(other) => {
                     if !is_marker(other.local_name()) {
                         let name = other.local_name().to_owned();

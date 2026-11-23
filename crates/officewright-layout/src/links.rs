@@ -346,6 +346,38 @@ mod tests {
     }
 
     #[test]
+    fn links_given_one_target_draw_that_very_target_on_every_line() {
+        // Two links to one URI, the second over two lines, given one `Arc`: every box goes
+        // to that `Arc`, so the URI is kept once, however many links and lines (#612).
+        let site = Arc::new(uri("https://example.com/"));
+        let (_, layout) = laid(40.0, ParagraphProps::default(), |style, _| {
+            vec![
+                Inline::link_start(Arc::clone(&site)),
+                Inline::text("AA", style),
+                Inline::link_end(),
+                Inline::text(" ", style),
+                Inline::link_start(Arc::clone(&site)),
+                Inline::text("AAA AAA", style),
+                Inline::link_end(),
+            ]
+        });
+        let mut out = Vec::new();
+        let origin = Point {
+            x: Pt(0.0),
+            y: Pt(0.0),
+        };
+        paint(&layout.itemized, &layout.lines, 0..2, origin, &mut out);
+        let targets: Vec<bool> = out
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Link { target, .. } => Some(Arc::ptr_eq(target, &site)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(targets, [true, true, true]);
+    }
+
+    #[test]
     fn a_link_over_lines_takes_a_box_on_each_but_for_the_spaces_that_hang() {
         // 40 pt wide: "AAA AAA " on the first line, its last space hanging, "AAA" on the
         // second.

@@ -1068,3 +1068,522 @@ fn automatic_hyphenation_is_reported_where_a_line_wraps_from_part_to_part() {
         ["automatic hyphenation is not done: words are not hyphenated at the ends of lines"]
     );
 }
+
+#[test]
+fn objects_whose_effects_take_more_than_their_frames_keep_the_room_beside_them_small() {
+    use crate::wrap::MAX_EXCLUSIONS;
+
+    // As many pictures as a page wraps around, each 10 pt wide at 100 pt from the margin,
+    // from 120 to 130, 50 high, with effects of -20 pt at the left and right, which take
+    // more than its frame: each keeps text out of an empty band at its middle, 125. The
+    // lines beside them take both sides of it, 4 words from the margin and 5 from 125, 9 as
+    // in the column, and the room beside them stays two parts, not one for each way of
+    // taking a side of each.
+    let document = document(|style, document| {
+        let objects = (0..MAX_EXCLUSIONS)
+            .map(|_| {
+                let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
+                Inline::anchored(
+                    AnchoredObject::new(
+                        ObjectContent::Picture(Picture::new(image)),
+                        Size::new(Pt(10.0), Pt(50.0)),
+                        HorizontalAnchor::default()
+                            .with_relative_to(HorizontalReference::Margin)
+                            .with_placement(at(100.0)),
+                        VerticalAnchor::default()
+                            .with_relative_to(VerticalReference::Paragraph)
+                            .with_placement(VerticalPlacement::Offset(Pt(0.0))),
+                    )
+                    .with_wrap(Wrap::Square)
+                    .with_effect_extent(
+                        Insets::default().with_left(Pt(-20.0)).with_right(Pt(-20.0)),
+                    ),
+                )
+            })
+            .collect();
+        vec![paragraph(style, objects, 200)]
+    });
+    let (laid, _) = lay(&document);
+    let page = &laid.pages[0];
+    assert_eq!(page.exclusions.len(), MAX_EXCLUSIONS);
+    assert!(
+        page.exclusions
+            .iter()
+            .all(|exclusion| (exclusion.left, exclusion.right) == (125.0, 125.0))
+    );
+    // The parts of a line touch at the band, so they show in where its words start: the
+    // fifth at 125, where the part right of the band starts, not at 126.
+    let mut clusters: Vec<(f64, &str)> = Vec::new();
+    for item in page.items.iter().skip(page.frame_items) {
+        let DisplayItem::Glyphs(run) = item else {
+            continue;
+        };
+        if (run.origin.y.0 - 36.0).abs() < 1e-9 {
+            for cluster in &run.clusters {
+                let x = run.origin.x.0 + cluster.glyphs.first().map_or(0.0, |glyph| glyph.x.0);
+                clusters.push((x, &cluster.text));
+            }
+        }
+    }
+    clusters.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let starts: Vec<f64> = clusters
+        .iter()
+        .enumerate()
+        .filter(|&(index, &(_, text))| {
+            text != " " && (index == 0 || clusters.get(index - 1).is_some_and(|c| c.1 == " "))
+        })
+        .map(|(_, &(x, _))| x)
+        .collect();
+    assert_eq!(
+        starts,
+        [20.0, 46.5, 73.0, 99.5, 125.0, 151.5, 178.0, 204.5, 231.0]
+    );
+    assert_eq!(words_per_line(page).get(..4), Some(&[9, 9, 9, 9][..]));
+}
+
+#[test]
+fn lines_go_around_the_objects_that_their_page_draws_only() {
+    // Twelve lines of 9 words, the last of which anchors a picture: page 1 takes 8 lines,
+    // and the picture goes on to page 2 with its line, where it is drawn. Page 1's lines go
+    // around nothing; page 2's first three go around the picture, at the paragraph's top
+    // there, 5 words each, and the 21 words left take three lines from the margin.
+    let document = document(|style, document| {
+        let wrapping = Wrapping::square([10.0, 0.0, 10.0, 0.0]);
+        let object = picture(
+            document,
+            (100.0, 50.0),
+            at(0.0),
+            from_paragraph(0.0),
+            wrapping,
+        );
+        vec![
+            Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines([words(108, style), Inline::text(" ", style), object])
+                .into(),
+        ]
+    });
+    let (laid, report) = lay(&document);
+    let pages = &laid.pages;
+    assert_eq!(pages.len(), 2);
+    let pictures = |page: &Page| -> Vec<(f64, f64)> {
+        page.items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Image(image) => Some((image.at.x.0, image.at.y.0)),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(pictures(&pages[0]).is_empty());
+    assert!(pages[0].exclusions.is_empty());
+    assert_eq!(words_per_line(&pages[0]), [9; 8]);
+    assert!(lines(&pages[0]).iter().all(|&(x, _)| x == 20.0));
+    assert_eq!(pictures(&pages[1]), [(20.0, 20.0)]);
+    assert_eq!(
+        lines(&pages[1]),
+        [
+            (130.0, 36.0),
+            (130.0, 56.0),
+            (130.0, 76.0),
+            (20.0, 96.0),
+            (20.0, 116.0),
+            (20.0, 136.0)
+        ]
+    );
+    assert_eq!(words_per_line(&pages[1]), [5, 5, 5, 9, 9, 3]);
+    assert!(messages(&report).is_empty(), "{:?}", messages(&report));
+}
+
+#[test]
+fn a_line_whose_object_takes_the_whole_body_goes_below_it_on_the_page_that_draws_it() {
+    // A paragraph of one line, then one of 120 words that anchors, after its 20th word, in
+    // its third line, a picture as large as the body, wrapped top and bottom, placed from
+    // the margin. Page 1 takes the second paragraph's first two lines, from the margin, as
+    // the picture goes on with its line: its line starts page 2, which draws the picture,
+    // and goes below it, past the body, which is reported. The rest goes on from page 3 on,
+    // from the margin, around nothing.
+    let document = document(|style, document| {
+        let wrapping = Wrapping {
+            wrap: Wrap::TopAndBottom,
+            side: WrapSide::BothSides,
+            distances: [0.0; 4],
+        };
+        let object = picture(
+            document,
+            (260.0, 160.0),
+            at(0.0),
+            (VerticalReference::Margin, 0.0),
+            wrapping,
+        );
+        vec![
+            paragraph(style, Vec::new(), 1),
+            Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines([
+                    words(20, style),
+                    object,
+                    Inline::text(" ", style),
+                    words(100, style),
+                ])
+                .into(),
+        ]
+    });
+    let (laid, report) = lay(&document);
+    let pages = &laid.pages;
+    let drawn: Vec<usize> = pages
+        .iter()
+        .map(|page| {
+            page.items
+                .iter()
+                .filter(|item| matches!(item, DisplayItem::Image(_)))
+                .count()
+        })
+        .collect();
+    assert_eq!(drawn, [0, 1, 0, 0]);
+    assert_eq!(lines(&pages[0]), [(20.0, 36.0), (20.0, 56.0), (20.0, 76.0)]);
+    assert_eq!(words_per_line(&pages[0]), [1, 9, 9]);
+    assert_eq!(lines(&pages[1]), [(20.0, 196.0)]);
+    assert_eq!(words_per_line(&pages[2]), [9; 8]);
+    assert_eq!(words_per_line(&pages[3]), [9, 9, 3]);
+    assert!(pages[2].exclusions.is_empty() && pages[3].exclusions.is_empty());
+    let messages = messages(&report);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m == "a line is taller than the body of its page"),
+        "{messages:?}"
+    );
+}
+
+/// A picture 60 by 40 at the margin, 25 pt below its paragraph's top, wrapped top and
+/// bottom 5 pt above and below it: its band is from 40 to 90.
+fn below_the_first_line(document: &mut Document) -> Inline {
+    let wrapping = Wrapping {
+        wrap: Wrap::TopAndBottom,
+        side: WrapSide::BothSides,
+        distances: [9.0, 5.0, 9.0, 5.0],
+    };
+    picture(
+        document,
+        (60.0, 40.0),
+        at(0.0),
+        from_paragraph(25.0),
+        wrapping,
+    )
+}
+
+#[test]
+fn a_page_takes_the_lines_that_fit_with_the_room_above_them() {
+    // The second line goes below the band, from 90; with the room it leaves above it, the
+    // page takes five lines, the last from 160 to 180, and the rest go on to page 2.
+    let document = document(|style, document| {
+        let object = below_the_first_line(document);
+        vec![paragraph(style, vec![object], 180)]
+    });
+    let (laid, _) = lay(&document);
+    let baselines: Vec<f64> = lines(&laid.pages[0]).iter().map(|line| line.1).collect();
+    assert_eq!(baselines, [36.0, 106.0, 126.0, 146.0, 166.0]);
+    assert_eq!(words_per_line(&laid.pages[0]), [9; 5]);
+}
+
+#[test]
+fn shading_and_bar_tabs_reach_through_the_room_above_a_line() {
+    use crate::ir::{ColorValue, Shading, TabKind, TabStop};
+    use officewright_core::Color;
+
+    // A shaded paragraph with a bar tab, whose second line goes below the band, from 90:
+    // its lines are from 20 to 130, and so are the shading and the bar, through the room
+    // above the second line too (a hypothesis).
+    let document = document(|style, document| {
+        let object = below_the_first_line(document);
+        let props = exact()
+            .with_shading(Some(
+                Shading::default().with_fill(ColorValue::Rgb(Color::BLACK)),
+            ))
+            .with_tabs([TabStop::default()
+                .with_position(Pt(200.0))
+                .with_kind(TabKind::Bar)]);
+        vec![
+            Paragraph::new(style)
+                .with_props(props)
+                .with_inlines([object, words(20, style)])
+                .into(),
+        ]
+    });
+    let (laid, _) = lay(&document);
+    let page = &laid.pages[0];
+    assert_eq!(lines(page).len(), 3);
+    let shading: Vec<(f64, f64)> = page
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            DisplayItem::Rect { at, height, .. } => Some((at.y.0, at.y.0 + height.0)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shading, [(20.0, 130.0)]);
+    let bars: Vec<(f64, f64)> = page
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            DisplayItem::Line(line) => Some((line.from.y.0, line.to.y.0)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bars, [(20.0, 130.0)]);
+}
+
+#[test]
+fn the_notes_of_a_line_below_an_object_take_the_room_left_under_it() {
+    use crate::ir::{Note, NoteKind};
+
+    // A picture 90 high in its place leaves the second line from 140 to 160, and its note
+    // no room to start under it: in Word 2013 and later, the line goes on to page 2 with
+    // its note.
+    let settings =
+        crate::ir::DocumentSettings::default().with_compat_mode(crate::ir::CompatMode::Word2013);
+    let mut document = Document::new(settings);
+    let style = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Officewright Test"))
+            .with_size(Pt(10.0)),
+    );
+    let wrapping = Wrapping {
+        wrap: Wrap::TopAndBottom,
+        side: WrapSide::BothSides,
+        distances: [9.0, 5.0, 9.0, 5.0],
+    };
+    let object = picture(
+        &mut document,
+        (60.0, 90.0),
+        at(0.0),
+        from_paragraph(25.0),
+        wrapping,
+    );
+    let note = document.add_note(Note::new(
+        NoteKind::Footnote,
+        [Paragraph::new(style)
+            .with_props(exact())
+            .with_inlines([words(18, style)])
+            .into()],
+    ));
+    let block = Paragraph::new(style)
+        .with_props(exact().with_widow_control(false))
+        .with_inlines([
+            object,
+            Inline::text(["AAAA"; 10].join(" "), style),
+            Inline::note_reference(note, false, style),
+            Inline::text(" AAAA", style),
+        ])
+        .into();
+    document.add_section(Section::new(setup()).with_blocks(vec![block]));
+    let (laid, _) = lay(&document);
+    let per_page: Vec<(Vec<f64>, Vec<usize>)> = laid
+        .pages
+        .iter()
+        .map(|page| {
+            let baselines = lines(page).iter().map(|line| line.1).collect();
+            (baselines, words_per_line(page))
+        })
+        .collect();
+    assert_eq!(
+        per_page,
+        [
+            (vec![36.0], vec![9]),
+            (vec![36.0, 156.0, 176.0], vec![2, 9, 9])
+        ]
+    );
+
+    // The second line goes below the band, from 90 to 110, and references a note of four
+    // lines, 80 pt and its separator: the 70 pt between the bottom of that line and of the
+    // body hold its first two lines only, at 140 and 160, and the other two go on at the
+    // foot of page 2, under the rest of the paragraph.
+    let document = self::document(|style, document| {
+        let object = below_the_first_line(document);
+        let note = document.add_note(Note::new(
+            NoteKind::Footnote,
+            [Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines([words(36, style)])
+                .into()],
+        ));
+        vec![
+            Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines([
+                    object,
+                    Inline::text(["AAAA"; 10].join(" "), style),
+                    Inline::note_reference(note, false, style),
+                    Inline::text(" ".to_owned() + &["AAAA"; 20].join(" "), style),
+                ])
+                .into(),
+        ]
+    });
+    let (laid, _) = lay(&document);
+    let per_page: Vec<(Vec<f64>, Vec<usize>)> = laid
+        .pages
+        .iter()
+        .map(|page| {
+            let baselines = lines(page).iter().map(|line| line.1).collect();
+            (baselines, words_per_line(page))
+        })
+        .collect();
+    assert_eq!(
+        per_page,
+        [
+            (vec![36.0, 106.0, 156.0, 176.0], vec![9, 9, 9, 9]),
+            (vec![36.0, 56.0, 156.0, 176.0], vec![9, 3, 9, 9])
+        ]
+    );
+}
+
+#[test]
+fn an_object_that_going_around_it_would_take_to_the_next_page_is_reported() {
+    // Seven lines fill page 1 down to 160; the last line there is the first of a paragraph
+    // without widow control that anchors a picture after its sixth word. Going around the
+    // picture, the line takes 5 words, and the picture goes on to page 2 with the sixth;
+    // without it, the line takes 9 words, the picture among them. It stays there, drawn
+    // at the paragraph's top over the line, and that is reported.
+    let document = document(|style, document| {
+        let mut blocks: Vec<Block> = (0..7).map(|_| paragraph(style, Vec::new(), 1)).collect();
+        let wrapping = Wrapping::square([10.0, 0.0, 10.0, 0.0]);
+        let object = picture(
+            document,
+            (100.0, 50.0),
+            at(0.0),
+            from_paragraph(0.0),
+            wrapping,
+        );
+        blocks.push(
+            Paragraph::new(style)
+                .with_props(exact().with_widow_control(false))
+                .with_inlines([
+                    words(6, style),
+                    object,
+                    Inline::text(" ".to_owned() + &["AAAA"; 14].join(" "), style),
+                ])
+                .into(),
+        );
+        blocks
+    });
+    let (laid, report) = lay(&document);
+    let page = &laid.pages[0];
+    assert_eq!(lines(page).last(), Some(&(20.0, 176.0)));
+    assert_eq!(words_per_line(page).last(), Some(&9));
+    let pictures: Vec<(f64, f64)> = page
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            DisplayItem::Image(image) => Some((image.at.x.0, image.at.y.0)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pictures, [(20.0, 160.0)]);
+    let messages = messages(&report);
+    let reported = "a line does not go around a floating object it holds where going around it \
+                    would take the object to the next page: it runs over or under it";
+    assert!(messages.iter().any(|m| m == reported), "{messages:?}");
+}
+
+/// Six paragraphs of one word fill page 1 down to 140; then a paragraph of `count` words,
+/// kept together and with widow control as `rules` say, that anchors a picture of 100 by 50
+/// wrapped square, 10 pt from the text, at its top, after its 12th word. Each page's lines,
+/// by where they start, their words, and the pictures it draws.
+///
+/// Beside the picture, the paragraph's two lines on page 1 leave the picture to the third,
+/// on page 2; without it, the second holds it, which page 1 then takes no line from: of the
+/// paragraph it may take the first line alone, laid out without the picture.
+fn keeping((keep_lines, widow_control): (bool, bool), count: usize) -> Vec<Drawn> {
+    let document = document(|style, document| {
+        let mut blocks: Vec<Block> = (0..6).map(|_| paragraph(style, Vec::new(), 1)).collect();
+        let wrapping = Wrapping::square([10.0, 0.0, 10.0, 0.0]);
+        let object = picture(
+            document,
+            (100.0, 50.0),
+            at(0.0),
+            from_paragraph(0.0),
+            wrapping,
+        );
+        let props = exact()
+            .with_keep_lines(keep_lines)
+            .with_widow_control(widow_control);
+        let rest = " ".to_owned() + &vec!["AAAA"; count.saturating_sub(12)].join(" ");
+        blocks.push(
+            Paragraph::new(style)
+                .with_props(props)
+                .with_inlines([words(12, style), object, Inline::text(rest, style)])
+                .into(),
+        );
+        blocks
+    });
+    let (laid, _) = lay(&document);
+    laid.pages
+        .iter()
+        .map(|page| {
+            let starts = lines(page).iter().map(|line| line.0).collect();
+            let pictures = page
+                .items
+                .iter()
+                .filter(|item| matches!(item, DisplayItem::Image(_)))
+                .count();
+            (starts, words_per_line(page), pictures)
+        })
+        .collect()
+}
+
+/// A page's lines by where they start, their words, and the pictures it draws.
+type Drawn = (Vec<f64>, Vec<usize>, usize);
+
+/// Page 1 of [`keeping`] when it takes none of the paragraph.
+fn ones() -> Drawn {
+    (vec![20.0; 6], vec![1; 6], 0)
+}
+
+/// A page of [`keeping`] with the paragraph's lines from its top, `words` in each, around
+/// the picture: three lines beside it, from 130, the rest from the margin.
+fn around(words: Vec<usize>) -> Drawn {
+    let starts = [130.0, 130.0, 130.0, 20.0, 20.0];
+    (starts[..words.len()].to_vec(), words, 1)
+}
+
+#[test]
+fn a_paragraph_kept_together_goes_on_whole_where_an_object_is_left_out() {
+    // Kept together, the paragraph does not split there but goes on whole to page 2,
+    // around the picture there: 27 words in lines of 5, 5 and 5 beside it, then 9 and 3.
+    let moved = vec![ones(), around(vec![5, 5, 5, 9, 3])];
+    assert_eq!(keeping((true, false), 27), moved);
+    assert_eq!(keeping((true, true), 27), moved);
+}
+
+#[test]
+fn widow_control_leaves_no_line_alone_where_an_object_is_left_out() {
+    // With widow control, which leaves no line alone at the foot of a page, the paragraph
+    // goes on whole to page 2 too.
+    assert_eq!(
+        keeping((false, true), 27),
+        [ones(), around(vec![5, 5, 5, 9, 3])]
+    );
+}
+
+#[test]
+fn a_short_paragraph_kept_together_goes_on_whole_where_an_object_is_left_out() {
+    // 18 words, 12 before the picture and 6 after it: whole on page 2, in 5, 5, 5 and 3.
+    let moved = vec![ones(), around(vec![5, 5, 5, 3])];
+    assert_eq!(keeping((true, true), 18), moved);
+    assert_eq!(keeping((false, true), 18), moved);
+}
+
+#[test]
+fn a_paragraph_that_may_split_takes_no_line_from_an_object_left_out_on() {
+    // Neither kept together nor with widow control, the paragraph splits before the line
+    // of the picture: page 1 takes its first line, 9 words in the whole column, and draws
+    // no picture; page 2 the rest around the picture, which it draws.
+    let (mut starts, mut words, _) = ones();
+    starts.push(20.0);
+    words.push(9);
+    assert_eq!(
+        keeping((false, false), 27),
+        [(starts, words, 0), around(vec![5, 5, 5, 3])]
+    );
+}

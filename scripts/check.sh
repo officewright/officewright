@@ -53,6 +53,7 @@ linux)
 	need pdffonts "apt install poppler-utils"
 	need pdftoppm "apt install poppler-utils"
 	need pdfinfo "apt install poppler-utils"
+	need pdftohtml "apt install poppler-utils"
 	need cc "apt install gcc"
 	need c++ "apt install g++"
 	need nm "apt install binutils"
@@ -64,6 +65,7 @@ macos)
 	need pdffonts "brew install poppler"
 	need pdftoppm "brew install poppler"
 	need pdfinfo "brew install poppler"
+	need pdftohtml "brew install poppler"
 	need cc "xcode-select --install"
 	need c++ "xcode-select --install"
 	need nm "xcode-select --install"
@@ -221,7 +223,7 @@ scripts/check-capi.sh target/capi
 # The PDF bytes do not depend on the platform (the golden snapshot test checks them on
 # every OS), and Windows has no official poppler build, so this runs on Linux and macOS.
 if [ "$os" != windows ]; then
-	step "PDF output (qpdf, pdftotext, pdffonts, pdfimages, pdftoppm, pdfinfo)"
+	step "PDF output (qpdf, pdftotext, pdffonts, pdfimages, pdftoppm, pdfinfo, pdftohtml)"
 	cargo build -p officewright-cli
 	cargo build -p officewright-pdf --example primitives --example images --example embed_report \
 		--example synthetic --example links
@@ -233,8 +235,9 @@ if [ "$os" != windows ]; then
 		OW_EMBED_REPORT=${CARGO_TARGET_DIR:-target}/debug/examples/embed_report \
 		"$python" -B -m unittest discover -s tests/pdf-output -v
 
-	step "reference font embedding (qpdf, pdffonts, pdftoppm)"
-	# corpus-import.py embeds the fonts Word did not embed before rasterizing its PDFs.
+	step "reference font embedding and links (qpdf, pdffonts, pdftoppm)"
+	# corpus-import.py embeds the fonts Word did not embed before rasterizing its PDFs, and
+	# reads their links from qpdf's JSON.
 	"$python" -B -m unittest discover -s tests/corpus-tools/poppler -v
 fi
 

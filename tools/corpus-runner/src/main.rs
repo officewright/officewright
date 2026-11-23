@@ -61,6 +61,8 @@
 
 mod align;
 mod child;
+mod content;
+mod features;
 mod gate;
 mod geometry;
 mod metrics;
@@ -192,6 +194,9 @@ fn gate(args: &[String]) -> ExitCode {
             }
         }
         None => println!("{}\n", gate::census(&branch, same_fonts)),
+    }
+    for line in gate::findings(&branch) {
+        println!("{line}\n");
     }
     print!("{}", gate::table(&measures, before.as_deref()));
     if gate::passes(&measures) {

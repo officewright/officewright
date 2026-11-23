@@ -1,11 +1,13 @@
 """Checks the PDF that officewright-pdf's example `links` writes: links to a URI and to
-named destinations on three pages, and 156 named destinations, more than one node of the
-name tree holds, among them names whose UTF-8 forms sort otherwise than their keys. With
-tools that share no code with it:
+named destinations on three pages, the link to the URI with a box on two pages, and 156
+named destinations, more than one node of the name tree holds, among them names whose UTF-8
+forms sort otherwise than their keys. With tools that share no code with it:
 
 - qpdf validates the file structure, and its JSON gives each page's link annotations and
   the name tree, which this test walks to find the page of each link's destination;
-- pdfinfo lists the named destinations with their pages and positions.
+- pdfinfo lists the named destinations with their pages and positions;
+- pdftohtml follows each link, as a reader does, to its URI or the page of its
+  destination.
 
 OW_LINKS must point at the example's binary (scripts/check.sh sets it).
 """
@@ -42,6 +44,7 @@ LINKS = [
     [
         ([300, 400, 400, 420], ("dest", "Глава")),
         ([300, 300, 400, 320], ("dest", "Start")),
+        ([300, 200, 400, 220], ("uri", "https://example.com/a%20b/(%D0%96)")),
     ],
 ]
 
@@ -90,6 +93,8 @@ class LinksTest(unittest.TestCase):
 
     def test_each_page_has_its_links(self):
         self.assertEqual(len(self.pages), 3)
+        # The action object of each target, which every link to it shares.
+        actions = {}
         for number, (page, expected) in enumerate(zip(self.pages, LINKS), 1):
             annotations = self.resolve(page).get("/Annots", [])
             links = []
@@ -100,12 +105,16 @@ class LinksTest(unittest.TestCase):
                 self.assertEqual((link["/Type"], link["/Subtype"]), ("/Annot", "/Link"))
                 # No border: the link shows as what the page draws.
                 self.assertEqual(link["/Border"], [0, 0, 0])
-                if "/A" in link:
-                    self.assertNotIn("/Dest", link)
-                    self.assertEqual(link["/A"]["/S"], "/URI")
-                    target = ("uri", text(link["/A"]["/URI"]))
+                # The action is an object of its own: a URI, or a destination by name.
+                self.assertNotIn("/Dest", link)
+                self.assertRegex(link["/A"], r"^\d+ 0 R$")
+                action = self.resolve(link["/A"])
+                if action["/S"] == "/URI":
+                    target = ("uri", text(action["/URI"]))
                 else:
-                    target = ("dest", text(link["/Dest"]))
+                    self.assertEqual(action["/S"], "/GoTo")
+                    target = ("dest", text(action["/D"]))
+                self.assertEqual(actions.setdefault(target, link["/A"]), link["/A"], target)
                 links.append((link["/Rect"], target))
             expected = [(rect, (kind, key(name) if kind == "dest" else name)) for rect, (kind, name) in expected]
             self.assertEqual(links, expected, f"page {number}")
@@ -147,6 +156,24 @@ class LinksTest(unittest.TestCase):
             for _, (kind, name) in links:
                 if kind == "dest":
                     self.assertIn(key(name), found)
+
+    def test_poppler_follows_each_link(self):
+        xml = run(["pdftohtml", "-xml", "-i", "-stdout", str(self.pdf)]).stdout.decode("utf-8")
+        found = []
+        page = 0
+        for match in re.finditer(r'<page number="(\d+)"|<a href="([^"]*)">', xml):
+            if match.group(1):
+                page = int(match.group(1))
+                continue
+            href = match.group(2)
+            internal = re.fullmatch(r".*#(\d+)", href)
+            found.append((page, ("page", int(internal.group(1))) if internal else ("uri", href)))
+        expected = [
+            (number, ("page", DESTINATIONS[name][0]) if kind == "dest" else ("uri", name))
+            for number, links in enumerate(LINKS, 1)
+            for _, (kind, name) in links
+        ]
+        self.assertEqual(found, expected)
 
     def test_pdfinfo_lists_every_destination(self):
         lines = run(["pdfinfo", "-dests", str(self.pdf)]).stdout.decode("utf-8").splitlines()

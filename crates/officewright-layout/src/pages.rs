@@ -396,14 +396,6 @@ fn report_note_numbers(notes: &NoteNumbers, fonts: &mut Fonts<'_>) {
             );
         }
     }
-    if notes.each_page {
-        fonts.report_once(
-            ReportKind::FeatureUnsupported,
-            &Location::default(),
-            "note numbers that start again on each page are numbered through the section"
-                .to_owned(),
-        );
-    }
 }
 
 /// [`paginate_into`], with headers and footers drawing at most `max_frame_drawn` in all,
@@ -439,7 +431,7 @@ fn paginate_wrapping<S: PageSink>(
     mut sink: impl FnMut() -> S,
 ) -> Result<Laid<S>> {
     let flow = flow(document, fonts)?;
-    let notes = Arc::new(NoteNumbers::new(document));
+    let mut notes = Arc::new(NoteNumbers::new(document));
     report_note_numbers(&notes, fonts);
     // `NUMPAGES` and `SECTIONPAGES` depend on the layout they are part of: each pass lays
     // out with the counts the one before found, until they agree.
@@ -459,6 +451,7 @@ fn paginate_wrapping<S: PageSink>(
             sink: sink(),
             taken: 0,
             taken_by_section: vec![0; document.sections().len()],
+            flow_sections: flow.iter().map(|flowed| flowed.section).collect(),
             keep_from: usize::MAX,
             most_held: 0,
             layouts_held: 0,
@@ -485,6 +478,7 @@ fn paginate_wrapping<S: PageSink>(
             note_layouts: HashMap::new(),
             specials: HashMap::new(),
             pending: Vec::new(),
+            noted: Vec::new(),
         };
         let lines = pager.run(&flow)?;
         if pager.page_count() == 0 {
@@ -492,8 +486,12 @@ fn paginate_wrapping<S: PageSink>(
         }
         pager.hand_on(usize::MAX)?;
         let found = Totals::of(pager.taken, &pager.taken_by_section, document);
-        if !counted || found == totals || pass == MAX_PASSES {
-            if counted && found != totals {
+        // Notes numbered again on each page take the numbers of the pages this pass put
+        // their references on.
+        let renumbered = notes.by_page(&pager.noted);
+        let counts_settled = !counted || found == totals;
+        if (counts_settled && renumbered.is_none()) || pass == MAX_PASSES {
+            if !counts_settled {
                 pager.fonts.report_once(
                     ReportKind::FieldCached,
                     &Location::default(),
@@ -501,6 +499,25 @@ fn paginate_wrapping<S: PageSink>(
                         "the number of pages changed in each of {MAX_PASSES} layouts; NUMPAGES \
                          and SECTIONPAGES show the count of the one before the last"
                     ),
+                );
+            }
+            if renumbered.is_some() {
+                pager.fonts.report_once(
+                    ReportKind::FeatureUnsupported,
+                    &Location::default(),
+                    format!(
+                        "the numbers of notes that start again on each page changed in each of \
+                         {MAX_PASSES} layouts; they show those of the one before the last"
+                    ),
+                );
+            }
+            if notes.unplaced(&pager.noted) {
+                pager.fonts.report_once(
+                    ReportKind::FeatureUnsupported,
+                    &Location::default(),
+                    "notes that start their numbers again on each page but that no page lays \
+                     out are numbered through their section"
+                        .to_owned(),
                 );
             }
             return Ok(Laid {
@@ -515,6 +532,9 @@ fn paginate_wrapping<S: PageSink>(
             });
         }
         totals = found;
+        if let Some(renumbered) = renumbered {
+            notes = Arc::new(renumbered);
+        }
         pass += 1;
     }
 }
@@ -534,9 +554,11 @@ struct Totals {
 impl Totals {
     /// The counts of a document of `pages` pages, `by_section` of them in each section of
     /// `document`: all of them, but one less when the first section has a title page and
-    /// numbers its pages from 0 (MS-OI29500 2.1.489 a). A section counts the blank page of
-    /// its odd or even start, and not the page it starts on when it is continuous:
-    /// hypotheses until Word shows them (#298, `E-section-continuous-headers.docx`).
+    /// numbers its pages from 0 (MS-OI29500 2.1.489 a). A section counts the page it starts
+    /// on when it is continuous, as the section before does (Word's render of
+    /// `E-section-continuous-title.docx`; that a section whose first text goes on to the
+    /// next page starts there is a hypothesis, see `add_page`), and the blank page of its
+    /// odd or even start, a hypothesis until Word shows it (#298).
     fn of(pages: usize, by_section: &[u32], document: &Document) -> Self {
         let count = |section: usize| by_section.get(section).copied().unwrap_or(0);
         let all = u32::try_from(pages).unwrap_or(u32::MAX);
@@ -966,6 +988,8 @@ struct Pager<'d, 'f, 'b, S> {
     /// How many pages went to the sink, of each section.
     taken: usize,
     taken_by_section: Vec<u32>,
+    /// The section of each paragraph and table of the flow, by its place in it.
+    flow_sections: Vec<usize>,
     /// The first page that going back to a checkpoint could still change: where a chain
     /// of paragraphs kept with the next one starts while the chain can still move (it
     /// does not start at the top of a page), where the last piece of the paragraph before
@@ -1028,6 +1052,9 @@ struct Pager<'d, 'f, 'b, S> {
     specials: Specials<'d>,
     /// What of the footnotes of the last page that is not blank goes on to the next.
     pending: Vec<Waiting<'d>>,
+    /// The notes whose references each page handed on holds, in order: what numbers the
+    /// notes the next pass numbers again on each page.
+    noted: Vec<Vec<crate::ir::NoteId>>,
 }
 
 /// Which header or footer: its section, whether it is the header, and its kind.
@@ -1081,7 +1108,14 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     break;
                 };
                 if self.start_section(next, section, pending_break)? {
-                    kept_top = true;
+                    // Word 2013 and later keep the space above the first paragraph of a
+                    // section that starts a page (`E-space-before-top.docx`, mode 15);
+                    // Word 2010 drops it, as at the top of any other page
+                    // (contract-ec-data-processing-clauses-el, mode 14: the first
+                    // paragraph after its cover's next-page section break sits at the
+                    // top margin). Modes 11 and 12 as mode 14: a hypothesis until Word
+                    // renders them.
+                    kept_top = self.document.settings().compat_mode() >= CompatMode::Word2013;
                     broke_page = true;
                     pending_break = false;
                 }
@@ -1441,7 +1475,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// section of the same page setup, unless a page break (`after_break`) ended the
     /// paragraph before. Returns whether it started a new page. The current page keeps
     /// the section it started in: a continuous section's headers and footers apply from
-    /// its next page (hypothesis, `E-section-continuous-headers.docx`).
+    /// its next page, as Word's renders of `E-section-continuous-headers.docx` and
+    /// `E-section-continuous-title.docx` show.
     fn start_section(
         &mut self,
         index: usize,
@@ -1584,8 +1619,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             let bare = empty && !self.holds_continued_notes();
             // Space above: between this paragraph and the one above it on the page, or
             // its own below a table; at the top of a page only at the start of the
-            // document or of a section. Word's render of `E-space-before-top.docx`:
-            // dropped after flowing and after page breaks alike.
+            // document, or of a section in mode 15 (`keeps_space`). Word's render of
+            // `E-space-before-top.docx`: dropped after flowing and after page breaks alike.
             let gap = if first > 0 {
                 0.0
             } else if let Some(above) = self.above.filter(|_| !empty).and_then(|i| flow.get(i)) {
@@ -1624,24 +1659,73 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             );
             // Floating objects are positioned from the paragraph's top (`float_position`).
             let space = space_laid_above(self.document, neighbours.0, props, top - self.cursor);
-            self.wrap(
-                flowed,
-                (paragraph, label),
-                (layout, laid_for),
-                first,
-                (top, space),
-            );
+            // The lines go around the objects of the lines that stay on the page, those the
+            // page draws (`Painting::float`), and those of line `first` whatever happens to
+            // it: where one they went around goes on to a later page with its line, they are
+            // laid out again without it and those after it, and where one they did not go
+            // around would stay, the page takes no line from its line on, and of the lines
+            // before it what keeping together and widow control let it (`lines_taken`).
+            // Each round leaves out an object more, so the rounds end.
+            let mut limit = None;
+            let (fit, breaks, rest, taken) = loop {
+                self.wrap(
+                    flowed,
+                    (paragraph, label),
+                    (layout, laid_for),
+                    first,
+                    (top, space, limit),
+                );
+                let rest = layout.lines.len().saturating_sub(first);
+                if rest == 0 {
+                    return Ok((first_page.unwrap_or(here), false));
+                }
+                let (mut fit, mut breaks) =
+                    self.fitting_with_notes((flowed.section, paragraph), layout, first, top)?;
+                if let Some(cut) = cut.filter(|&cut| first < cut && first + fit > cut) {
+                    (fit, breaks) = (cut - first, true);
+                }
+                let left_out = limit.and_then(|limit| {
+                    wrapping_objects(layout, paragraph, first + 1)
+                        .find(|&(_, item)| item >= limit)
+                        .map(|(line, _)| line)
+                });
+                // The lines before it fit, the last of them ending in no break: a break the
+                // lines that fit end in comes at or after its line.
+                if let Some(line) = left_out.filter(|&line| first + fit > line) {
+                    (fit, breaks) = (line - first, false);
+                }
+                let taken = lines_taken(
+                    (fit, breaks, rest),
+                    (first, keep_lines, widow_control, bare),
+                );
+                // The objects of line `first` stay with it: it is the first the page may take.
+                let gone = wrapping_objects(layout, paragraph, first + taken.max(1))
+                    .map(|(_, item)| item)
+                    .find(|&item| limit.is_none_or(|limit| item < limit));
+                match gone {
+                    Some(item) => limit = Some(item),
+                    None => break (fit, breaks, rest, taken),
+                }
+            };
+            // An object left out can come back to the page's first line, as the text goes on
+            // without it: that line takes it to the next page where it goes around it, and
+            // back where it does not. It stays, the line not going around it.
+            let back = limit.is_some_and(|limit| {
+                wrapping_objects(layout, paragraph, first)
+                    .take_while(|&(line, _)| line < first + taken)
+                    .any(|(_, item)| item >= limit)
+            });
+            if back {
+                self.fonts.report_once(
+                    ReportKind::FeatureUnsupported,
+                    &flowed.location,
+                    "a line does not go around a floating object it holds where going around it \
+                     would take the object to the next page: it runs over or under it"
+                        .to_owned(),
+                );
+            }
             let lines = &layout.lines;
             let count = lines.len();
-            let rest = count.saturating_sub(first);
-            if rest == 0 {
-                return Ok((first_page.unwrap_or(here), false));
-            }
-            let (mut fit, mut breaks) =
-                self.fitting_with_notes((flowed.section, paragraph), layout, first, top)?;
-            if let Some(cut) = cut.filter(|&cut| first < cut && first + fit > cut) {
-                (fit, breaks) = (cut - first, true);
-            }
             if fit == rest || (breaks && fit > 0) {
                 self.put(
                     index,
@@ -1665,39 +1749,22 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 self.new_page(flowed.section, &section)?;
                 continue;
             }
-            // The paragraph does not fit: split it, or move it. One kept on one page that is
-            // taller than a page moves to a new page all the same, and is split there.
-            // Hypothesis until a Word render (`E-keeplines-long.docx`).
-            if first == 0 && keep_lines && !bare {
+            // The paragraph does not fit: split it, or move it (`lines_taken`).
+            let take = lines_taken(
+                (fit, breaks, rest),
+                (first, keep_lines, widow_control, bare),
+            );
+            if take == 0 {
                 self.new_page(flowed.section, &section)?;
                 continue;
             }
-            let mut take = fit;
-            if widow_control {
-                // At least two lines at the bottom of a page and at the top of the next.
-                if rest - take < 2 {
-                    take = rest.saturating_sub(2);
-                }
-                let least = if first == 0 { 2 } else { 1 };
-                if take < least {
-                    take = 0;
-                }
-            }
-            if take == 0 {
-                if !bare {
-                    self.new_page(flowed.section, &section)?;
-                    continue;
-                }
-                // Nothing moves it further: the lines that fit, at least one, and of its
-                // footnotes what fits, the rest on the next page.
-                take = fit.max(1);
-                if fit == 0 && fitting(lines, first, top, bottom).0 == 0 {
-                    self.fonts.report_once(
-                        ReportKind::Overflow,
-                        &flowed.location,
-                        "a line is taller than the body of its page".to_owned(),
-                    );
-                }
+            // Nothing moved it further, and no line fits: the first, all the same.
+            if fit == 0 && fitting(lines, first, top, bottom).0 == 0 {
+                self.fonts.report_once(
+                    ReportKind::Overflow,
+                    &flowed.location,
+                    "a line is taller than the body of its page".to_owned(),
+                );
             }
             self.put(
                 index,
@@ -1719,9 +1786,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// numbered `laid_for`, again from line `first` on, where they go around floating
     /// objects on the current page, from `top` down, `space` below the paragraph's top: the
     /// objects of the paragraphs above on the page, and those the paragraph anchors in
-    /// these lines, positioned from its top (`float_position`). Its lines before `first`
-    /// stay as they are. A layout whose lines from `first` on meet none of them, and went
-    /// around none where they were placed before, stays as it is: a document without
+    /// these lines, positioned from its top (`float_position`), but for those of its items
+    /// from `limit` on, if any, after line `first` (see `Pager::place`). Its lines before
+    /// `first` stay as they are. A layout whose lines from `first` on meet none of them, and
+    /// went around none where they were placed before, stays as it is: a document without
     /// floating objects that text wraps around is laid out as without this.
     ///
     /// An object positioned from its line, or across from its character, is not where
@@ -1734,7 +1802,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         (paragraph, label): (&Paragraph, Option<&Label>),
         (layout, laid_for): (&mut ParagraphLayout, u32),
         first: usize,
-        (top, space): (f64, f64),
+        (top, space, limit): (f64, f64, Option<usize>),
     ) {
         let Some(page) = self.pages.last() else {
             return;
@@ -1756,15 +1824,15 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let mut guessed = false;
         // Past the most a page wraps around, the paragraph's own objects are left out.
         let mut left_out = false;
-        for line in layout.lines.iter().skip(first) {
+        for (index, line) in layout.lines.iter().enumerate().skip(first) {
             for piece in &line.pieces {
                 let PieceKind::Object { item, height: None } = piece.kind else {
                     continue;
                 };
-                let Some(Item::Anchored(path)) = layout.itemized.items.get(item) else {
+                if index > first && limit.is_some_and(|limit| item >= limit) {
                     continue;
-                };
-                let Some(Inline::Anchored(object)) = inline_at(paragraph.inlines(), path) else {
+                }
+                let Some(object) = anchored(layout, paragraph, item) else {
                     continue;
                 };
                 if object.wrap() == Wrap::None {
@@ -2432,18 +2500,23 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let mut items = Vec::new();
         let mut floats = Vec::new();
         if let Some(ir) = self.document.sections().get(section).filter(|_| !blank) {
-            // The section's first page is the first of its own: a continuous section starts
-            // on a page that keeps the section before, so its title-page header is on its
-            // second. Hypothesis until a Word render (`E-section-continuous-headers.docx`).
-            // The sink takes no page before a later one is made, so the last page is held:
-            // a page that is not blank, or a blank one that an odd or even section start put
-            // before that section's first page, after a page of another section.
+            // The section's first page is the one it starts on, also when it is continuous
+            // and starts on a page that keeps the header of the section before: Word's
+            // render of `E-section-continuous-title.docx` gives the page after that one the
+            // section's default header, not its title page's. A continuous section starts on
+            // the page that holds its first text, so that one whose first text goes on to the
+            // next page (a keep chain that moves, widow control, a page break before its
+            // first paragraph) starts there: a hypothesis until a Word render, which might
+            // count the page that holds the section break instead. The sink takes no page before
+            // a later one is made, so the last page is held: a page that is not blank, or a
+            // blank one that an odd or even section start put before that section's first
+            // page, after a page of another section.
             let first = self
                 .pages
                 .iter()
                 .rev()
                 .find(|page| !page.blank)
-                .is_none_or(|page| page.section != section);
+                .is_none_or(|page| self.last_section(page) < section);
             let kind = if ir.title_page() && first {
                 Kind::First
             } else if self.document.settings().even_and_odd_headers() && number % 2 == 0 {
@@ -2558,6 +2631,15 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         self.taken + self.pages.len()
     }
 
+    /// The last section whose body is on `page`: its own, or a continuous one whose first
+    /// text is on it (see `add_page` for the hypothesis this takes).
+    fn last_section(&self, page: &Page) -> usize {
+        page.fragments
+            .last()
+            .and_then(|fragment| self.flow_sections.get(fragment.paragraph))
+            .map_or(page.section, |&section| section.max(page.section))
+    }
+
     /// Page `index` of those made, unless it went to the sink.
     fn page_at(&self, index: usize) -> Option<&Page> {
         index
@@ -2576,7 +2658,15 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             .collect();
         let mut notes = notes.into_iter();
         for mut page in pages {
-            if let Some(taken) = self.taken_by_section.get_mut(page.section) {
+            // A page counts for its own section, and for every continuous one that starts
+            // on it: Word's render of `E-section-continuous-title.docx` counts the page a
+            // continuous section starts on in that section's SECTIONPAGES as well.
+            let last = self.last_section(&page);
+            for taken in self
+                .taken_by_section
+                .get_mut(page.section..=last)
+                .unwrap_or_default()
+            {
                 *taken = taken.saturating_add(1);
             }
             self.taken += 1;
@@ -2587,6 +2677,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 for note in notes.notes() {
                     self.note_layouts.remove(&note);
                 }
+                self.noted.push(notes.referenced().collect());
             }
             // Its body's floating objects go behind or in front of the body's text, over the
             // header and footer, now that nothing can add to them.
@@ -3244,6 +3335,76 @@ pub(crate) fn body(setup: &PageSetup) -> Body {
         width: Pt((right - left).max(0.0)),
         bottom: Pt(bottom),
     }
+}
+
+/// The floating object of `layout`'s item `item`, a paragraph's laid out from `paragraph`,
+/// if it is one.
+fn anchored<'p>(
+    layout: &ParagraphLayout,
+    paragraph: &'p Paragraph,
+    item: usize,
+) -> Option<&'p crate::ir::AnchoredObject> {
+    let Some(Item::Anchored(path)) = layout.itemized.items.get(item) else {
+        return None;
+    };
+    match inline_at(paragraph.inlines(), path) {
+        Some(Inline::Anchored(object)) => Some(object),
+        _ => None,
+    }
+}
+
+/// The floating objects that text wraps around in the lines of `layout`, a paragraph's laid
+/// out from `paragraph`, from line `from` on, in order: each line's index, and the object's
+/// item.
+fn wrapping_objects<'a>(
+    layout: &'a ParagraphLayout,
+    paragraph: &'a Paragraph,
+    from: usize,
+) -> impl Iterator<Item = (usize, usize)> + 'a {
+    layout
+        .lines
+        .iter()
+        .enumerate()
+        .skip(from)
+        .flat_map(|(index, line)| line.pieces.iter().map(move |piece| (index, piece)))
+        .filter_map(move |(index, piece)| match piece.kind {
+            PieceKind::Object { item, height: None } => anchored(layout, paragraph, item)
+                .filter(|object| object.wrap() != Wrap::None)
+                .map(|_| (index, item)),
+            _ => None,
+        })
+}
+
+/// How many of a paragraph's `rest` lines from line `first` on its page takes, where `fit`
+/// of them fit on it, and `breaks` says the last of those ends in a break, after which the
+/// rest goes on on the next page; none moves the paragraph to the next page. A paragraph
+/// kept on one page, `keep_lines`, that does not fit moves; one taller than a page moves to
+/// a new page all the same, and is split there (hypothesis until a Word render,
+/// `E-keeplines-long.docx`). With `widow_control`, at least two lines stay at the bottom of
+/// a page and go on at the top of the next. On a `bare` page, where nothing moves the
+/// paragraph further, the lines that fit, at least one, and of its footnotes what fits,
+/// the rest going on on the next page.
+fn lines_taken(
+    (fit, breaks, rest): (usize, bool, usize),
+    (first, keep_lines, widow_control, bare): (usize, bool, bool, bool),
+) -> usize {
+    if fit == rest || (breaks && fit > 0) {
+        return fit;
+    }
+    if first == 0 && keep_lines && !bare {
+        return 0;
+    }
+    let mut take = fit;
+    if widow_control {
+        if rest.saturating_sub(take) < 2 {
+            take = rest.saturating_sub(2);
+        }
+        let least = if first == 0 { 2 } else { 1 };
+        if take < least {
+            take = 0;
+        }
+    }
+    if take == 0 && bare { fit.max(1) } else { take }
 }
 
 /// How many of `lines` from `first` on fit between `top` and `bottom`, the room multiple
@@ -5161,8 +5322,6 @@ mod tests {
         };
         const DECIMAL: &str =
             "numbers in a format the layout does not write are written as decimal";
-        const EACH_PAGE: &str =
-            "note numbers that start again on each page are numbered through the section";
         const FRAMES: &str =
             "note references in headers and footers show no number, and their notes are left out";
         // A section whose footnotes are numbered in a format the layout does not write and
@@ -5222,39 +5381,36 @@ mod tests {
             let mut texts = texts(&laid.expect("pages").pages[0]);
             texts.sort();
             let messages = messages(&report);
-            let reported = [DECIMAL, EACH_PAGE, FRAMES].map(|m| messages.iter().any(|r| r == m));
+            let reported = [DECIMAL, FRAMES].map(|m| messages.iter().any(|r| r == m));
             (texts, reported)
         };
-        // Numbered in the body, in decimal through the section, and both reported; the
-        // number in the text's style is one run with it.
+        // Numbered in the body, in decimal, which is reported, from the start on its page;
+        // the number in the text's style is one run with it.
         assert_eq!(
             lay(Place::Body),
-            (vec!["A1".into(), "Z".into()], [true, true, false])
+            (vec!["A1".into(), "Z".into()], [true, false])
         );
         // A footnote referenced nowhere numbers nothing, and nothing is reported; nor is
         // one in a text box, which Word ignores, even in a field's result there.
         assert_eq!(
             lay(Place::Nowhere),
-            (vec!["A".into(), "Z".into()], [false; 3])
+            (vec!["A".into(), "Z".into()], [false; 2])
         );
         for place in [Place::TextBox, Place::TextBoxField] {
             assert_eq!(
                 lay(place),
-                (vec!["A".into(), "B".into(), "Z".into()], [false; 3])
+                (vec!["A".into(), "B".into(), "Z".into()], [false; 2])
             );
         }
         // One in the header shows no number, which is reported, also when a text box
         // references the note too.
         assert_eq!(
             lay(Place::Header),
-            (vec!["A".into(), "Z".into()], [false, false, true])
+            (vec!["A".into(), "Z".into()], [false, true])
         );
         assert_eq!(
             lay(Place::HeaderAndTextBox),
-            (
-                vec!["A".into(), "B".into(), "Z".into()],
-                [false, false, true]
-            )
+            (vec!["A".into(), "B".into(), "Z".into()], [false, true])
         );
     }
 
@@ -6172,10 +6328,11 @@ mod tests {
 
     #[test]
     fn space_above_is_kept_at_the_top_of_a_page_only_where_a_document_or_section_starts() {
-        // Word's render of `E-space-before-top.docx`: kept at the start of the document
-        // and of a section on a new page; dropped after flowing, after a page break, and
-        // for a page break before.
-        let document = document(|style| {
+        // Word's render of `E-space-before-top.docx` (mode 15): kept at the start of the
+        // document and of a section on a new page; dropped after flowing, after a page
+        // break, and for a page break before. Before mode 15 it is dropped at the start of
+        // a section too (contract-ec-data-processing-clauses-el, mode 14).
+        let sections = |style| {
             let mut first = vec![lines(style, 1, spacing(24.0, 0.0))];
             first.extend((0..7).map(|_| lines(style, 1, spacing(0.0, 0.0))));
             // Flows to page 2.
@@ -6198,12 +6355,33 @@ mod tests {
                 Section::new(setup()).with_blocks(first),
                 Section::new(setup()).with_blocks(vec![lines(style, 1, spacing(24.0, 0.0))]),
             ]
-        });
-        let laid = pages(&document);
-        let tops: Vec<f64> = laid.iter().map(|page| page[0].2).collect();
-        assert_eq!(tops, [44.0, 20.0, 20.0, 20.0, 44.0], "{laid:?}");
-        // The paragraph that ends in a page break shares page 3 with the one before it.
-        assert_eq!(laid[2].iter().map(|f| f.0).collect::<Vec<_>>(), [9, 10]);
+        };
+        for (mode, section_top) in [
+            (CompatMode::Word2003, 20.0),
+            (CompatMode::Word2007, 20.0),
+            (CompatMode::Word2010, 20.0),
+            (CompatMode::Word2013, 44.0),
+        ] {
+            let mut document =
+                Document::new(crate::ir::DocumentSettings::default().with_compat_mode(mode));
+            let style = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(10.0)),
+            );
+            for section in sections(style) {
+                document.add_section(section);
+            }
+            let laid = pages(&document);
+            let tops: Vec<f64> = laid.iter().map(|page| page[0].2).collect();
+            assert_eq!(
+                tops,
+                [44.0, 20.0, 20.0, 20.0, section_top],
+                "{mode:?}: {laid:?}"
+            );
+            // The paragraph that ends in a page break shares page 3 with the one before it.
+            assert_eq!(laid[2].iter().map(|f| f.0).collect::<Vec<_>>(), [9, 10]);
+        }
     }
 
     #[test]
@@ -8041,6 +8219,65 @@ mod tests {
         // Section 1 numbers its pages in capital Roman numerals; section 2 continues the
         // numbers, and its field writes them as letters.
         assert_eq!(footers, ["I 5 2", "II 5 2", "c 5 3", "d 5 3", "e 5 3"]);
+    }
+
+    #[test]
+    fn a_continuous_section_s_first_page_is_the_one_it_starts_on() {
+        use crate::ir::{Field, FieldKind};
+        // E-section-continuous-title.docx: a continuous section with a title page starts
+        // on page 1, below the section before, and goes on to pages 2 and 3. Page 1 keeps
+        // the header and footer of the section before; Word gives page 2 the section's
+        // default ones, not its title page's, and counts page 1 in its SECTIONPAGES too.
+        let document = document(|style| {
+            let text = |text: &str| text_paragraph(style, text, spacing(0.0, 0.0));
+            let counted = |text: &str| -> Vec<Block> {
+                vec![
+                    Paragraph::new(style)
+                        .with_props(spacing(0.0, 0.0))
+                        .with_inlines([
+                            Inline::text(text, style),
+                            Inline::Field(Field::new(FieldKind::SectionPages, style)),
+                        ])
+                        .into(),
+                ]
+            };
+            let next_page = || lines(style, 1, spacing(0.0, 0.0).with_page_break_before(true));
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(vec![text("HA")]))
+                    .with_footers(HeaderFooterSet::default().with_primary(counted("FA ")))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+                Section::new(close_frames())
+                    .with_start(SectionStart::Continuous)
+                    .with_title_page(true)
+                    .with_headers(
+                        HeaderFooterSet::default()
+                            .with_first(vec![text("HF")])
+                            .with_primary(vec![text("HB")]),
+                    )
+                    .with_footers(
+                        HeaderFooterSet::default()
+                            .with_first(counted("FF "))
+                            .with_primary(counted("FB ")),
+                    )
+                    .with_blocks(vec![
+                        lines(style, 1, spacing(0.0, 0.0)),
+                        next_page(),
+                        next_page(),
+                    ]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let frames: Vec<Vec<String>> = laid
+            .expect("pages")
+            .pages
+            .iter()
+            .map(|page| texts(page).into_iter().take(2).collect())
+            .collect();
+        assert_eq!(
+            frames,
+            [["HA", "FA 1"], ["HB", "FB 3"], ["HB", "FB 3"]].map(|frames| frames.map(String::from))
+        );
     }
 
     #[test]
@@ -12389,6 +12626,225 @@ mod tests {
         assert_eq!(reported(4), [false, true]);
         // In a table nested in a cell too.
         assert_eq!(reported(5), [true, false]);
+    }
+
+    #[test]
+    fn footnote_numbers_start_again_on_each_page_as_their_pages_place_them() {
+        use crate::ir::{
+            NoteKind, NotePosition, NoteProps, NoteRestart, NoteSeparators, VerticalPosition,
+        };
+        // A section numbering its footnotes again on each page: two references on the
+        // first page, then one after a page break, which shows 1 again, as its note does.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let mark = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0))
+                .with_vertical(VerticalPosition::Superscript),
+        );
+        document.set_note_separators(
+            NoteKind::Footnote,
+            NoteSeparators::default()
+                .with_separator([holding(style, vec![Inline::separator(style)])]),
+        );
+        let notes = [(); 3].map(|()| footnote(&mut document, (style, mark), 1, spacing(0.0, 0.0)));
+        let blocks = vec![
+            referencing(style, (0, 0), &[notes[0], notes[1]], spacing(0.0, 0.0)),
+            referencing(
+                style,
+                (0, 0),
+                &[notes[2]],
+                spacing(0.0, 0.0).with_page_break_before(true),
+            ),
+        ];
+        let paged = NoteProps::footnotes()
+            .with_position(NotePosition::PageBottom)
+            .with_restart(NoteRestart::EachPage);
+        document.add_section(
+            Section::new(setup())
+                .with_footnotes(paged)
+                .with_blocks(blocks),
+        );
+        let (pages, reported) = noted_pages(&document);
+        // The test font has no digits nor `N`; nothing about the notes is reported.
+        assert!(reported.iter().all(|m| !m.contains("note")), "{reported:?}");
+        let texts = |page: &Separated| -> Vec<String> {
+            page.1.iter().map(|(text, _)| text.clone()).collect()
+        };
+        assert_eq!(pages.len(), 2);
+        assert_eq!(texts(&pages[0]), ["A1", "2", "1", "N", "2", "N"]);
+        assert_eq!(texts(&pages[1]), ["A1", "1", "N"]);
+    }
+
+    /// A document of one section that numbers its footnotes, and its endnotes where
+    /// `endnotes` says so, again on each page, the blocks `make` gives.
+    fn numbered_on_each_page(
+        endnotes: bool,
+        make: impl FnOnce(&mut Document, RunStyleId, RunStyleId) -> Vec<Block>,
+    ) -> Document {
+        use crate::ir::{
+            NoteKind, NotePosition, NoteProps, NoteRestart, NoteSeparators, VerticalPosition,
+        };
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let mark = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0))
+                .with_vertical(VerticalPosition::Superscript),
+        );
+        document.set_note_separators(
+            NoteKind::Footnote,
+            NoteSeparators::default()
+                .with_separator([holding(style, vec![Inline::separator(style)])])
+                .with_continuation_separator([holding(
+                    style,
+                    vec![Inline::continuation_separator(style)],
+                )]),
+        );
+        let blocks = make(&mut document, style, mark);
+        let section = Section::new(setup()).with_footnotes(
+            NoteProps::footnotes()
+                .with_position(NotePosition::PageBottom)
+                .with_restart(NoteRestart::EachPage),
+        );
+        let section = if endnotes {
+            section.with_endnotes(NoteProps::endnotes().with_restart(NoteRestart::EachPage))
+        } else {
+            section
+        };
+        document.add_section(section.with_blocks(blocks));
+        document
+    }
+
+    #[test]
+    fn notes_numbered_again_on_each_page_that_no_page_lays_out_are_reported() {
+        use crate::ir::{Note, NoteKind};
+        const NUMBERED: &str = "notes that start their numbers again on each page but that no \
+                                page lays out are numbered through their section";
+        // A footnote of a table cell, which no page lays out yet, beside one of the body
+        // (review of #603): the cell's keeps its number through the section, and that is
+        // reported.
+        let document = numbered_on_each_page(false, |document, style, mark| {
+            let notes = [(); 2].map(|()| footnote(document, (style, mark), 1, spacing(0.0, 0.0)));
+            let row = Row::default().with_cells([Cell::default().with_blocks([referencing(
+                style,
+                (0, 0),
+                &[notes[0]],
+                spacing(0.0, 0.0),
+            )])]);
+            vec![
+                table_with(vec![row], 0.0).into(),
+                referencing(style, (0, 0), &[notes[1]], spacing(0.0, 0.0)),
+            ]
+        });
+        let (_, reported) = noted_pages(&document);
+        assert!(reported.iter().any(|m| m == NUMBERED), "{reported:?}");
+        // An endnote of a section that numbers its endnotes again on each page: the
+        // pages place footnotes only, so it is numbered through the section.
+        let document = numbered_on_each_page(true, |document, style, _| {
+            let note = document.add_note(Note::new(NoteKind::Endnote, []));
+            vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+        });
+        let (_, reported) = noted_pages(&document);
+        assert!(reported.iter().any(|m| m == NUMBERED), "{reported:?}");
+    }
+
+    #[test]
+    fn a_note_going_on_from_the_page_before_does_not_count_on_its_page() {
+        // A note of nine lines, cut at the bottom of page 1, goes on on page 2, where the
+        // paragraph after a page break references a note of one line (review of #603):
+        // that note is the first of page 2, and shows 1.
+        let document = numbered_on_each_page(false, |document, style, mark| {
+            let long = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+            let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+            vec![
+                referencing(style, (0, 0), &[long], spacing(0.0, 0.0)),
+                referencing(
+                    style,
+                    (0, 0),
+                    &[short],
+                    spacing(0.0, 0.0).with_page_break_before(true),
+                ),
+            ]
+        });
+        let (pages, _) = noted_pages(&document);
+        let texts = |page: &Separated| -> Vec<String> {
+            page.1.iter().map(|(text, _)| text.clone()).collect()
+        };
+        // Page 2: the reference, the rest of the long note under the continuation
+        // separator, then the short note.
+        assert_eq!(texts(&pages[1]), ["A1", "N", "N", "N", "1", "N"]);
+    }
+
+    #[test]
+    fn note_numbers_that_never_settle_on_their_pages_are_reported() {
+        use crate::ir::{Note, NoteKind, NotePosition, NoteProps, NoteRestart, NoteSeparators};
+        // Numbers that start again on each page, in the test font, whose digits are its
+        // missing-glyph shape, 5 pt wide. Line 1 references nine empty notes; line 7 holds
+        // "A", a space and a word of 41 `A` that ends with the reference to a tenth. As
+        // "10" the word does not fit in the 260 pt line and goes on to the next page, where
+        // the note is the first and shows "1"; as "1" it fits on line 7, where the note is
+        // the tenth: each layout pass moves it, and the numbers never settle.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        document.set_note_separators(
+            NoteKind::Footnote,
+            NoteSeparators::default()
+                .with_separator([holding(style, vec![Inline::separator(style)])]),
+        );
+        let notes: Vec<_> = (0..10)
+            .map(|_| document.add_note(Note::new(NoteKind::Footnote, [])))
+            .collect();
+        let mut inlines = vec![Inline::text("A", style)];
+        inlines.extend(
+            notes[..9]
+                .iter()
+                .map(|&n| Inline::note_reference(n, false, style)),
+        );
+        for _ in 0..5 {
+            inlines.push(Inline::line_break(BreakClear::None, style));
+            inlines.push(Inline::text("A", style));
+        }
+        inlines.push(Inline::line_break(BreakClear::None, style));
+        inlines.push(Inline::text(format!("A {}", "A".repeat(41)), style));
+        inlines.push(Inline::note_reference(notes[9], false, style));
+        let paragraph = Paragraph::new(style)
+            .with_props(spacing(0.0, 0.0).with_widow_control(false))
+            .with_inlines(inlines);
+        let paged = NoteProps::footnotes()
+            .with_position(NotePosition::PageBottom)
+            .with_restart(NoteRestart::EachPage);
+        document.add_section(
+            Section::new(setup())
+                .with_footnotes(paged)
+                .with_blocks([paragraph.into()]),
+        );
+        let (_, reported) = noted_pages(&document);
+        assert!(
+            reported.iter().any(|m| m
+                == "the numbers of notes that start again on each page changed in each of 3 \
+                    layouts; they show those of the one before the last"),
+            "{reported:?}"
+        );
+        // The document counts no pages: nothing is said of NUMPAGES.
+        assert!(
+            !reported.iter().any(|m| m.contains("NUMPAGES")),
+            "{reported:?}"
+        );
     }
 
     #[test]

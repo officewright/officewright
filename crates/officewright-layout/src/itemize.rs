@@ -430,7 +430,7 @@ impl Builder<'_, '_, '_> {
             }
             Inline::LinkStart { target, .. } => {
                 self.end_link();
-                self.link = Some((self.mark(), Arc::new(target.clone())));
+                self.link = Some((self.mark(), Arc::clone(target)));
             }
             Inline::LinkEnd => self.end_link(),
             Inline::Bookmark { name, .. } => {

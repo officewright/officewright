@@ -86,6 +86,7 @@ fuzz_targets() {
 seeds() {
 	case $1 in
 	docx_open) echo tests/corpus/word-rules tests/corpus/resaved tests/corpus/poi crates/officewright-doc/tests/data fuzz/seeds/docx_open ;;
+	field_instruction) echo fuzz/seeds/field_instruction ;;
 	font_* | pdf_embed | shape_font) echo tests/fonts crates/officewright-font/tests/data ;;
 	jpeg_header) echo fuzz/seeds/jpeg ;;
 	layout_shape) echo tests/pdf-output fuzz/seeds/layout_shape ;;

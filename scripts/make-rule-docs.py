@@ -245,6 +245,7 @@ def section(
     header_distance: int = 708,
     grid: str = '<w:docGrid w:linePitch="360"/>',
     notes: str = "",
+    gutter: int = 0,
 ) -> str:
     """A section's properties: A4 portrait as sect_pr(), with a start type (w:type), header
     and footer references as (headerReference or footerReference, w:type, part name), a
@@ -252,7 +253,7 @@ def section(
     format of its page numbers (w:pgNumType w:fmt) and a title page (w:titlePg); another
     page size, left and right margins and distance of the header from the edge, in twips;
     another document grid (w:docGrid); the section's w:footnotePr and w:endnotePr
-    (section_notes())."""
+    (section_notes()); a gutter, in twips."""
     references = "".join(
         f'<w:{element} w:type="{ref_type}" r:id="{part_id(name)}"/>'
         for element, ref_type, name in refs
@@ -269,7 +270,7 @@ def section(
         f"<w:sectPr>{references}{start}"
         f'<w:pgSz w:w="{size[0]}" w:h="{size[1]}"/>'
         f'<w:pgMar w:top="{top}" w:right="{right}" w:bottom="{bottom}" w:left="{left}"'
-        f' w:header="{header_distance}" w:footer="708" w:gutter="0"/>'
+        f' w:header="{header_distance}" w:footer="708" w:gutter="{gutter}"/>'
         f'{numbers}<w:cols w:space="708"/>{title}{grid}'
         "</w:sectPr>"
     )
@@ -458,8 +459,9 @@ class Doc:
     even_and_odd_headers: bool = False
     # The last section's w:sectPr, when it is not sect_pr()'s.
     last_section: str = ""
-    # Pictures under word/media/, as (file name, PNG, EMF or WMF bytes); the body names each by the
-    # relationship id media_id() gives it.
+    # Pictures under word/media/, as (file name, PNG, EMF or WMF bytes); the body, a header,
+    # a footer or a note names each by the relationship id media_id() gives it, and every
+    # part that names one has an image relationship of that id to it (part_rels()).
     media: tuple[tuple[str, bytes], ...] = ()
     # The contents of the footnotes and the endnotes (note()), each kind numbered from id 1
     # in this order; a document with notes of either kind gets both parts, as Word writes
@@ -473,6 +475,9 @@ class Doc:
     # The paragraphs of the footnote continuation notice, which takes the id after the last
     # footnote.
     continuation_notice: str = ""
+    # Whether the settings mirror the margins of facing pages (w:mirrorMargins): the left
+    # margin becomes the inside one, on the right of even pages.
+    mirror_margins: bool = False
 
 
 def line_fonts_body(fonts: list[str]) -> str:
@@ -1853,11 +1858,14 @@ def rule_table(
     fixed: bool = False,
     border_eighths: int = 4,
     borders: dict[str, int] | None = None,
+    cell_margins: str = (
+        '<w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/>'
+    ),
 ) -> str:
     """A table with single borders border_eighths eighths of a point wide (4 for 0.5 pt), or
     as wide as borders gives for each side, the grid saved as given, w:tblW as (value, type)
-    or none, and an autofit layout unless fixed. rows holds each row's cells, or (cells,
-    w:trPr content)."""
+    or none, an autofit layout unless fixed, and the table's cell margins (the content of
+    its w:tblCellMar). rows holds each row's cells, or (cells, w:trPr content)."""
     tbl_pr = ""
     if tbl_w is not None:
         tbl_pr += f'<w:tblW w:w="{tbl_w[0]}" w:type="{tbl_w[1]}"/>'
@@ -1869,10 +1877,7 @@ def rule_table(
     ) + "</w:tblBorders>"
     if fixed:
         tbl_pr += '<w:tblLayout w:type="fixed"/>'
-    tbl_pr += (
-        '<w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/>'
-        "</w:tblCellMar>"
-    )
+    tbl_pr += f"<w:tblCellMar>{cell_margins}</w:tblCellMar>"
     grid_xml = "".join(f'<w:gridCol w:w="{w}"/>' for w in grid)
     trs = []
     for row in rows:
@@ -4465,8 +4470,9 @@ def wps_shape(
     return graphic(WPS_NS, f"<wps:wsp>{kind}{sp_pr}{style}{box}{body}</wps:wsp>")
 
 
-def drawing_picture(name: str, width: float, height: float) -> str:
-    """The graphic of a picture (pic:pic) of width x height pt, showing the media part name."""
+def drawing_picture(name: str, width: float, height: float, effects: str = "") -> str:
+    """The graphic of a picture (pic:pic) of width x height pt, showing the media part name,
+    with the effects of an a:effectLst after its geometry (such as a shadow)."""
     size = f'<a:ext cx="{emu(width)}" cy="{emu(height)}"/>'
     return graphic(
         PIC_NS,
@@ -4474,20 +4480,31 @@ def drawing_picture(name: str, width: float, height: float) -> str:
         f'<pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{media_id(name)}"/>'
         "<a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr>"
         f'<a:xfrm><a:off x="0" y="0"/>{size}</a:xfrm><a:prstGeom prst="rect"><a:avLst/>'
-        "</a:prstGeom></pic:spPr></pic:pic>",
+        f"</a:prstGeom>{effects}</pic:spPr></pic:pic>",
     )
 
 
-def extent(width: float, height: float) -> str:
+def extent(width: float, height: float,
+           effects: tuple[float, float, float, float] = (0, 0, 0, 0)) -> str:
+    """The extent of a drawing, and how far its effects (a shadow) reach past it on the left,
+    top, right and bottom, in points (wp:effectExtent, ECMA-376 Part 1, §20.4.2.6)."""
+    reach = " ".join(f'{side}="{emu(value)}"' for side, value in zip("ltrb", effects))
     return (f'<wp:extent cx="{emu(width)}" cy="{emu(height)}"/>'
-            '<wp:effectExtent l="0" t="0" r="0" b="0"/>')
+            f"<wp:effectExtent {reach}/>")
 
 
-def inline_drawing(n: int, width: float, height: float, graphic_xml: str) -> str:
+def doc_pr(n: int, hidden: bool = False) -> str:
+    """A drawing's wp:docPr of id n, hidden (hidden="1", §20.4.2.5) or not."""
+    flag = ' hidden="1"' if hidden else ""
+    return f'<wp:docPr id="{n}" name="Drawing {n}"{flag}/>'
+
+
+def inline_drawing(n: int, width: float, height: float, graphic_xml: str,
+                   hidden: bool = False) -> str:
     """An inline drawing (wp:inline) of width x height pt; n is its docPr id, unique in the
     document."""
     return (f'<wp:inline distT="0" distB="0" distL="0" distR="0">{extent(width, height)}'
-            f'<wp:docPr id="{n}" name="Drawing {n}"/><wp:cNvGraphicFramePr/>{graphic_xml}'
+            f"{doc_pr(n, hidden)}<wp:cNvGraphicFramePr/>{graphic_xml}"
             "</wp:inline>")
 
 
@@ -4502,11 +4519,19 @@ def anchored_drawing(
     wrap: str = "<wp:wrapNone/>",
     dist: tuple[float, float, float, float] = (0, 0, 9, 9),
     behind: bool = False,
+    relative_height: int | None = None,
+    layout_in_cell: bool = True,
+    effects: tuple[float, float, float, float] = (0, 0, 0, 0),
+    hidden: bool = False,
+    anchor_hidden: bool = False,
 ) -> str:
     """A floating drawing (wp:anchor) of width x height pt, placed across and down as
     (relativeFrom, offset in points, or a wp:align value such as "center"), dist points from
     the text above, below, left and right of it (distT, distB, distL, distR), in front of the
-    text or behind it."""
+    text or behind it; its relativeHeight (251658240 + n unless given), layoutInCell, the
+    reach of its effects (extent()), whether its docPr is hidden, and whether wp:anchor
+    itself is (its hidden attribute, between layoutInCell and allowOverlap in the order of
+    CT_Anchor's attributes)."""
 
     def position(value: float | str) -> str:
         if isinstance(value, str):
@@ -4514,13 +4539,16 @@ def anchored_drawing(
         return f"<wp:posOffset>{emu(value)}</wp:posOffset>"
 
     distances = " ".join(f'dist{side}="{emu(value)}"' for side, value in zip("TBLR", dist))
+    height_order = 251658240 + n if relative_height is None else relative_height
+    anchor_flag = ' hidden="1"' if anchor_hidden else ""
     return (
         f'<wp:anchor {distances} simplePos="0" '
-        f'relativeHeight="{251658240 + n}" behindDoc="{int(behind)}" locked="0" '
-        'layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/>'
+        f'relativeHeight="{height_order}" behindDoc="{int(behind)}" locked="0" '
+        f'layoutInCell="{int(layout_in_cell)}"{anchor_flag} allowOverlap="1">'
+        '<wp:simplePos x="0" y="0"/>'
         f'<wp:positionH relativeFrom="{across[0]}">{position(across[1])}</wp:positionH>'
         f'<wp:positionV relativeFrom="{down[0]}">{position(down[1])}</wp:positionV>'
-        f'{extent(width, height)}{wrap}<wp:docPr id="{n}" name="Drawing {n}"/>'
+        f"{extent(width, height, effects)}{wrap}{doc_pr(n, hidden)}"
         f"<wp:cNvGraphicFramePr/>{graphic_xml}</wp:anchor>"
     )
 
@@ -5534,7 +5562,7 @@ def note_lines(prefix: str, count: int) -> str:
     return lines([" " + values[0], *values[1:]])
 
 
-def footnote_no_room() -> Doc:
+def footnote_no_room(mode: int = 15) -> Doc:
     # The reference is in the last line that fits: the line after it is 48 pt tall.
     body, footnotes = "", []
     for n, (count, widow, left) in enumerate(NO_ROOM_CASES, 1):
@@ -5547,14 +5575,17 @@ def footnote_no_room() -> Doc:
                         space=spacing(line=("exact", 48))))
         footnotes.append(note(note_lines(f"Footnote {n}", count),
                               widow_control=None if widow else False))
+    suffix = "" if mode == 15 else f"-{mode}"
+    setting = "" if mode == 15 else f", in compatibility mode {mode}"
     return Doc(
-        "E-footnote-no-room",
+        f"E-footnote-no-room{suffix}",
         "A footnote reference in the last line that fits on a page, with room below it for "
         "the separator and one line of a three-line note, without and with widow control, "
         "for two lines of a four-line note with widow control, for neither, and for a note "
-        "of one line: whether the line moves to the next page or the note is cut",
+        f"of one line: whether the line moves to the next page or the note is cut{setting}",
         body + page_para(run("End of the document.")),
         footnotes=tuple(footnotes),
+        mode=mode,
     )
 
 
@@ -6905,6 +6936,2343 @@ def barcode_font() -> Doc:
     )
 
 
+# Batch 13. Where and when Word cuts a header or footer that leaves the body no room (#548).
+# The references of E-header-no-room, E-header-taller-than-page and E-header-cut show Word
+# cutting only where the uncut header and footer leave the body less room than a line, and
+# then drawing the whole lines of each within 0.4 of the page's height. Each document asks
+# one of the questions they leave open; every case is a section of its own, its header and
+# footer 35.4 pt from the edge unless its label says otherwise.
+A3 = (16838, 23811)
+
+
+def exact_lines_para(prefix: str, count: int, height: float = 12) -> str:
+    """One paragraph of count lines <prefix> line 1 ... of exact height pt."""
+    values = [f"{prefix} line {n}" for n in range(1, count + 1)]
+    return para(lines(values), space=spacing(line=("exact", height)))
+
+
+def cut_sections(cases: list[tuple[str, str, str, dict]], body_line: float = 12) -> tuple[
+        str, tuple[tuple[str, str], ...], str]:
+    """The body, header and footer parts and last section of cases given as (label, header
+    paragraphs, footer paragraphs or "", options of section()): a section each, its label
+    the one line of its body, of exact body_line pt: short enough to fit the section's
+    width, so that the body asks for one line of room."""
+    body, parts, last = "", [], ""
+    for n, (label, header, footer, options) in enumerate(cases, 1):
+        refs = [("headerReference", "default", f"header{n}.xml")]
+        parts.append(header_part(f"header{n}.xml", header))
+        if footer:
+            refs.append(("footerReference", "default", f"footer{n}.xml"))
+            parts.append(header_part(f"footer{n}.xml", footer))
+        last = section(refs=tuple(refs), **options)
+        body += para(run(f"Case {n:02d}: {label}"), space=spacing(line=("exact", body_line)),
+                     sect=None if n == len(cases) else last)
+    return body, tuple(parts), last
+
+
+def header_cut_threshold(body_line: int) -> Doc:
+    # On A5 (595.3 pt) a header of n lines of 12 pt leaves the body 487.9 - 12n pt above the
+    # bottom margin of 72 pt: 199.9 pt for 24 lines, 19.9 pt for 39 and 7.9 pt for 40.
+    cases = [(f"header of {count} lines, {487.9 - 12 * count:.1f} pt left",
+              exact_lines_para("header", count), "", {"size": A5})
+             for count in range(24, 41)]
+    body, parts, last = cut_sections(cases, body_line)
+    suffix = "" if body_line == 12 else f"-{body_line}"
+    return Doc(
+        f"E-header-cut-threshold{suffix}",
+        "From which height on Word cuts a header that leaves the body little room: headers "
+        f"of 24 to 40 lines of 12 pt on A5, a line more in each section, over body lines of "
+        f"exact {body_line} pt, without a footer",
+        body,
+        headers=parts,
+        last_section=last,
+    )
+
+
+def header_cut_distance() -> Doc:
+    # The header ends 396 pt from the edge with no distance and 33 lines, 420 pt with 35, and
+    # 468 pt 72 pt from the edge; the footer of 33 lines starts 410.5 pt from the top, so the
+    # first leaves the body 14.5 pt, more than a line, and the others none.
+    footer_top = (PAGE_H - 708) / 20 - 12 * 33
+    cases = []
+    for count, distance in ((33, 0), (35, 0), (33, 72)):
+        room = max(0.0, footer_top - distance - 12 * count)
+        cases.append((f"header of {count} lines {distance} pt from the edge, footer of 33, "
+                      f"{room:.1f} pt left",
+                      exact_lines_para("header", count), exact_lines_para("footer", 33),
+                      {"header_distance": twips(distance)}))
+    body, parts, last = cut_sections(cases)
+    return Doc(
+        "E-header-cut-distance",
+        "Whether the height to which Word cuts a header is 0.4 of the page or ends at a "
+        "distance from the top edge: headers of 33 and 35 lines with no distance from the "
+        "edge and of 33 lines 72 pt from it, each over a footer of 33 lines, which leave the "
+        "body 14.5, 0 and 0 pt",
+        body,
+        headers=parts,
+        last_section=last,
+    )
+
+
+def header_cut_page_sizes() -> Doc:
+    cases = [(f"header and footer of {count} lines each, on {name}",
+              exact_lines_para("header", count), exact_lines_para("footer", count),
+              {"size": size})
+             for name, count, size in (("Letter", 40, LETTER), ("A3", 50, A3))]
+    body, parts, last = cut_sections(cases)
+    return Doc(
+        "E-header-cut-page-sizes",
+        "How many lines Word keeps of a header and a footer that leave the body no room on a "
+        "Letter page (40 lines each) and on an A3 page (50 lines each)",
+        body,
+        headers=parts,
+        last_section=last,
+    )
+
+
+def header_cut_line_heights() -> Doc:
+    # 30, 60 and 32 lines: 480 pt each, past the footer of 33 lines; 0.4 of A4 is 336.8 pt,
+    # 21 lines of 16 pt, 42 of 8 pt, and 22 of 15 pt with the 23rd across it.
+    cases = [(f"header of {count} lines of exact {height} pt, footer of 33 lines",
+              exact_lines_para("header", count, height),
+              exact_lines_para("footer", 33), {})
+             for count, height in ((30, 16), (60, 8), (32, 15))]
+    body, parts, last = cut_sections(cases)
+    return Doc(
+        "E-header-cut-line-heights",
+        "Whether Word cuts a header that leaves the body no room after a number of lines or "
+        "at a height: lines of exact 16, 8 and 15 pt, over a footer of 33 lines of 12 pt",
+        body,
+        headers=parts,
+        last_section=last,
+    )
+
+
+def header_table_rows(count: int, height: float) -> str:
+    """A one-column table of count rows of exact height pt, each reading header row k."""
+    rows = [([cell(para(run(f"header row {k}"), space=spacing(line=("exact", 12))))],
+             f'<w:trHeight w:val="{twips(height)}" w:hRule="exact"/>')
+            for k in range(1, count + 1)]
+    return rule_table(rows, [TEXT_W], tbl_w=(TEXT_W, "dxa"), fixed=True)
+
+
+def header_cut_table() -> Doc:
+    # 10 lines and 30 rows of 12 pt end 515.4 pt from the edge, past the footer of 33 lines;
+    # 0.4 of A4 (336.8 pt from the header's top) falls in row 19, after 18 whole rows.
+    header = (exact_lines_para("header", 10) + header_table_rows(30, 12)
+              + page_para(run("header line after the table")))
+    cases = [("header of 10 lines and 30 table rows of 12 pt, footer of 33 lines", header,
+              exact_lines_para("footer", 33), {})]
+    body, parts, last = cut_sections(cases)
+    return Doc(
+        "E-header-cut-table",
+        "Whether Word cuts the rows of a table in a header that leaves the body no room as "
+        "it cuts lines: 10 lines, then a table of 30 rows of exact 12 pt, over a footer of "
+        "33 lines",
+        body,
+        headers=parts,
+        last_section=last,
+    )
+
+
+def header_cut_first_line() -> Doc:
+    # A first line or row of 400 pt is taller than 0.4 of A4 (336.8 pt); header and footer
+    # each hold one, then a line or a second row of 12 pt, and leave the body no room. The
+    # second row tells keeping the first table from keeping its first row.
+    def tall_line(kind: str) -> str:
+        return (para(run(f"{kind} line 1, exact 400 pt"), space=spacing(line=("exact", 400)))
+                + page_para(run(f"{kind} line 2")))
+
+    def tall_row(kind: str) -> str:
+        rows = [([cell(page_para(run(f"{kind} row 1, exact 400 pt")))],
+                 '<w:trHeight w:val="8000" w:hRule="exact"/>'),
+                ([cell(page_para(run(f"{kind} row 2, exact 12 pt")))],
+                 '<w:trHeight w:val="240" w:hRule="exact"/>')]
+        return (rule_table(rows, [TEXT_W], tbl_w=(TEXT_W, "dxa"), fixed=True)
+                + page_para(run(f"{kind} line after the table")))
+
+    cases = [
+        ("header and footer of a 400 pt line, then a 12 pt line", tall_line("header"),
+         tall_line("footer"), {}),
+        ("header and footer of a table of a 400 pt row and a 12 pt row", tall_row("header"),
+         tall_row("footer"), {}),
+    ]
+    body, parts, last = cut_sections(cases)
+    return Doc(
+        "E-header-cut-first-line",
+        "What Word keeps of a header and a footer that leave the body no room when their "
+        "first line, or their first table's row, is taller than 0.4 of the page: a line of "
+        "exact 400 pt followed by a line, and a table of a row of exact 400 pt and a row of "
+        "12 pt followed by a line",
+        body,
+        headers=parts,
+        last_section=last,
+    )
+
+
+def header_cut_margins() -> Doc:
+    # Fixed body edges 420 and 415 pt from the top and bottom (negative margins) leave the
+    # body 6.9 pt on A4; a header of 30 lines ends 395.4 pt from the top, above the body,
+    # and is taller than 0.4 of the page, one of 10 lines is not.
+    margins = (-twips(420), -twips(415))
+    cases = [(f"fixed margins 420 and 415 pt (6.9 pt left), header of {count} lines",
+              exact_lines_para("header", count), "", {"margins": margins})
+             for count in (30, 10)]
+    body, parts, last = cut_sections(cases)
+    return Doc(
+        "E-header-cut-margins",
+        "Whether Word cuts a header when the page's fixed margins alone leave the body less "
+        "room than a line: a header of 30 lines, taller than 0.4 of the page, and one of 10, "
+        "each ending above the body",
+        body,
+        headers=parts,
+        last_section=last,
+    )
+
+
+# Rows of exact height whose cells have top or bottom margins (#461): E-table-row-exact-cut
+# shows Word drawing a row of exact 40 pt 50 pt tall when its first cell has top and bottom
+# margins of 10 pt and holds more text than fits; each case changes one of those.
+def table_row_exact_margins() -> Doc:
+    def exact_table(content: str, tc_pr: str = "", cell_margins: str | None = None) -> str:
+        options = {} if cell_margins is None else {"cell_margins": cell_margins}
+        return rule_table(
+            [row_cells(["r1c1", "r1c2", "r1c3"]),
+             ([cell(content, tc_pr), cell(para(run("r2c2"))), cell(para(run("r2c3")))],
+              '<w:trHeight w:val="800" w:hRule="exact"/>'),
+             row_cells(["r3c1", "r3c2", "r3c3"])],
+            EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True, border_eighths=12, **options,
+        )
+
+    def tc_mar(**sides: int) -> str:
+        return "<w:tcMar>" + "".join(cell_margin(side, twips(points), "dxa")
+                                     for side, points in sides.items()) + "</w:tcMar>"
+
+    table_mar = (cell_margin("top", twips(10), "dxa") + '<w:left w:w="108" w:type="dxa"/>'
+                 + cell_margin("bottom", twips(10), "dxa") + '<w:right w:w="108" w:type="dxa"/>')
+    six = numbered_lines("Cut", 6)
+    cases = [
+        ("its first cell has top and bottom margins of 10 pt and holds one line, which fits",
+         exact_table(para(run("One line")), tc_mar(top=10, bottom=10))),
+        ("its first cell has a top margin of 10 pt and holds 6 lines",
+         exact_table(six, tc_mar(top=10))),
+        ("its first cell has a bottom margin of 10 pt and holds 6 lines",
+         exact_table(six, tc_mar(bottom=10))),
+        ("the table's cell margins are 10 pt at the top and bottom; its first cell holds 6 "
+         "lines", exact_table(six, cell_margins=table_mar)),
+        ("the table's cell margins are 10 pt at the top and bottom; its first cell holds one "
+         "line, which fits", exact_table(para(run("One line")), cell_margins=table_mar)),
+        ("no margins at the top or bottom; its first cell holds 6 lines", exact_table(six)),
+    ]
+    body = "".join(table_case(n, f"row 2 is exactly 40 pt high; {label}", xml)
+                   for n, (label, xml) in enumerate(cases, 1))
+    return Doc(
+        "E-table-row-exact-margins",
+        "How tall Word draws a row of exact height 40 pt whose cells have top or bottom "
+        "margins: the cell's own margins at the top and bottom, at the top only and at the "
+        "bottom only, and the table's, with text that fits and text taller than the row",
+        body + para(run("End of the document.")),
+    )
+
+
+# w:sym in fonts that are no symbol fonts (#566): E-soft-hyphen-font shows Word drawing a
+# w:sym of Noto Sans with code F0AD as Noto Sans's missing-glyph box, not as the soft hyphen
+# of its low byte. Each case puts the w:sym in a run of its own between two halves in
+# Calibri, as E-soft-hyphen-font does.
+def sym_plain_font() -> Doc:
+    half = "Hamburgefontsiv"
+    noto = "Noto Sans"
+    cases = [
+        ("a w:sym of Noto Sans F041, a code U+F000 above A, which Noto Sans has",
+         sym("F041", noto), None),
+        ("a w:sym of Noto Sans F0E9, a code U+F000 above é", sym("F0E9", noto), None),
+        ("a w:sym of Noto Sans F0B7, the bullet code of symbol fonts", sym("F0B7", noto), None),
+        ("a w:sym of Noto Sans 0041, the code of A", sym("0041", noto), None),
+        ("a w:sym of Noto Sans 00E9, the code of é", sym("00E9", noto), None),
+        ("a w:sym of Noto Sans 00AD, the soft hyphen, in the middle of a line",
+         sym("00AD", noto), None),
+        ("a w:sym of Noto Sans 00AD at the end of a line, in a paragraph 150 pt wide",
+         sym("00AD", noto), NARROW),
+        ("a w:sym of Liberation Sans F0B7, the bullet code in another font that is no symbol "
+         "font", sym("F0B7", "Liberation Sans"), None),
+        ("a w:sym of Noto Sans 000D, a control code Noto Sans maps", sym("000D", noto), None),
+        ("a w:sym of Noto Sans 0009, a control code Noto Sans does not map",
+         sym("0009", noto), None),
+    ]
+    body = ""
+    for n, (label, middle, ind) in enumerate(cases, 1):
+        body += para(run(f"Case {n:02d}: {label}:"))
+        body += para(run(half) + middle + run(half), ind=ind)
+    return Doc(
+        "E-sym-plain-font",
+        "How Word draws a w:sym in fonts that are no symbol fonts, Noto Sans and Liberation "
+        "Sans: codes U+F000 above letters they have and the bullet code F0B7, codes below "
+        "U+0100, the soft hyphen 00AD in the middle and at the end of a line, and the control "
+        "codes 000D and 0009, each between two halves in Calibri",
+        body,
+    )
+
+
+# Greek in capitals and small capitals (#555): the reference of
+# business/form-ec-state-aid-notification-el shows Word dropping the tonos in small
+# capitals. Every case is a paragraph in Noto Sans, labelled in Calibri above it.
+GREEK_TONOS = "άέήίόύώ ΐΰ ϊϋ Μάιος"
+GREEK_COMBINING = "άέήίόύώ Μάιος"
+GREEK_CAPITALS = "ΆΈΉΊΌΎΏ Άλλες"
+GREEK_POLYTONIC = "ἄ ῆ ὦ ἄλλος"
+CAPS, SMALL_CAPS = "<w:caps/>", "<w:smallCaps/>"
+
+
+def greek_run(value: str, toggles: str, lang: str | None = None) -> str:
+    """value in Noto Sans 11 pt with the toggles, in the language lang when given (w:lang
+    goes after the size, in the schema's order)."""
+    props = rpr("Noto Sans", 11, toggles)
+    if lang:
+        props = props.replace("</w:rPr>", f'<w:lang w:val="{lang}"/></w:rPr>')
+    return f"<w:r>{props}{text(value)}</w:r>"
+
+
+def greek_caps() -> Doc:
+    cases = [
+        ("Greek letters with tonos and dialytika, and Μάιος, in w:caps", GREEK_TONOS, CAPS, None),
+        ("the same in w:smallCaps", GREEK_TONOS, SMALL_CAPS, None),
+        ("the tonos as a combining U+0301 after each letter, in w:caps", GREEK_COMBINING, CAPS,
+         None),
+        ("the same in w:smallCaps", GREEK_COMBINING, SMALL_CAPS, None),
+        ("capitals typed with their tonos, in w:caps", GREEK_CAPITALS, CAPS, None),
+        *[(f"case 0{k}'s text with w:lang {lang}", value, toggles, lang)
+          for lang in ("el-GR", "en-US")
+          for k, value, toggles in ((1, GREEK_TONOS, CAPS), (2, GREEK_TONOS, SMALL_CAPS),
+                                    (5, GREEK_CAPITALS, CAPS))],
+        ("polytonic letters in w:caps", GREEK_POLYTONIC, CAPS, None),
+        ("the same in w:smallCaps", GREEK_POLYTONIC, SMALL_CAPS, None),
+    ]
+    body = "".join(para(run(f"Case {n:02d}: {label}")) + para(greek_run(value, toggles, lang))
+                   for n, (label, value, toggles, lang) in enumerate(cases, 1))
+    return Doc(
+        "E-greek-caps",
+        "How Word writes Greek in w:caps and w:smallCaps: letters with tonos and dialytika, "
+        "the tonos as a combining character, capitals typed with it, the same with w:lang "
+        "el-GR and en-US, and polytonic letters, in Noto Sans",
+        body,
+    )
+
+
+# Paragraph marks larger than the text in table cells, two cases #537 adds after batch 12:
+# a cell holding only an inline picture (the pictures in the cells of
+# business/form-gsa-reseller-form sit lower in Word than in our layout), and an 8 pt line
+# beside vertically merged cells (generated/invoice-ru, whose 9 pt mark adds nothing there).
+def cell_mark_height_picture() -> Doc:
+    def picture(n: int) -> str:
+        return picture_run(inline_drawing(n, 40, 20, drawing_picture("image1.png", 40, 20)))
+
+    sizes = (9, 11, 20)
+    cells = [cell(para(picture(k), mark=sized(size))) for k, size in enumerate(sizes, 1)]
+    body = (
+        para(run("Case 01: one row of three cells, each holding only an inline picture 20 pt "
+                 "tall, its paragraph mark 9, 11 (the document default) and 20 pt"))
+        + rule_table([cells], EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+        + para(run("The paragraph after the table of case 01."))
+        + para(run("Case 02: the same three pictures in paragraphs of the body"))
+        + "".join(para(picture(k + 3), mark=sized(size)) for k, size in enumerate(sizes, 1))
+        + para(run("End of the document."))
+    )
+    return Doc(
+        "E-cell-mark-height-picture",
+        "How tall Word makes a table cell's line that holds only an inline picture 20 pt tall, "
+        "with a paragraph mark of 9, 11 and 20 pt, and the same lines in the body; Liberation "
+        "Sans",
+        body,
+        run_default_fonts=" ".join(f'w:{slot}="{CELL_FONT}"'
+                                   for slot in ("ascii", "hAnsi", "eastAsia", "cs")),
+        media=(("image1.png", grey_png(53, 27)),),
+    )
+
+
+def cell_mark_height_merged() -> Doc:
+    def eight(value: str) -> str:
+        return para(run(value, size=8))
+
+    def bank_table(merged: bool) -> str:
+        start = '<w:vMerge w:val="restart"/>' if merged else ""
+        go_on = "<w:vMerge/>" if merged else ""
+        rows = [
+            row_cells(["Bank details", "Account", "Code"]),
+            [cell(eight("Account holder: 8 pt text")), cell(eight("Merged account" if merged
+                                                              else "Account 1"), start),
+             cell(eight("Merged code" if merged else "Code 1"), start)],
+            [cell(eight("Recipient's bank: 8 pt text")),
+             cell(para() if merged else eight("Account 2"), go_on),
+             cell(para() if merged else eight("Code 2"), go_on)],
+            row_cells(["Tax number", "Value", "Value"]),
+        ]
+        return rule_table(rows, EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+
+    body = (
+        table_case(1, "rows 2 and 3 hold 8 pt text with 9 pt paragraph marks (the "
+                   "document default), their second and third cells merged vertically",
+                   bank_table(True))
+        + table_case(2, "the same rows without merged cells", bank_table(False))
+        + para(run("End of the document."))
+    )
+    return Doc(
+        "E-cell-mark-height-merged",
+        "How tall Word makes a row of 8 pt text with a 9 pt paragraph mark beside cells merged "
+        "vertically, and the same row without merged cells; Liberation Sans 9 pt by default",
+        body,
+        run_default_fonts=" ".join(f'w:{slot}="{CELL_FONT}"'
+                                   for slot in ("ascii", "hAnsi", "eastAsia", "cs")),
+        run_default_size=9,
+    )
+
+
+# Footnotes, the cases #482 adds after batch 10 (from the reviews of #522 and #557): the
+# space after the last note, notes that cannot start on the page of their reference, notes
+# longer than a page, and the text around a note that is cut. Below a reference line, 32 pt
+# hold the separator and one line of a note (E-footnote-no-room); a line of the 10 pt note
+# text is about 12.2 pt and the separator about 13.4 pt.
+def tall_line(label: str) -> str:
+    """A line 48 pt tall after a reference line, which the room left cannot hold."""
+    return para(run(label), space=spacing(line=("exact", 48)))
+
+
+def footnote_space_after() -> Doc:
+    # 32 pt below the reference line hold the separator and the note's line but not its
+    # space after.
+    cases = [("a one-line note with 12 pt after, 32 pt left below the reference line", 1),
+             ("the same note without space after, in a section of its own", 2)]
+    body = ""
+    for n, (label, note_id) in enumerate(cases, 1):
+        body += (page_para(run(f"Case {n:02d}: {label}"))
+                 + spacer(BODY_HEIGHT - 12 - 12 - 32)
+                 + page_para(run(f"Case {n:02d}: the line that holds the reference")
+                             + note_reference(note_id)))
+        end = tall_line(f"Case {n:02d}: after the reference line, a line 48 pt tall")
+        body += end if n == len(cases) else end.replace("</w:pPr>", f"{section()}</w:pPr>", 1)
+    return Doc(
+        "E-footnote-space-after",
+        "A footnote of one line with 12 pt space after, from a line that leaves room below it "
+        "for the separator and the note's line but not for its space after: whether the line "
+        "stays on its page, and where the note ends; and the same note without space after",
+        body + page_para(run("End of the document.")),
+        footnotes=(note(run(" Footnote 1, one line, 12 pt after."), space=spacing(after=12)),
+                   note(run(" Footnote 2, one line, no space after."))),
+    )
+
+
+# The cases of E-footnote-no-room-after-note: the room left below the reference line of a
+# three-line note with widow control, on a page whose first line references a note of one
+# line. That note and the separator take about 25.6 pt: 42 pt leave room for one line of
+# the second note but not two, 30 pt for none.
+AFTER_NOTE_CASES = (42, 30)
+
+
+def footnote_no_room_after_note() -> Doc:
+    body, footnotes = "", []
+    for n, left in enumerate(AFTER_NOTE_CASES, 1):
+        first, second = 2 * n - 1, 2 * n
+        body += (page_para(run(f"Case {n:02d}: a one-line note from here; a 3-line note, widow "
+                               f"control, {left} pt left") + note_reference(first),
+                           page_break_before=n > 1)
+                 + spacer(BODY_HEIGHT - 12 - 12 - left)
+                 + page_para(run(f"Case {n:02d}: the line that holds the second reference")
+                             + note_reference(second))
+                 + tall_line(f"Case {n:02d}: after the reference line, a line 48 pt tall"))
+        footnotes += [note(run(f" Footnote {first}, one line.")),
+                      note(note_lines(f"Footnote {second}", 3))]
+    return Doc(
+        "E-footnote-no-room-after-note",
+        "A three-line footnote with widow control that cannot start on the page of its "
+        "reference, on a page that already holds a note of one line, with room for one line "
+        "of it and for none: whether Word moves the reference line to the next page or keeps "
+        "it and moves the note",
+        body + page_para(run("End of the document.")),
+        footnotes=tuple(footnotes),
+    )
+
+
+def footnote_longer_than_page() -> Doc:
+    body = (page_para(run("Case 01: a footnote of 120 lines from Line 01, then 40 lines"))
+            + numbered_with_refs("Line", 41, {1: note_reference(1)}))
+    return Doc(
+        "E-footnote-longer-than-page",
+        "A footnote of 120 lines, longer than a page, from the second line of a page, with "
+        "40 lines of text after it: whether a page that holds only the middle of the note "
+        "takes any text, and where the text goes on",
+        body + page_para(run("End of the document.")),
+        footnotes=(note(note_lines("Footnote 1", 120)),),
+    )
+
+
+def footnote_widow_room() -> Doc:
+    # 55 pt hold the separator and three lines of the note but not four; widow control
+    # allows only two and two.
+    body = (page_para(run("Case 01: a 4-line note, widow control, 55 pt left, then a short "
+                          "line"))
+            + spacer(BODY_HEIGHT - 12 - 12 - 55)
+            + page_para(run("Case 01: the line that holds the reference") + note_reference(1))
+            + page_para(run("Case 01: a short line"))
+            + tall_line("Case 01: after the short line, a line 48 pt tall"))
+    return Doc(
+        "E-footnote-widow-room",
+        "A four-line footnote with widow control whose reference line leaves room for the "
+        "separator and three of its lines, followed by a short line: whether the short line "
+        "goes into the room the cut of two and two lines leaves, or to the next page",
+        body + page_para(run("End of the document.")),
+        footnotes=(note(note_lines("Footnote 1", 4)),),
+    )
+
+
+def footnote_cut_lines(mode: int) -> Doc:
+    # The paragraph's second line leaves 100 pt below it: room for its third and fourth
+    # lines, the next paragraph, the separator and a few lines of the 20-line note.
+    def line(value: str, refs: str = "") -> str:
+        return run(value) + refs
+
+    br = line_break_run()
+    four = page_para(
+        line("Case 01 paragraph, line 1") + br
+        + line("Case 01 paragraph, line 2 holds a reference", note_reference(1)) + br
+        + line("Case 01 paragraph, line 3 holds a reference", note_reference(2)) + br
+        + line("Case 01 paragraph, line 4"),
+        widow_control=False,
+    )
+    body = (page_para(run("Case 01: 4 lines, widow control off: line 2 has a 20-line note, "
+                          "line 3 a 1-line one"))
+            + spacer(BODY_HEIGHT - 12 - 24 - 100) + four
+            + page_para(run("Case 01: the paragraph after it, one line")))
+    suffix = "" if mode == 15 else f"-{mode}"
+    return Doc(
+        f"E-footnote-cut-lines{suffix}",
+        "The lines after a line whose footnote is cut, in a paragraph of four lines without "
+        "widow control: its second line references a note too long for the page, its third a "
+        "note of one line, its fourth none, and a paragraph of one line follows: what stays on "
+        f"the page; in compatibility mode {mode}",
+        body + page_para(run("End of the document.")),
+        footnotes=(note(note_lines("Footnote 1", 20)), note(run(" Footnote 2, one line."))),
+        mode=mode,
+    )
+
+
+def footnote_rest_beside_text() -> Doc:
+    # 60 pt below the reference line hold the separator and about three lines of the
+    # 50-line note; its rest leaves room for about nine lines of text on the next page,
+    # less than the 12 lines kept together and the 6 + 6 lines kept with the next.
+    def case(n: int, label: str, text_after: str) -> str:
+        return (page_para(run(f"Case {n:02d}: a 50-line note from the last line, then {label}"),
+                          page_break_before=n > 1)
+                + spacer(BODY_HEIGHT - 12 - 12 - 60)
+                + page_para(run(f"Case {n:02d}: the line that holds the reference")
+                            + note_reference(n))
+                + text_after
+                + page_para(run(f"Case {n:02d}: the line after")))
+
+    kept = page_para(lines([f"Case 01 kept together, line {k}" for k in range(1, 13)]),
+                     keep_lines=True)
+    with_next = (page_para(lines([f"Case 02 kept with the next, line {k}"
+                                  for k in range(1, 7)]), keep_next=True, keep_lines=True)
+                 + page_para(lines([f"Case 02 the next paragraph, line {k}"
+                                    for k in range(1, 7)]), keep_lines=True))
+    body = (case(1, "12 lines kept together", kept)
+            + case(2, "6 lines kept with the next 6", with_next))
+    return Doc(
+        "E-footnote-rest-beside-text",
+        "Text beside the rest of a footnote cut from the last line of a page: a paragraph "
+        "kept together, and one kept with the next, too tall for the room the rest leaves "
+        "on the next page: whether Word moves them past that page or splits them on it",
+        body + page_para(run("End of the document.")),
+        footnotes=(note(note_lines("Footnote 1", 50)), note(note_lines("Footnote 2", 50))),
+    )
+
+
+# Links and bookmarks (#569, for plan PR L1 of the layout, #568): where Word puts a link's
+# annotation on lines of single, 1.5 and exact 30 pt spacing, over two lines and in a table
+# cell, and where a bookmark's destination is, at a paragraph's start and in mid-line. The
+# links go to bookmarks of the document (w:anchor), so they need no relationships; they are
+# coloured and underlined directly.
+LINK_PROPS = '<w:color w:val="0563C1"/><w:u w:val="single"/>'
+
+
+def link(anchor: str, value: str) -> str:
+    """A link to the bookmark anchor whose text is value."""
+    return (f'<w:hyperlink w:anchor="{anchor}" w:history="1">'
+            f"<w:r><w:rPr>{LINK_PROPS}</w:rPr>{text(value)}</w:r></w:hyperlink>")
+
+
+def bookmark(n: int, name: str, content: str = "") -> str:
+    """A bookmark named name, of id n, around content (none: a bookmark of no length)."""
+    return (f'<w:bookmarkStart w:id="{n}" w:name="{name}"/>{content}'
+            f'<w:bookmarkEnd w:id="{n}"/>')
+
+
+def link_boxes() -> Doc:
+    long_text = ("a link long enough to run over two lines of the full width of the text, "
+                 "from the middle of its first line into its second")
+    cases = [
+        ("a link in a line of single spacing", None, "Target_A"),
+        ("a link in a line of 1.5 lines spacing", spacing(line=("auto", 360)), "Target_B"),
+        ("a link in a line of exactly 30 pt spacing", spacing(line=("exact", 30)), "Target_C"),
+    ]
+    body = "".join(
+        para(run(f"Case {n:02d}: before the link, ") + link(anchor, label)
+             + run(", after the link."), space=space)
+        for n, (label, space, anchor) in enumerate(cases, 1)
+    )
+    body += para(run("Case 04: before the link, ") + link("Target_D", long_text)
+                 + run(", after the link."))
+    body += table_case(5, "a link in a table cell", rule_table(
+        [[cell(para(run("Before the link, ") + link("Target_E", "a link in a cell")
+                    + run(", after it."))), cell(para(run("The second cell.")))]],
+        [TEXT_W // 2] * 2, tbl_w=(TEXT_W, "dxa"), fixed=True))
+    targets = [
+        para(bookmark(0, "Target_A") + run("Target A: a bookmark of no length at the start "
+                                           "of this paragraph."), page_break_before=True),
+        para(run("Target B: words before the bookmark, ")
+             + bookmark(1, "Target_B", run("the bookmarked words"))
+             + run(", words after it.")),
+        para(run("Target C: words before a bookmark of no length, ") + bookmark(2, "Target_C")
+             + run("and the words after it.")),
+        para(bookmark(3, "Target_D", run("Target D: a bookmark around this whole "
+                                          "paragraph's words"))),
+        para(run("Target E: words before the bookmark, ")
+             + bookmark(4, "Target_E", run("the bookmarked words")) + run(".")),
+    ]
+    return Doc(
+        "E-link-boxes",
+        "Where Word puts the annotations of links in lines of single, 1.5 lines and exactly "
+        "30 pt spacing, over two lines and in a table cell, and the destinations of the "
+        "bookmarks they go to, of no length at a paragraph's start and in mid-line and around "
+        "words",
+        body + "".join(targets) + para(run("End of the document.")),
+    )
+
+
+# Batch 14, part A: the hypotheses #572 leaves (#586), no-break spaces and narrowed spaces in
+# justified lines (#601, #497), the settings' endnote numbering (#587), rows tied by vertically
+# merged cells (#582), the pages of footnotes past the text (#604), number formats past the
+# references of #498 (#546), and the height of highlights and run shading (#346).
+
+# How far Word drops a subscript (#586 item 1): the sizes of the issue, 12, 24, 36, 48 and 72 pt
+# and every point from 20 to 48, in four fonts whose descents and OS/2 subscript offsets differ.
+SUBSCRIPT_DROP_SIZES = [12, *range(20, 49), 72]
+SUBSCRIPT_DROP_FONTS = ("Calibri", "Liberation Sans", "Noto Sans", BARCODE_FONT)
+SUBSCRIPT = '<w:vertAlign w:val="subscript"/>'
+
+
+def font_props(font: str, size: float) -> str:
+    """The run properties of text in font at size points."""
+    f = attr(font)
+    hp = half_points(size)
+    return (f'<w:rFonts w:ascii="{f}" w:hAnsi="{f}" w:eastAsia="{f}" w:cs="{f}"/>'
+            f'<w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>')
+
+
+def subscript_drop() -> Doc:
+    # E-superscript, -sizes and -steps (Calibri and Liberation Sans, 8 to 48 pt) fit both a
+    # drop by the descent and a fixed share of the size. The label is Calibri 11 pt, smaller
+    # than every sample; the sample, "Base" and the subscript "123", is in the case's font and
+    # size, so the line holds no other text of that font at that size. Each font starts a
+    # page.
+    body, n = "", 0
+    for k, font in enumerate(SUBSCRIPT_DROP_FONTS):
+        for size in SUBSCRIPT_DROP_SIZES:
+            n += 1
+            props = font_props(font, size)
+            body += labelled(n, f"{font} {size} pt, subscript", styled_run("Base", props),
+                             styled_run("123", props + SUBSCRIPT),
+                             page_break_before=k > 0 and size == SUBSCRIPT_DROP_SIZES[0])
+    return Doc(
+        "E-subscript-drop",
+        "The baseline shift of subscript text at 12 pt, at every point from 20 to 48 pt and "
+        "at 72 pt, in Calibri, Liberation Sans, Noto Sans and Libre Barcode 128, one font "
+        "after the other: whether the drop follows the font's descent, its OS/2 subscript "
+        "offset or a fixed share of the size",
+        body,
+    )
+
+
+# The last lines of a chain kept with the next that cannot move (#586 item 2). Lines of exact
+# 12 pt, 58 to a page, as in E-keepnext-break; every label is the first line of its case and
+# fits one line. Widow control is set on every paragraph, since the document defaults turn it
+# on: off where the case repeats a known render with one thing changed, on where the label
+# says so.
+def kept_lines(prefix: str, count: int) -> list[str]:
+    return [f"{prefix}, line {k}" for k in range(1, count + 1)]
+
+
+def kept_break(n: int, after: int, widow: bool) -> str:
+    """The kept paragraph of E-keepnext-break case 02: one line, a page break, and after
+    lines more."""
+    return page_para(run(f"Case {n:02d} kept: A") + page_break_run()
+                     + lines(kept_lines(f"Case {n:02d} kept", after)),
+                     keep_next=True, widow_control=widow)
+
+
+def together(n: int, count: int, widow: bool, **props) -> str:
+    return page_para(lines(kept_lines(f"Case {n:02d} together", count)), keep_lines=True,
+                     widow_control=widow, **props)
+
+
+def keepnext_last_lines() -> Doc:
+    # E-keepnext-break, case 02 (widow control off): the last line of a kept paragraph that a
+    # page break inside it keeps from moving goes to the page of the 3 lines kept together
+    # after it. Case 01 is that case with widow control on; cases 02 and 03 a kept paragraph
+    # that can move (it starts mid-page, 51 + 6 lines leave one line for the 3); case 04 one
+    # that starts a page through w:pageBreakBefore (56 + 3 lines are more than 58); case 05
+    # the 56 lines after the break followed by 58 kept together, a page's worth; case 06 a
+    # table whose first row of 3 lines may not split after 56 lines; case 07 a chain of a
+    # 10-line paragraph and 55 one-line paragraphs from the top of a page.
+    off, on = {"widow_control": False}, {"widow_control": True}
+    body = filler(20, "Case 01: 20 lines, then a kept paragraph with a page break and 56 lines; "
+                  "widow control on", **on)
+    body += kept_break(1, 56, True) + together(1, 3, True)
+    for n, widow in ((2, False), (3, True)):
+        state = "on" if widow else "off"
+        body += filler(51, f"Case {n:02d}: 51 lines, a kept paragraph of 6 lines, 3 lines kept "
+                       f"together; widow control {state}", page_break_before=True,
+                       widow_control=widow)
+        body += page_para(lines(kept_lines(f"Case {n:02d} kept", 6)), keep_next=True,
+                          widow_control=widow)
+        body += together(n, 3, widow)
+    body += page_para(lines(["Case 04: kept, 56 lines from page break before; 3 lines kept "
+                             "together follow; widow control off"]
+                            + kept_lines("Case 04 kept", 56)[1:]),
+                      keep_next=True, page_break_before=True, **off)
+    body += together(4, 3, False)
+    body += filler(20, "Case 05: 20 lines, a kept paragraph with a page break and 56 lines, "
+                   "58 kept together; widow off", page_break_before=True, **off)
+    body += kept_break(5, 56, False) + together(5, 58, False)
+    body += page_para(lines(["Case 06: kept, 56 lines from page break before; then a table, "
+                             "its row 1 may not split; widow off"]
+                            + kept_lines("Case 06 kept", 56)[1:]),
+                      keep_next=True, page_break_before=True, **off)
+    rows = [([cell(page_para(lines(kept_lines("Case 06 row 1", 3)), **off)),
+              cell(page_para(run("Case 06 row 1, second cell"), **off))], "<w:cantSplit/>"),
+            [cell(page_para(run("Case 06 row 2"), **off)),
+             cell(page_para(run("Case 06 row 2, second cell"), **off))]]
+    body += rule_table(rows, HALF_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+    body += page_para(run("Case 06: the paragraph after the table"), **off)
+    body += page_para(lines(["Case 07: from a page's top, kept 10 lines, then 55 one-line "
+                             "paragraphs, 54 kept; widow off"]
+                            + kept_lines("Case 07 kept", 10)[1:]),
+                      keep_next=True, page_break_before=True, **off)
+    body += one_liners("Case 07 chain", 54, keep_next=True, **off)
+    body += page_para(run("Case 07 chain 55, not kept with the next"), **off)
+    return Doc(
+        "E-keepnext-last-lines",
+        "The last lines of a chain kept with the next whose next paragraph does not fit below "
+        "it: E-keepnext-break case 02 with widow control on, a kept paragraph of 6 lines "
+        "mid-page without and with widow control, one of 56 lines from page break before, "
+        "56 lines after a page break before 58 kept together, a table whose first row may "
+        "not split, and a chain of a 10-line paragraph and one-line paragraphs longer than a "
+        "page",
+        body + page_para(run("End of the document.")),
+    )
+
+
+def keepnext_last_lines_section() -> Doc:
+    # #586 item 2, case 7: the chain of E-keepnext-last-lines case 04 (a kept paragraph of 56
+    # lines, then 3 lines kept together, no page break inside), here kept from moving by the
+    # start of a section on the next page instead of page break before: once with widow
+    # control off, as case 04, and once on, as case 01.
+    body = page_para(run("Two cases, each a chain at the start of a section on the next page"),
+                     sect=section())
+    for n, widow in ((1, False), (2, True)):
+        state = "on" if widow else "off"
+        body += page_para(lines([f"Case {n:02d}: a section starts with a kept paragraph of 56 "
+                                 f"lines; 3 lines kept together; widow {state}"]
+                                + kept_lines(f"Case {n:02d} kept", 56)[1:]),
+                          keep_next=True, widow_control=widow)
+        body += together(n, 3, widow, sect=section() if n == 1 else None)
+    return Doc(
+        "E-keepnext-last-lines-section",
+        "A chain kept with the next at the start of a section on the next page: a kept "
+        "paragraph of 56 lines and 3 lines kept together, which do not fit a page, without "
+        "and with widow control",
+        body,
+        last_section=section(),
+    )
+
+
+# Multiple line spacing at the foot of a page (#586 item 3). A single line of Calibri 11 pt is
+# its OS/2 Windows ascent and descent, 1950 and 550 of 2048 units (Carlito's are the same), and
+# a footnote's line of 10 pt the same share of 10 pt. The room multiple spacing adds goes below
+# a line's text; the room at least spacing adds goes above it, and a line of exact height has
+# its baseline at 0.8 of its height (lines.rs, from E-line-exact), with the descent below it.
+CALIBRI_ASCENT, CALIBRI_DESCENT = 1950 / 2048, 550 / 2048
+CALIBRI_11_LINE = (CALIBRI_ASCENT + CALIBRI_DESCENT) * 11
+NOTE_LINE = (CALIBRI_ASCENT + CALIBRI_DESCENT) * 10
+BODY_TEXT = (PAGE_H - 2 * MARGIN) / 20
+EXACT_20 = spacing(line=("exact", 20))
+# (label, w:spacing of the case's lines, the first line's height, where in the second line its
+# text ends), the spacing given as (w:lineRule, w:line).
+FOOT_SPACINGS = [
+    ("spaced 3 lines (w:line 720)", ("auto", 720), 3 * CALIBRI_11_LINE, CALIBRI_11_LINE),
+    ("spaced 1.15 lines (w:line 276)", ("auto", 276), 1.15 * CALIBRI_11_LINE, CALIBRI_11_LINE),
+    ("at least 40 pt", ("atLeast", 40), 40, 40),
+    ("exactly 40 pt", ("exact", 40), 40, 0.8 * 40 + CALIBRI_DESCENT * 11),
+]
+
+
+def exact_twips(value: int) -> str:
+    """An empty paragraph exactly value twips tall, without widow control."""
+    return para("", space=f'<w:spacing w:line="{value}" w:lineRule="exact"/>',
+                widow_control=False)
+
+
+def foot_case(n: int, spaced: tuple, side: int, where: str, note_id: int) -> tuple[str, str]:
+    """A page of one case: lines of exact 20 pt from the top of the body (or of a table cell
+    under a 20 pt label and the table's 0.5 pt top border, below which Word starts the cell's
+    first line in E-footnote-table's render), an empty paragraph of exact
+    height, a whole number of twips, that puts the end of the text of the case's second line
+    side pt from the limit
+    (the bottom margin, or the top of one footnote line under its separator), the case's two
+    lines, and a paragraph after them; widow control off. Returns the page's paragraphs and
+    the note, if any."""
+    label, (rule, value), first, text_end = spaced
+    off = {"widow_control": False}
+    limit = BODY_TEXT - (CALIBRI_11_LINE + NOTE_LINE if where == "note" else 0)
+    start = 20 + 0.5 if where == "cell" else 0
+    top = limit + side - text_end - first
+    count = int((top - start - 1) // 20)
+    room = round((top - start - 20 * count) * 20)
+    limit_name = "the footnotes" if where == "note" else "the bottom margin"
+    place = " in a cell" if where == "cell" else ""
+    title = (f"Case {n:02d}: {label}{place}; line 2's text ends 1 pt "
+             f"{'above' if side < 0 else 'below'} {limit_name}")
+    case_lines = para(lines(kept_lines(f"Case {n:02d} {label}", 2)),
+                      space=spacing(line=(rule, value)), **off)
+    after = page_para(run(f"Case {n:02d}: the paragraph after"), space=EXACT_20, **off)
+    fill = [f"Case {n:02d} filler line {k}" for k in range(1, count + 1)]
+    if where == "cell":
+        content = (page_para(lines(fill), space=EXACT_20, **off) + exact_twips(room) + case_lines
+                   + page_para(lines(kept_lines(f"Case {n:02d} more of the cell", 3)),
+                               space=EXACT_20, **off))
+        table_xml = rule_table([[cell(content), cell(page_para(run(f"Case {n:02d} second cell"),
+                                                               space=EXACT_20, **off))]],
+                               HALF_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+        page = page_para(run(title), space=EXACT_20, page_break_before=n > 1, **off) + table_xml
+        return page + after, ""
+    reference = note_reference(note_id) if where == "note" else ""
+    first_line = page_para(run(title) + reference + line_break_run()
+                           + lines(fill[1:]), space=EXACT_20, page_break_before=n > 1, **off)
+    note_xml = note(run(f" Footnote {note_id}, one line.")) if where == "note" else ""
+    return first_line + exact_twips(room) + case_lines + after, note_xml
+
+
+def line_multiple_foot(mode: int) -> Doc:
+    # E-line-multiple (mode 15) keeps a line spaced 3 lines whose text fits, the room below
+    # its text reaching 3.7 pt past the bottom margin. Here the text of the second of two
+    # lines ends 1 pt above and 1 pt below the bottom margin, spaced 3 and 1.15 lines, then
+    # the same above a footnote of one line and in a table cell cut across pages, and
+    # lines of at least and of exactly 40 pt placed the same way: an exact 40 pt line whose
+    # text ends 1 pt above the margin reaches 4.0 pt past it, an at least one does not.
+    body, notes, n = "", [], 0
+    for where, spacings in (("body", FOOT_SPACINGS[:2]), ("note", FOOT_SPACINGS[:2]),
+                            ("cell", FOOT_SPACINGS[:2]), ("body", FOOT_SPACINGS[2:])):
+        for spaced in spacings:
+            for side in (-1, 1):
+                n += 1
+                page, note_xml = foot_case(n, spaced, side, where, len(notes) + 1)
+                body += page
+                if note_xml:
+                    notes.append(note_xml)
+    suffix = "" if mode == 15 else f"-{mode}"
+    return Doc(
+        f"E-line-multiple-foot{suffix}",
+        "The last of two lines spaced 3 and 1.15 lines whose text ends 1 pt above and 1 pt "
+        "below the bottom margin: whether the room the spacing adds below the text may reach "
+        "past the body; the same above a footnote and in a table cell cut across pages, and "
+        "lines of at least and exactly 40 pt placed so; widow control off; in compatibility "
+        f"mode {mode}",
+        body + page_para(run("End of the document."), widow_control=False),
+        footnotes=tuple(notes),
+        mode=mode,
+    )
+
+
+def table_header_repeat_off() -> Doc:
+    # E-table-header-repeat-tall: header rows kept whole that take more than a page are left
+    # off the table's last pages, and the paragraph after the table goes to a new page. Case
+    # 01 is E-table-header-repeat-single-tall (a header row of 60 lines, which Word cuts over
+    # two pages) with 50 body rows, which go on to a page after the header row's last; case 02
+    # header rows that fit a page with room for one short row below them, and a body row of
+    # 10 lines that may not split, which does not fit under them on the next page either;
+    # cases 03 to 05 the table of -tall with 30 body rows, followed at once by a second
+    # table, by an empty paragraph ending the section before a continuous one, and by a
+    # paragraph with 24 pt before.
+    header = "<w:tblHeader/>"
+
+    def head(n: int, r: int, count: int) -> tuple:
+        return ([cell(numbered_lines(f"Case {n:02d} head {r}", count)),
+                 cell(para(run(f"Case {n:02d} head {r}b"))),
+                 cell(para(run(f"Case {n:02d} head {r}c")))], header)
+
+    def rows(n: int, count: int) -> list:
+        return [row_cells([f"Case {n:02d} body {r:02d}a", f"body {r:02d}b", f"body {r:02d}c"])
+                for r in range(1, count + 1)]
+
+    def table_of(rows_xml: list) -> str:
+        return rule_table(rows_xml, EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True,
+                          border_eighths=48)
+
+    def label(n: int, value: str) -> str:
+        return para(run(f"Case {n:02d}: {value}"), page_break_before=n > 1)
+
+    tall = "2 header rows of 35 lines, 30 body rows, then"
+    body = (label(1, "row 1 is a header row of 60 lines; 50 body rows follow, then a paragraph")
+            + table_of([head(1, 1, 60)] + rows(1, 50))
+            + para(run("Case 01: the paragraph after the table")))
+    tall_row = ([cell(numbered_lines("Case 02 tall row", 10)), cell(para(run("tall row b"))),
+                 cell(para(run("tall row c")))], "<w:cantSplit/>")
+    body += (label(2, "header rows 1 and 2 of 22 lines each, a body row of 1 line, one of 10 "
+                   "that may not split")
+             + table_of([head(2, 1, 22), head(2, 2, 22)] + rows(2, 1) + [tall_row])
+             + para(run("Case 02: the paragraph after the table")))
+    second = rule_table([row_cells([f"Case 03 second table, row {r}", f"row {r}b"])
+                         for r in range(1, 4)], HALF_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+    body += (label(3, f"{tall} at once a second table of 2 columns")
+             + table_of([head(3, 1, 35), head(3, 2, 35)] + rows(3, 30)) + second
+             + para(run("Case 03: the paragraph after the second table")))
+    body += (label(4, f"{tall} a continuous section break")
+             + table_of([head(4, 1, 35), head(4, 2, 35)] + rows(4, 30))
+             + para(sect=section())
+             + para(run("Case 04: the first paragraph of the continuous section")))
+    body += (label(5, f"{tall} a paragraph with 24 pt before")
+             + table_of([head(5, 1, 35), head(5, 2, 35)] + rows(5, 30))
+             + para(run("Case 05: the paragraph after the table, 24 pt before"),
+                    space=spacing(before=24)))
+    return Doc(
+        "E-table-header-repeat-off",
+        "Tables that go on without their header rows (w:tblHeader): a header row of 60 lines "
+        "with 50 body rows, then a paragraph; header rows just under a page and a body row "
+        "that may not split, with the table ending on the next page; and two header rows of "
+        "35 lines followed by a second table, by a continuous section break and by a "
+        "paragraph with space before",
+        body + para(run("End of the document.")),
+        last_section=section(kind="continuous"),
+    )
+
+
+# No-break spaces in justified lines (#601). Each case's first line holds 14 words of
+# Liberation Sans 11 pt, about 30 pt narrower than the text, before "information", which does
+# not fit even with the spaces narrowed by a fifth; "~" stands for the case's space and "-" for
+# a w:noBreakHyphen. The lines were set by their advances in Liberation Sans, which the test
+# measures.
+JUSTIFY_FONT = "Liberation Sans"
+NBSP_SPACES = ("\u00a0", "\u202f", "\u2007")
+NBSP_LINES = {
+    "\u00a0": (
+        "during order there state each~already follow group before point word heard since about",
+        "place earth been because~~~since know home most even-~move times same state have",
+        "each~three~much~bring~many~above~house~paper~where~better~earth~years~family~home",
+    ),
+    "\u202f": (
+        "years water round whole thing~since come earth though bring which found house study",
+        "world never need carry~~~open young house found name-~group came which great other",
+        "when~often~leave~before~times~heard~bring~during~while~because~home~house~stand~each",
+    ),
+    "\u2007": (
+        "being made show follow found~good heard great years seem were answer stand three",
+        "many came need what~~~often paper letter study again-~could round found some well",
+        "two~both~carry~their~place~times~room~bring~home~leave~short~water~know~large",
+    ),
+}
+NBSP_NAMES = {"\u00a0": "no-break space U+00A0", "\u202f": "narrow no-break space U+202F",
+              "\u2007": "figure space U+2007"}
+
+
+def justified_runs(value: str, props: str) -> str:
+    """One run of value, with a w:noBreakHyphen at every U+2011 in it."""
+    inner = "<w:noBreakHyphen/>".join(text(piece) for piece in value.split("\u2011"))
+    return f"<w:r><w:rPr>{props}</w:rPr>{inner}</w:r>"
+
+
+def justify_nbsp(mode: int) -> Doc:
+    props = font_props(JUSTIFY_FONT, 11)
+    body, n = "", 0
+    for space in NBSP_SPACES:
+        name = NBSP_NAMES[space]
+        for shape, template in enumerate(NBSP_LINES[space]):
+            n += 1
+            words = template.replace("-", " ").replace("~", " ").split()
+            if shape == 0:
+                at = template.split("~")[0].split()[-1]
+                what = f"one {name} after \"{at}\""
+            elif shape == 1:
+                at = template.split("~")[0].split()[-1]
+                what = f"three {name} after \"{at}\", one after a non-breaking hyphen"
+            else:
+                what = f"only {name} between the {len(words)} words of line 1"
+            line = template.replace("-", "\u2011").replace("~", space)
+            body += para(run(f"Case {n:02d}: {what}"), space=spacing(before=6))
+            body += para(justified_runs(line + " information ends the case.", props), jc="both")
+    return Doc(
+        f"E-justify-nbsp-{mode}",
+        "Justified lines of Liberation Sans 11 pt that need their gaps widened, holding a "
+        "no-break space (U+00A0) between two words, three in a row and one after a "
+        "non-breaking hyphen (w:noBreakHyphen), and only no-break spaces; the same with the "
+        "narrow no-break space U+202F and the figure space U+2007: whether they widen as the "
+        f"spaces do; in compatibility mode {mode}",
+        body,
+        mode=mode,
+    )
+
+
+# The endnote numbering of the settings (#587): Word ignores the settings' w:footnotePr
+# (E-footnote-numbering-settings); whether it takes their w:endnotePr where a section has none.
+def endnote_numbering_settings() -> Doc:
+    def refs(first: int) -> list[str]:
+        return [run(f"Line {k} holds a reference") + note_reference(first + k - 1, "endnote")
+                for k in (1, 2)]
+
+    pages = [
+        ([[run("Section 1: no w:endnotePr in the section")] + refs(1)], section()),
+        ([[run("Section 2: lowerLetter in the section's w:endnotePr")] + refs(3)],
+         section(notes=section_notes(endnotes=note_props(fmt="lowerLetter")))),
+    ]
+    return Doc(
+        "E-endnote-numbering-settings",
+        "Endnote numbers set by the document-wide w:endnotePr of the settings (upper Roman "
+        "from 3, restarting in each section, at the end of the document): in a section "
+        "without w:endnotePr and in one whose w:endnotePr gives lower-case letters only, two "
+        "references each",
+        note_pages(pages),
+        endnotes=tuple(note(run(f" Endnote {k}, one line."), kind="endnote") for k in range(1, 5)),
+        endnote_props=note_props(pos="docEnd", fmt="upperRoman", start=3, restart="eachSect"),
+        last_section=pages[-1][1],
+    )
+
+
+# Rows tied by vertically merged cells (#582). Three columns of Liberation Sans 11 pt text with
+# all borders; a merge's text is one paragraph of the lines its label names.
+RESTART = '<w:vMerge w:val="restart"/>'
+GO_ON = "<w:vMerge/>"
+
+
+def merge_text(value: str, count: int, **props) -> str:
+    return para(lines([f"{value}, line {k}" for k in range(1, count + 1)]), **props)
+
+
+def merged_only_row(n: int, merge: int, own: int, *, margins: bool = False,
+                    before: bool = False, height: str = "") -> str:
+    """Row 2 holds only merged cells: the rest of a merge from row 1, a merge of merge lines
+    starting (with top and bottom cell margins of 4 pt, or 6 pt space before its text) and
+    one of one line starting; row 3 has a cell of own lines and the two merges' rest; height
+    is row 2's w:trHeight."""
+    tc_mar = ('<w:tcMar><w:top w:w="80" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/>'
+              "</w:tcMar>") if margins else ""
+    space = {"space": spacing(before=6)} if before else {}
+    rows = [
+        [cell(para(run(f"Case {n:02d} merge from row 1")), RESTART),
+         cell(para(run("Row 1 b"))), cell(para(run("Row 1 c")))],
+        ([cell(para(), GO_ON),
+          cell(merge_text(f"Case {n:02d} merge from row 2", merge, **space), RESTART + tc_mar),
+          cell(para(run("Merge from row 2")), RESTART)], height),
+        [cell(merge_text("Row 3 own", own)), cell(para(), GO_ON), cell(para(), GO_ON)],
+        row_cells(["Row 4 a", "Row 4 b", "Row 4 c"]),
+    ]
+    return rule_table(rows, EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+
+
+def tall_merge(n: int, height: str = "") -> str:
+    """A merge of 5 lines over rows 2 and 3, which have cells of one line of their own;
+    height is the w:trHeight of rows 2 and 3."""
+    rows = [
+        row_cells(["Row 1 a", "Row 1 b", "Row 1 c"]),
+        ([cell(merge_text(f"Case {n:02d} merge", 5), RESTART), cell(para(run("Row 2 own b"))),
+          cell(para(run("Row 2 own c")))], height),
+        ([cell(para(), GO_ON), cell(para(run("Row 3 own b"))), cell(para(run("Row 3 own c")))],
+         height),
+        row_cells(["Row 4 a", "Row 4 b", "Row 4 c"]),
+    ]
+    return rule_table(rows, EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+
+
+def continuations_only(n: int, first: int) -> str:
+    """Row 1 starts three merges, the first of first lines; row 2 holds only their rest."""
+    rows = [
+        [cell(merge_text(f"Case {n:02d} merge a", first), RESTART),
+         cell(para(run("Merge b")), RESTART), cell(para(run("Merge c")), RESTART)],
+        [cell(para(), GO_ON), cell(para(), GO_ON), cell(para(), GO_ON)],
+        row_cells(["Row 3 a", "Row 3 b", "Row 3 c"]),
+    ]
+    return rule_table(rows, EVEN_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+
+
+def table_vmerge_heights(mode: int) -> Doc:
+    # generated/invoice-ru: a row holding the rest of a one-line merge and the start of a
+    # merge of one line is a line of that text high, and the row after it as tall as its own
+    # text. #578 gives such a row the first line of the merges that start in it, with their
+    # cell margins, and lets a merge taller than its rows make the last of them taller.
+    at_least = '<w:trHeight w:val="400" w:hRule="atLeast"/>'
+    exact = '<w:trHeight w:val="400" w:hRule="exact"/>'
+    cases = [(f"row 2 holds only merged cells, its merge {merge} line{'s' * (merge > 1)}; "
+              f"row 3's own cell {own} line{'s' * (own > 1)}",
+              lambda n, m=merge, o=own: merged_only_row(n, m, o))
+             for own in (1, 3) for merge in (1, 2, 3)]
+    cases += [
+        ("as case 02, the merge's cell with 4 pt top and bottom margins (w:tcMar)",
+         lambda n: merged_only_row(n, 2, 1, margins=True)),
+        ("as case 02, the merge's text with 6 pt space before",
+         lambda n: merged_only_row(n, 2, 1, before=True)),
+        ("a merge of 5 lines over rows 2 and 3, which have cells of 1 line of their own",
+         tall_merge),
+        ("row 2 holds only the rest of three merges of 1 line from row 1",
+         lambda n: continuations_only(n, 1)),
+        ("row 2 holds only the rest of three merges from row 1, the first of 3 lines",
+         lambda n: continuations_only(n, 3)),
+        ("as case 03, row 2 at least 20 pt (w:trHeight)",
+         lambda n: merged_only_row(n, 3, 1, height=at_least)),
+        ("as case 03, row 2 exactly 20 pt (w:trHeight)",
+         lambda n: merged_only_row(n, 3, 1, height=exact)),
+        ("as case 09, rows 2 and 3 at least 20 pt (w:trHeight)",
+         lambda n: tall_merge(n, at_least)),
+        ("as case 09, rows 2 and 3 exactly 20 pt (w:trHeight)",
+         lambda n: tall_merge(n, exact)),
+    ]
+    body = ""
+    for n, (label, make) in enumerate(cases, 1):
+        # Cases 07 and 12 start a page, so that no table is cut over pages.
+        body += para(run(f"Case {n:02d}: {label}"), page_break_before=n in (7, 12),
+                     space=spacing(before=12)) + make(n)
+    suffix = "" if mode == 15 else f"-{mode}"
+    return Doc(
+        f"E-table-vmerge-heights{suffix}",
+        "The heights of table rows tied by vertically merged cells (w:vMerge): a row of only "
+        "merged cells starting a merge of 1, 2 and 3 lines, with the next row's own cell of 1 "
+        "and 3 lines; that merge with cell margins and with space before; a merge of 5 lines "
+        "over two rows of one line; a row of only continuations; and rows of at least and "
+        f"exact height; Liberation Sans; in compatibility mode {mode}",
+        body + para(run("End of the document.")),
+        mode=mode,
+        run_default_fonts=" ".join(f'w:{slot}="{CELL_FONT}"'
+                                   for slot in ("ascii", "hAnsi", "eastAsia", "cs")),
+    )
+
+
+# Narrowed spaces in justified lines (#497, #606). Each case's first line is a line of words of
+# Liberation Sans 11 pt and the word after it, which fits on the line only if the line's spaces,
+# the one before that word included, narrow by the share the label names; the label also says
+# how much of the word reaches past the margin at the spaces' natural width, as a share of its
+# own width. Cases 01 to 05 need 5 to 30 % with a long word; cases 06 to 14 about 10 and about
+# 20 % with words of different widths; cases 15 to 21 the same share of a word, with 5 to 25
+# spaces. The words were set by their advances in Liberation Sans, which the test measures;
+# its advances fall near steps of 0.61 pt, so the shares are near, not at, round numbers.
+NARROW_CASES = [
+    # (the first line's words, the next word, its share of the spaces, its share past the end)
+    ("more shall clear paper round carry follow found them learn other went differ came",
+     "information", 5.5, 4.3),
+    ("great know word letter went what think could leave because here must place plain",
+     "information", 9.9, 7.8),
+    ("home here even which under years much young each stand make might line about",
+     "information", 19.9, 15.7),
+    ("open been family often before sound page letter point seem learn while heard differ",
+     "information", 25.7, 20.2),
+    ("study bring hand about page being short came name never even sound each would",
+     "information", 30.0, 23.6),
+    ("think mother together room never before while which follow every where plain again "
+     "white", "two", 9.8, 24.6),
+    ("thing home early close page stand went must there place administrations much read "
+     "along", "be", 9.9, 34.6),
+    ("came here great have order home good administrations earth point learn write again "
+     "began", "at", 9.9, 46.4),
+    ("while responsibilities story here even there name open carry think state study should "
+     "began", "is", 9.9, 53.2),
+    ("show short family thing spell room today have what keep already most understandings "
+     "want", "a", 9.9, 69.0),
+    ("water round simple them below make world show above must same where people after",
+     "should", 19.8, 26.2),
+    ("open learn them were clear have many come near administrations here order even house",
+     "time", 19.9, 40.9),
+    ("because during hand began count thing round above would when work every leave mother",
+     "the", 20.0, 56.0),
+    ("name together sound second clear without under differ what figure never years where "
+     "room", "on", 19.9, 69.6),
+    ("you point and went call the left side later she kind line said next best this we that "
+     "who boy", "time", 9.9, 29.2),
+    ("above change together should already could mother during electroencephalograph paper",
+     "time", 20.0, 29.4),
+    ("through misinterpretations because together uncharacteristically house "
+     "interdepartmental", "time", 28.3, 29.2),
+    ("institutionalisation internationalisation leave electroencephalograph "
+     "compartmentalisation", "time", 39.8, 29.3),
+    ("he of my in is its start way go next day you will put up no by right be now part to "
+     "year for as", "the", 10.3, 51.5),
+    ("might without short which plain much compartmentalisation should need home whole there",
+     "the", 21.5, 51.6),
+    ("straightforwardness question because responsibilities enough experimentation page "
+     "group", "the", 30.0, 47.9),
+]
+
+
+def justify_narrow(mode: int) -> Doc:
+    props = font_props(JUSTIFY_FONT, 11)
+    body = ""
+    for n, (words, word, share, past) in enumerate(NARROW_CASES, 1):
+        count = len(words.split())
+        body += para(run(f"Case {n:02d}: {count} spaces narrowed {share:.1f} % hold \"{word}\", "
+                         f"{past:.1f} % of it past the margin"), space=spacing(before=6))
+        body += para(styled_run(f"{words} {word} and the second line ends the case.", props),
+                     jc="both")
+    suffix = "" if mode == 15 else f"-{mode}"
+    return Doc(
+        f"E-justify-narrow{suffix}",
+        "Justified lines of Liberation Sans 11 pt whose next word fits only if their spaces "
+        "narrow by about 5, 10, 20, 25 and 30 %; at about 10 and 20 %, next words of different "
+        "widths, so that from a quarter to seven tenths of the word reaches past the margin; "
+        "and the same word as far past the margin with 5 to 25 spaces: how far Word narrows "
+        f"the spaces to keep the word; in compatibility mode {mode}",
+        body,
+        mode=mode,
+    )
+
+
+# The pages of footnotes past the last page of text (#604): section 1 has one line; section 2,
+# continuous and with a title page, has one line that references a note of 12 lines of exact
+# 120 pt. Page 1 has room for five of them below the two lines and the separator, each later
+# page for five below the continuation separator, so the note runs onto two more pages.
+def footnote_pages_section() -> Doc:
+    def header(name: str, label: str) -> tuple[str, str]:
+        return header_part(name, page_para(run(label)))
+
+    first = (("headerReference", "default", "header1.xml"),
+             ("footerReference", "default", "footer1.xml"))
+    second = (("headerReference", "default", "header2.xml"),
+              ("headerReference", "first", "header3.xml"),
+              ("footerReference", "default", "footer2.xml"),
+              ("footerReference", "first", "footer3.xml"))
+    body = (para(run("Section 1: one line"), sect=section(refs=first))
+            + para(run("Section 2: continuous, a title page; this line references a note of 12 "
+                       "lines of 120 pt") + note_reference(1)))
+    return Doc(
+        "E-footnote-pages-section",
+        "A footnote of 12 lines of exact 120 pt that runs two pages past the last line of "
+        "text, referenced from a continuous section with a title page after a section of one "
+        "line: which section's headers and footers the note's pages take, and how they count "
+        "in SECTIONPAGES",
+        body,
+        headers=(header("header1.xml", "Header of section 1, default"),
+                 counting_footer("footer1.xml", "Footer of section 1, default: page"),
+                 header("header2.xml", "Header of section 2, default"),
+                 header("header3.xml", "Header of section 2, first page"),
+                 counting_footer("footer2.xml", "Footer of section 2, default: page"),
+                 counting_footer("footer3.xml", "Footer of section 2, first page: page")),
+        footnotes=(note(note_lines("Footnote 1", 12), space=spacing(line=("exact", 120))),),
+        last_section=section(kind="continuous", refs=second, title_page=True),
+    )
+
+
+# Number formats past what E-number-formats and E-number-formats-letters show (#546). Each case
+# is a section of one page whose numbers start where its label says; PAGE fields show the
+# number in the formats the label names, with \* Arabic beside them.
+def number_cases(cases: list[tuple[int, str | None, list[str]]], first: int = 1) -> list:
+    """Sections for (page start, page number format, \\* switches of PAGE)."""
+    sections = []
+    for n, (start, page_format, switches) in enumerate(cases, first):
+        what = "Chicago page numbers" if page_format else "page numbers"
+        contents = [run(f"Case {n:02d}: {what} restarted at {start}")]
+        for switch in switches:
+            instr = f"PAGE \\* {switch}" if switch else "PAGE"
+            contents.append(run(f"{instr}: ") + field(instr))
+        sections.append((contents, section(page_start=start, page_format=page_format)))
+    return sections
+
+
+def number_formats_limits() -> Doc:
+    words = ["CardText", "OrdText", "DollarText", "Arabic"]
+    cases = [(999999, None, words), (1000000, None, words)]
+    cases += [(start, None, ["Hex", "Arabic"]) for start in (32767, 32768, 65536)]
+    cases += [(start, "chicago", ["", "Arabic"]) for start in (118, 120, 121, 200, 256, 257, 1000)]
+    cases += [(start, None, ["ROMAN", "Arabic"]) for start in (64999, 65000, 100000)]
+    cases += [(27, None, ["CardText \\* Caps", "OrdText \\* Upper", "Arabic"])]
+    sections = number_cases(cases)
+    return Doc(
+        "E-number-formats-limits",
+        "PAGE fields past the limits of the references: numbers in words (CardText, OrdText, "
+        "DollarText) at 999999 and 1000000, Hex at 32767, 32768 and 65536, Chicago page "
+        "numbers restarted at 118, 120, 121, 200, 256, 257 and 1000, ROMAN at 64999, 65000 and "
+        "100000, and CardText with \\* Caps and OrdText with \\* Upper at 27",
+        sectioned(sections),
+        last_section=sections[-1][1],
+    )
+
+
+GERMAN_STARTS = [0, 1, 3, 7, 8, 16, 17, 21, 100, 101, 1000, 1001, 1665, 999999]
+LANGUAGES = (("French", "fr-FR"), ("Spanish", "es-ES"), ("Russian", "ru-RU"))
+
+
+def number_formats_languages() -> Doc:
+    def in_language(switch: str, name: str, lang: str) -> str:
+        return (run(f"PAGE \\* {switch} in {name}: ")
+                + complex_field(f"PAGE \\* {switch}", "1", f'<w:lang w:val="{lang}"/>'))
+
+    sections = []
+    for n, start in enumerate(GERMAN_STARTS, 1):
+        contents = [run(f"Case {n:02d}: page numbers restarted at {start}")]
+        contents += [in_language(s, "German", "de-DE") for s in ("CardText", "OrdText", "Ordinal")]
+        contents += [run("PAGE \\* Arabic: ") + field("PAGE \\* Arabic")]
+        sections.append((contents, section(page_start=start)))
+    n = len(GERMAN_STARTS) + 1
+    contents = [run(f"Case {n:02d}: page numbers restarted at 27"),
+                in_language("DollarText", "German", "de-DE")]
+    contents += [in_language(s, name, lang) for name, lang in LANGUAGES
+                 for s in ("CardText", "Ordinal")]
+    sections.append((contents, section(page_start=27)))
+    return Doc(
+        "E-number-formats-languages",
+        "PAGE fields in words and ordinals in German (CardText, OrdText, Ordinal) at 0, 1, 3, "
+        "7, 8, 16, 17, 21, 100, 101, 1000, 1001, 1665 and 999999, and DollarText in German, "
+        "and CardText and Ordinal in French, Spanish and Russian at 27, each field's runs in "
+        "the language",
+        sectioned(sections),
+        last_section=sections[-1][1],
+    )
+
+
+# List labels and note numbers in the formats whose fields E-number-formats shows (#546, case 7
+# and the comments of 2026-11-09 and 2026-11-10): lists from w:start 0, 781 and 116, labels in
+# words and ordinals from 27 in a German paragraph, and footnotes numbered by their sections
+# from 781, 0, 116 and 27.
+def start_level(start: int, fmt: str) -> str:
+    return level(0, fmt, "%1.", left=720, hanging=720, suffix="space").replace(
+        '<w:start w:val="1"/>', f'<w:start w:val="{start}"/>', 1)
+
+
+LABEL_LISTS = [
+    # (format, w:start, items, the languages of the paragraph's runs and of its mark)
+    ("lowerLetter", 0, 3, None, None), ("lowerLetter", 781, 3, None, None),
+    ("upperRoman", 0, 3, None, None), ("upperRoman", 781, 3, None, None),
+    ("cardinalText", 0, 3, None, None), ("cardinalText", 781, 3, None, None),
+    ("chicago", 116, 3, None, None),
+    ("ordinal", 27, 2, "de-DE", "de-DE"), ("ordinal", 27, 2, "de-DE", "en-US"),
+    ("cardinalText", 27, 2, "de-DE", "de-DE"), ("cardinalText", 27, 2, "de-DE", "en-US"),
+    ("ordinalText", 27, 2, "de-DE", "de-DE"), ("ordinalText", 27, 2, "de-DE", "en-US"),
+]
+NOTE_NUMBERINGS = [
+    # (format, w:numStart, references, the language of the references)
+    ("lowerLetter", 781, 3, None), ("lowerLetter", 0, 2, None), ("upperRoman", 0, 2, None),
+    ("chicago", 116, 3, None), ("cardinalText", 27, 2, "de-DE"),
+]
+
+
+def number_formats_labels() -> Doc:
+    numbering, body = [], ""
+    for n, (fmt, start, items, lang, mark) in enumerate(LABEL_LISTS, 1):
+        numbering.append(abstract_num(n, f"{0x14A00000 + n:08X}", [start_level(start, fmt)]))
+        where = f", its runs in {lang} and its mark in {mark}" if lang else ""
+        body += para(run(f"Case {n:02d}: a list in {fmt} from w:start {start}, {items} items"
+                         f"{where}"), space=spacing(before=6))
+        props = f'<w:lang w:val="{lang}"/>' if lang else ""
+        for k in range(1, items + 1):
+            body += para(styled_run(f"Case {n:02d} item {k}", props), list_item=(n, 0),
+                         mark=f'<w:lang w:val="{mark}"/>' if mark else None)
+    numbering += [num(n, n) for n in range(1, len(LABEL_LISTS) + 1)]
+    pages, first = [], 1
+    for n, (fmt, start, count, lang) in enumerate(NOTE_NUMBERINGS, len(LABEL_LISTS) + 1):
+        style = reference_style("footnote")
+        if lang:
+            style = style.replace("</w:rPr>", f'<w:lang w:val="{lang}"/></w:rPr>')
+        where = f", the references in {lang}" if lang else ""
+        contents = [run(f"Case {n:02d}: footnotes in {fmt} from w:numStart {start}{where}")]
+        contents += [run(f"Line {k} holds a reference")
+                     + f'<w:r>{style}<w:footnoteReference w:id="{first + k - 1}"/></w:r>'
+                     for k in range(1, count + 1)]
+        first += count
+        pages.append(([contents], section(notes=section_notes(note_props(
+            fmt=fmt, start=start, restart="eachSect")))))
+    return Doc(
+        "E-number-formats-labels",
+        "List labels in lowerLetter, upperRoman and cardinalText from w:start 0 and 781 and in "
+        "chicago from 116, labels in ordinal, cardinalText and ordinalText from 27 in a German "
+        "paragraph whose mark is German or English, and footnotes numbered in lowerLetter "
+        "from 781 and 0, in upperRoman from 0, in chicago from 116 and in cardinalText from 27 "
+        "with German references",
+        body + note_pages([([[run("End of the lists")]], section())] + pages),
+        numbering="".join(numbering),
+        footnotes=tuple(note(run(f" Footnote {k}, one line.")) for k in range(1, first)),
+        last_section=pages[-1][1],
+    )
+
+
+# The height of highlights and run shading (#346): every case once with a yellow highlight and
+# once with run shading D9D9D9; Calibri 11 pt unless the label names a font.
+HIGHLIGHT_YELLOW = '<w:highlight w:val="yellow"/>'
+MARKS = (("highlight yellow", HIGHLIGHT_YELLOW), ("run shading D9D9D9", RUN_SHADING))
+RAISED_6 = '<w:position w:val="12"/>'
+
+
+def marked_lines(mark: str, count: int = 2) -> str:
+    inner = "<w:br/>".join(text(f"marked text, line {k}") for k in range(1, count + 1))
+    return f"<w:r><w:rPr>{mark}</w:rPr>{inner}</w:r>"
+
+
+def highlight_spacing() -> Doc:
+    size_6 = '<w:sz w:val="12"/><w:szCs w:val="12"/>'
+    size_20 = '<w:sz w:val="40"/><w:szCs w:val="40"/>'
+    cases = [
+        ("two lines spaced 1.15 lines", lambda m: [marked_lines(m)],
+         {"space": spacing(line=("auto", 276))}),
+        ("two lines spaced 1.5 lines", lambda m: [marked_lines(m)],
+         {"space": spacing(line=("auto", 360))}),
+        ("two lines spaced 2 lines", lambda m: [marked_lines(m)],
+         {"space": spacing(line=("auto", 480))}),
+        ("at least 24 pt spacing", lambda m: [styled_run("marked text", m)],
+         {"space": spacing(line=("atLeast", 24))}),
+        ("a 6 pt run between plain 11 pt runs",
+         lambda m: [styled_run("plain ", ""), styled_run("marked 6 pt", size_6 + m),
+                    styled_run(" plain", "")], {}),
+        ("an 11 pt run beside a plain 20 pt run",
+         lambda m: [styled_run("marked text", m), styled_run(" PLAIN 20", size_20)], {}),
+        ("an 11 pt run, the paragraph mark 20 pt", lambda m: [styled_run("marked text", m)],
+         {"mark": size_20}),
+        *((f"{font} 12 pt", lambda m, f=font: [styled_run("marked text", font_props(f, 12) + m)],
+           {}) for font in ("Times New Roman", "Arial", "Cambria")),
+        ("lowered 6 pt (w:position -12)",
+         lambda m: [styled_run("base ", ""),
+                    styled_run("lowered", '<w:position w:val="-12"/>' + m)], {}),
+        ("beside a plain run raised 6 pt (w:position 12)",
+         lambda m: [styled_run("marked", m), styled_run(" raised", RAISED_6)], {}),
+        ("a tab raised 6 pt (w:position 12)",
+         lambda m: [styled_run("before", m), tab_run(RAISED_6 + m), styled_run("after", m)], {}),
+    ]
+    body, n = "", 0
+    for label, samples, props in cases:
+        for kind, mark in MARKS:
+            n += 1
+            body += labelled(n, f"{kind}, {label}", *samples(mark), **props)
+    return Doc(
+        "E-highlight-spacing",
+        "The box of a yellow highlight and of run shading D9D9D9 on two lines spaced 1.15, "
+        "1.5 and 2 lines, at least 24 pt, a 6 pt run between 11 pt runs, an 11 pt run beside "
+        "a 20 pt run and with a 20 pt paragraph mark, Times New Roman, Arial and Cambria at "
+        "12 pt, text lowered 6 pt, text beside a raised run, and a raised tab",
+        body,
+    )
+
+
+# Batch 14, part B: floating and VML objects (#314, #400, #521, #548, #592). Pictures in
+# headers, footers and notes have image relationships of their own part (part_rels()).
+
+# The picture of the anchor documents: a grey PNG of 128 x 64 px, drawn 96 x 48 pt (about
+# the 100 x 50 pt #314 asks for), or 48 x 24 pt where it has to fit a margin of 72 pt.
+ANCHOR_PICTURE = ("image1.png", grey_png(128, 64))
+ANCHOR_SIZE = (96, 48)
+MARGIN_SIZE = (48, 24)
+# A4 with margins of 72 pt on the left and at the top and of 144 pt on the right and at the
+# bottom: a text column of 379.3 pt and a body of 625.9 pt. The centre of the margins (a
+# picture of 96 x 48 pt from x 213.65 and y 360.95) is not the page's (249.65 and 396.95),
+# and the right and bottom margin areas are twice as wide as the left and top ones.
+WIDE_MARGIN = 2880
+
+
+def wide_margins(**options) -> str:
+    """section() with the margins of 72 pt on the left and at the top and 144 pt on the right
+    and at the bottom."""
+    return section(margins=(MARGIN, WIDE_MARGIN), sides=(MARGIN, WIDE_MARGIN), **options)
+
+
+def floating_picture(n: int, size: tuple[float, float], across: tuple[str, float | str],
+                     down: tuple[str, float | str], name: str = "image1.png",
+                     **options) -> str:
+    """A run holding a floating DrawingML picture of the media part name, in front of the
+    text and not wrapped unless options say otherwise (anchored_drawing())."""
+    return picture_run(anchored_drawing(n, *size, drawing_picture(name, *size),
+                                        across=across, down=down, **options))
+
+
+def paged_cases(cases: list[tuple[str, str]], first: int = 1, sect: str | None = None,
+                new_page: bool = False) -> str:
+    """One case to a page, numbered from first: an empty line of exact 100 pt, so that no
+    picture aligned to the top of the margin covers the label, then the label's paragraph,
+    which holds the case's floating objects; sect, the properties of a section that ends with
+    the last case; new_page starts the first case on a new page too."""
+    return "".join(
+        para("", space=spacing(line=("exact", 100)), page_break_before=new_page or k > 0)
+        + para(objects + run(f"Case {n:02d}: {label}"),
+               sect=sect if k == len(cases) - 1 else None)
+        for k, (n, (label, objects)) in enumerate(enumerate(cases, first)))
+
+
+def anchor_page() -> Doc:
+    def picture(n: int, across: float | str, down: float | str) -> str:
+        return floating_picture(n, ANCHOR_SIZE, ("page", across), ("page", down))
+
+    cases = [
+        ("300 pt from the page's left edge and 400 pt below its top", picture(1, 300, 400)),
+        ("aligned left and top against the page", picture(2, "left", "top")),
+        ("centred across and down the page", picture(3, "center", "center")),
+        ("aligned right and bottom against the page", picture(4, "right", "bottom")),
+    ]
+    return Doc(
+        "E-anchor-page",
+        "Where Word puts a floating picture of 96 x 48 pt placed from the page (relativeFrom "
+        "page across and down): 300 pt across and 400 pt down, aligned left and top, centred, "
+        "and aligned right and bottom; one picture to a page, the margins 72 pt on the left "
+        "and top and 144 pt on the right and bottom, no wrapping",
+        paged_cases(cases) + para(run("End of the document.")),
+        media=(ANCHOR_PICTURE,),
+        last_section=wide_margins(),
+    )
+
+
+def anchor_margin() -> Doc:
+    picture = floating_picture
+    cases = [
+        ("96 x 48 pt, 200 pt across and 300 pt down from the margins",
+         picture(1, ANCHOR_SIZE, ("margin", 200), ("margin", 300))),
+        ("96 x 48 pt, aligned left and top against the margins",
+         picture(2, ANCHOR_SIZE, ("margin", "left"), ("margin", "top"))),
+        ("96 x 48 pt, centred across and down the margins",
+         picture(3, ANCHOR_SIZE, ("margin", "center"), ("margin", "center"))),
+        ("96 x 48 pt, aligned right and bottom against the margins",
+         picture(4, ANCHOR_SIZE, ("margin", "right"), ("margin", "bottom"))),
+    ]
+    for start, (across, down) in ((5, ("leftMargin", "topMargin")),
+                                  (9, ("rightMargin", "bottomMargin"))):
+        placements = [((12, 30), f"12 pt across in {across}, 30 pt down in {down}"),
+                      (("left", "top"), f"aligned left in {across}, top in {down}"),
+                      (("center", "center"), f"centred in {across} and in {down}"),
+                      (("right", "bottom"), f"aligned right in {across}, bottom in {down}")]
+        for k, ((x, y), label) in enumerate(placements):
+            cases.append((f"48 x 24 pt, {label}",
+                          picture(start + k, MARGIN_SIZE, (across, x), (down, y))))
+    return Doc(
+        "E-anchor-margin",
+        "Where Word puts a floating picture placed from the margins (relativeFrom margin) and "
+        "from the margin areas (leftMargin, rightMargin, topMargin, bottomMargin): offsets, "
+        "aligned left and top, centred, aligned right and bottom; one picture to a page, the "
+        "margins 72 pt on the left and top and 144 pt on the right and bottom, no wrapping",
+        paged_cases(cases) + para(run("End of the document.")),
+        media=(ANCHOR_PICTURE,),
+        last_section=wide_margins(),
+    )
+
+
+def anchor_column_character() -> Doc:
+    # Each picture lies 18 pt below the top of its paragraph, below the paragraph's one line
+    # and within its 60 pt of space after; the anchor's run is in the middle of the line.
+    def anchored(n: int, across: tuple[str, float | str], **props) -> str:
+        picture = floating_picture(n, ANCHOR_SIZE, across, ("paragraph", 18))
+        return para(run(f"Words before the anchor of case {n:02d}, ") + picture
+                    + run("and words after it."), space=spacing(after=60), **props)
+
+    indented = {"left": 1440}
+    cases = [
+        ("0 pt from the character of the anchor, in the middle of its line",
+         anchored(1, ("character", 0))),
+        ("36 pt from the character of the anchor", anchored(2, ("character", 36))),
+        ("aligned left against the character of the anchor", anchored(3, ("character", "left"))),
+        ("centred on the character of the anchor", anchored(4, ("character", "center"))),
+        ("aligned right against the character of the anchor",
+         anchored(5, ("character", "right"))),
+        ("36 pt from the column, in a paragraph indented 72 pt",
+         anchored(6, ("column", 36), ind=indented)),
+        ("36 pt from the margin, in a paragraph indented like case 06's (to compare)",
+         anchored(7, ("margin", 36), ind=indented)),
+    ]
+    body = "".join(para(run(f"Case {n:02d}: {label}"), keep_next=True) + content
+                   for n, (label, content) in enumerate(cases, 1))
+    return Doc(
+        "E-anchor-column-character",
+        "Where Word puts a floating picture of 96 x 48 pt placed across from the character of "
+        "its anchor in the middle of a line (offsets of 0 and 36 pt, aligned left, centred "
+        "and right) and from the column of a paragraph indented 72 pt, beside the margin; "
+        "each 18 pt below its paragraph's top, no wrapping",
+        body + para(run("End of the document.")),
+        media=(ANCHOR_PICTURE,),
+    )
+
+
+def five_lines(n: int, anchor_line: int, objects: str, **props) -> str:
+    """A paragraph of five lines broken by w:br, Case NN line 1 to 5, with the objects' runs at
+    the end of line anchor_line."""
+    content = ""
+    for k in range(1, 6):
+        held = k == anchor_line
+        content += (line_break_run() if k > 1 else "") + run(
+            f"Case {n:02d} line {k}" + (" holds the anchor" if held else ""))
+        content += objects if held else ""
+    return para(content, **props)
+
+
+# Where the pictures of E-anchor-paragraph-line lie across: to the right of the lines, the
+# second of two side by side.
+FIRST_ACROSS, SECOND_ACROSS = 240, 348
+
+
+def anchor_paragraph_line() -> Doc:
+    def picture(n: int, down: tuple[str, float | str], across: float = FIRST_ACROSS) -> str:
+        return floating_picture(n, ANCHOR_SIZE, ("margin", across), down)
+
+    cases = [
+        ("24 pt below the top of its paragraph of five lines, anchored in line 1", 1,
+         picture(1, ("paragraph", 24)), None),
+        ("12 pt below the top of line 3 of five, which holds the anchor", 3,
+         picture(2, ("line", 12)), None),
+        ("aligned top against its paragraph of five lines", 1,
+         picture(3, ("paragraph", "top")), None),
+        ("centred on its paragraph of five lines", 1, picture(4, ("paragraph", "center")), None),
+        ("aligned bottom against its paragraph of five lines", 1,
+         picture(5, ("paragraph", "bottom")), None),
+        ("aligned top against line 3, which holds the anchor", 3,
+         picture(6, ("line", "top")), None),
+        ("centred on line 3, which holds the anchor", 3, picture(7, ("line", "center")), None),
+        ("aligned bottom against line 3, which holds the anchor", 3,
+         picture(8, ("line", "bottom")), None),
+        ("A 0 pt below the top of a paragraph with 24 pt before, B 0 pt below line 1", 1,
+         picture(9, ("paragraph", 0)) + picture(10, ("line", 0), SECOND_ACROSS), 24),
+    ]
+    # An empty line of exact 36 pt between each label and its paragraph, without space after:
+    # the 24 pt before of case 09 are laid out, and no picture placed above its paragraph
+    # reaches the label. Each paragraph of five lines is kept on one page (w:keepLines).
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), keep_next=True)
+        + para("", space=spacing(line=("exact", 36)), keep_next=True)
+        + five_lines(n, line, objects, space=spacing(before=before, after=36),
+                     keep_lines=True)
+        for n, (label, line, objects, before) in enumerate(cases, 1))
+    # Case 10: a page of exact 12 pt lines holds 58; after the label and 49 filler lines, 8
+    # lines of the paragraph of 20 stay on the page and 12 go on to the next, where line 14,
+    # the sixth, holds the anchor. Without widow control, the split falls there whatever the
+    # rule.
+    split = ""
+    for k in range(1, 21):
+        split += (line_break_run() if k > 1 else "") + run(
+            f"Case 10 line {k}" + (" holds the anchor" if k == 14 else ""))
+        if k == 14:
+            split += (picture(11, ("paragraph", 0))
+                      + picture(12, ("line", 0), SECOND_ACROSS))
+    body += (page_para(run("Case 10: 20 lines over two pages; A 0 pt below the paragraph, "
+                           "B 0 pt below line 14"), page_break_before=True)
+             + filler(49, "Filler line 1 of case 10")
+             + page_para(split, widow_control=False))
+    return Doc(
+        "E-anchor-paragraph-line",
+        "Where Word puts a floating picture of 96 x 48 pt placed down from its paragraph and "
+        "from the line of its anchor (line 3 of five): offsets, aligned top, centred and "
+        "bottom; from a paragraph with 24 pt before, beside one from its line; and from a "
+        "paragraph split over two pages, anchored in its later part; no wrapping",
+        body + para(run("End of the document.")),
+        media=(ANCHOR_PICTURE,),
+    )
+
+
+# The pages of E-anchor-inside-outside: four cases, each on an odd and on the next, even
+# page, in a section without a gutter and then in one with a gutter of 36 pt.
+INSIDE_OUTSIDE = (
+    ("12 pt from insideMargin both ways", ("insideMargin", 12), ("insideMargin", 12)),
+    ("12 pt from outsideMargin both ways", ("outsideMargin", 12), ("outsideMargin", 12)),
+    ("aligned inside against the margins", ("margin", "inside"), ("margin", "inside")),
+    ("aligned outside against the margins", ("margin", "outside"), ("margin", "outside")),
+)
+GUTTER = 720
+
+
+def anchor_inside_outside(mirror: bool) -> Doc:
+    cases, n = [], 1
+    for gutter in (0, GUTTER):
+        for label, across, down in INSIDE_OUTSIDE:
+            for parity in ("odd", "even"):
+                where = f"page {n}, {parity}" + (", gutter" if gutter else "")
+                cases.append((f"{label}; {where}",
+                              floating_picture(n, MARGIN_SIZE, across, down)))
+                n += 1
+    # Section 1 holds the pages without a gutter; section 2, those with one, starts on a new
+    # page of its own.
+    half = len(cases) // 2
+    body = (paged_cases(cases[:half], sect=wide_margins())
+            + paged_cases(cases[half:], first=half + 1))
+    suffix = "-mirror" if mirror else ""
+    settings = "with" if mirror else "without"
+    return Doc(
+        f"E-anchor-inside-outside{suffix}",
+        "Where Word puts a floating picture of 48 x 24 pt placed from the inside and outside "
+        "margin areas (insideMargin, outsideMargin) and aligned inside and outside against the "
+        "margins, across and down, each on an odd and an even page, without a gutter and with "
+        f"one of 36 pt; {settings} mirrored margins (w:mirrorMargins), the margins 72 pt on "
+        "the left and top and 144 pt on the right and bottom, no wrapping",
+        body + para(run("End of the document.")),
+        media=(ANCHOR_PICTURE,),
+        last_section=wide_margins(gutter=GUTTER),
+        mirror_margins=mirror,
+    )
+
+
+# The pictures of E-anchor-stack: dark and light grey PNG pictures drawn 96 x 48 pt, the
+# second 48 pt to the right of and 24 pt below the first, so that they overlap by a quarter.
+DARK_PICTURE = ("image1.png", grey_png(128, 64, 64))
+LIGHT_PICTURE = ("image2.png", grey_png(128, 64, 208))
+
+
+def stack_text(n: int) -> str:
+    """The five lines of text that a case's pictures lie under or over."""
+    return lines([f"Text of case {n:02d}, which the pictures lie over or under, line {k}"
+                  for k in range(1, 6)])
+
+
+def anchor_stack() -> Doc:
+    def picture(n: int, name: str, at: int, height: int, behind: bool = False) -> str:
+        return floating_picture(n, ANCHOR_SIZE, ("margin", 100 + 48 * at),
+                                ("paragraph", 6 + 24 * at), name, behind=behind,
+                                relative_height=height)
+
+    low, high = 251659264, 251660288
+    dark, light = DARK_PICTURE[0], LIGHT_PICTURE[0]
+    cases = [
+        ("dark in front of the text, higher relativeHeight, written first; light "
+         "in front, lower", picture(1, dark, 0, high) + picture(2, light, 1, low), None),
+        ("dark in front, higher relativeHeight, written second; light in front, lower",
+         picture(4, light, 1, low + 2048) + picture(3, dark, 0, high + 2048), None),
+        ("both behind the text (behindDoc), dark of the higher relativeHeight written "
+         "first", picture(5, dark, 0, high + 4096, True)
+         + picture(6, light, 1, low + 4096, True), None),
+        ("dark behind the text, higher relativeHeight; light in front of the text, "
+         "lower", picture(7, dark, 0, high + 6144, True)
+         + picture(8, light, 1, low + 6144), None),
+        ("dark behind the text, under a paragraph shaded D9D9D9",
+         picture(9, dark, 0, high + 8192, True), GREY),
+        ("dark in front of the text, over a paragraph shaded D9D9D9 (to compare)",
+         picture(10, dark, 0, high + 10240), GREY),
+    ]
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), keep_next=True, page_break_before=n > 1)
+        + para(objects + stack_text(n), shading=shading)
+        for n, (label, objects, shading) in enumerate(cases, 1))
+    return Doc(
+        "E-anchor-stack",
+        "In which order Word stacks overlapping floating pictures of 96 x 48 pt, dark and "
+        "light grey: by relativeHeight or by the order they are written in, in front of and "
+        "behind the text (behindDoc), a picture behind the text with a higher relativeHeight "
+        "than one in front, and a picture behind and in front of a shaded paragraph; one case "
+        "to a page, no wrapping",
+        body + para(run("End of the document.")),
+        media=(DARK_PICTURE, LIGHT_PICTURE),
+    )
+
+
+def anchor_in_cell() -> Doc:
+    def case(n: int, in_cell: bool) -> str:
+        picture = floating_picture(n, ANCHOR_SIZE, ("column", 36), ("paragraph", 12),
+                                   layout_in_cell=in_cell)
+        second = (para(run(f"Cell 2, its first paragraph, case {n:02d}"))
+                  + para(picture + run("Cell 2, the anchor's paragraph"))
+                  + numbered_lines("Cell 2 line", 4))
+        return rule_table([[cell(para(run(f"Cell 1 of case {n:02d}"))), cell(second)]],
+                          HALF_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+
+    cases = [(f"layoutInCell {int(flag)}; 36 pt from the column, 12 pt below the paragraph",
+              flag) for flag in (True, False)]
+    body = "".join(para(run(f"Case {n:02d}: {label}"), page_break_before=n > 1)
+                   + case(n, flag) + para(run(f"The paragraph after the table of case {n:02d}."))
+                   for n, (label, flag) in enumerate(cases, 1))
+    return Doc(
+        "E-anchor-in-cell",
+        "Where Word puts a floating picture of 96 x 48 pt anchored in the second paragraph of "
+        "the second cell of a table, 36 pt across from the column and 12 pt down from the "
+        "paragraph, with layoutInCell 1 and 0; one case to a page, no wrapping",
+        body + para(run("End of the document.")),
+        media=(ANCHOR_PICTURE,),
+    )
+
+
+# The shadow of E-anchor-effects (ECMA-376 Part 1, §20.1.8.49): black at half opacity,
+# blurred 12 pt and cast 6 pt down (dir 90 degrees). It reaches 12 pt past the picture on the
+# left and right, 6 pt above it and 18 pt below it, the effect extent written with it.
+SHADOW = ('<a:effectLst><a:outerShdw blurRad="152400" dist="76200" dir="5400000" '
+          'rotWithShape="0"><a:srgbClr val="000000"><a:alpha val="50000"/></a:srgbClr>'
+          "</a:outerShdw></a:effectLst>")
+SHADOW_REACH = (12, 6, 12, 18)
+
+
+def anchor_effects() -> Doc:
+    def picture(n: int, across: float | str, down: float | str, shadow: bool) -> str:
+        graphic_xml = drawing_picture("image1.png", *ANCHOR_SIZE, SHADOW if shadow else "")
+        return picture_run(anchored_drawing(
+            n, *ANCHOR_SIZE, graphic_xml, across=("margin", across), down=("margin", down),
+            effects=SHADOW_REACH if shadow else (0, 0, 0, 0)))
+
+    cases = [
+        ("a shadow, effect extent 12, 6, 12 and 18 pt; 144 pt across and down from the margins",
+         picture(1, 144, 144, True)),
+        ("no shadow, effect extent 0; 144 pt across and down from the margins (to compare)",
+         picture(2, 144, 144, False)),
+        ("the shadow and effect extent of case 01; aligned left and top against the margins",
+         picture(3, "left", "top", True)),
+    ]
+    return Doc(
+        "E-anchor-effects",
+        "Whether the offsets and the alignment of a floating picture of 96 x 48 pt place its "
+        "frame or the box its effects reach: a shadow with an effect extent (wp:effectExtent) "
+        "of 12 pt left and right, 6 pt at the top and 18 pt at the bottom, 144 pt from the "
+        "margins and aligned left and top, and the picture without them; one picture to a "
+        "page, no wrapping",
+        paged_cases(cases) + para(run("End of the document.")),
+        media=(ANCHOR_PICTURE,),
+    )
+
+
+# The six lines at the top of each page of E-anchor-header, which run under the header's
+# picture of case 02 (300 to 396 pt across, 80 to 128 pt down); the first holds objects.
+def header_body_lines(page: int, objects: str = "") -> str:
+    return "".join(para((objects if k == 1 else "")
+                        + run(f"Body text of page {page}, line {k}, that runs on across the "
+                              "page under the header's picture"))
+                   for k in range(1, 7))
+
+
+def anchor_header() -> Doc:
+    corner = floating_picture(1, MARGIN_SIZE, ("page", 12), ("page", 12))
+    over_body = floating_picture(2, ANCHOR_SIZE, ("page", 300), ("page", 80))
+    under_header = floating_picture(3, ANCHOR_SIZE, ("page", 120), ("page", 24), behind=True)
+    shaded = f'<w:shd w:val="clear" w:color="auto" w:fill="{GREY}"/>'
+    header = (
+        para(corner + over_body + run("Header text over the width of the page, under which "
+                                      "the body's picture of case 03 lies"))
+        + rule_table([[cell(para(run("Shaded header table, cell 1")), shaded),
+                       cell(para(run("Shaded header table, cell 2")), shaded)]],
+                     HALF_GRID, tbl_w=(TEXT_W, "dxa"), fixed=True)
+        + spacer(2)
+    )
+    labels = [
+        "a header picture, 12 pt across and down from the page's corner, on 3 pages",
+        "a header picture in front of the text, at 300 and 80 pt, over the body's text",
+        "a body picture behind the text, at 120 and 24 pt, under the header's text and table",
+    ]
+    body = (header_body_lines(1, under_header)
+            + "".join(para(run(f"Case {n:02d}: {label}")) for n, label in enumerate(labels, 1))
+            + "".join(para(page_break_run()) + header_body_lines(page) for page in (2, 3)))
+    return Doc(
+        "E-anchor-header",
+        "Where and in which layer Word draws floating pictures anchored in the header: one "
+        "placed from the page's corner on three pages, and one in front of the text over the "
+        "body's text; and a picture of the body behind the text under the header's text and "
+        "a shaded header table; no wrapping",
+        body + para(run("End of the document.")),
+        media=(ANCHOR_PICTURE,),
+        headers=(header_part("header1.xml", header),),
+        last_section=section(refs=(("headerReference", "default", "header1.xml"),)),
+    )
+
+
+# The pictures of E-anchor-paragraph-spacing and E-anchor-paragraph-header-note: 72 x 36 pt,
+# A 216 pt and B 324 pt from the left margin, beside short lines of text.
+SPACING_PICTURE = ("image1.png", grey_png(96, 48))
+SPACING_SIZE = (72, 36)
+
+
+def side_by_side(n: int, first: str = "paragraph") -> str:
+    """Picture A, 0 pt down from the top of its paragraph (or, with first "box", nothing: a
+    box of docPr id n takes its place), and picture B, 0 pt down from the top of its line;
+    their docPr ids are n and n + 1."""
+    a = floating_picture(n, SPACING_SIZE, ("margin", 216), ("paragraph", 0))
+    b = floating_picture(n + 1, SPACING_SIZE, ("margin", 324), ("line", 0))
+    return (a if first == "paragraph" else "") + b
+
+
+def anchor_paragraph_spacing() -> Doc:
+    # #314's comment of 2026-11-16, cases 1 to 3, and #465's question for the CFPB letters,
+    # whose centred box sits in a paragraph of exact 12 pt lines after one with 2 pt after.
+    spaced = para_style("Spaced", '<w:spacing w:before="240"/><w:contextualSpacing/>')
+
+    def box(n: int) -> str:
+        """E-textbox-from-paragraph's box: one line centred down, insets 0 at the top and
+        bottom, 144 pt from the margin, 0 pt down from its paragraph."""
+        return shape_run(anchored_drawing(n, 144, 36, wps_shape(
+            144, 36, para(run("One line")), anchor="ctr", insets=(7.2, 0, 7.2, 0)),
+            across=("margin", 144), down=("paragraph", 0)))
+
+    def anchor(n: int, objects: str, **props) -> str:
+        space = props.pop("space", None)
+        return para(objects + run(f"The anchor of case {n:02d}."),
+                    space=space or spacing(after=48), **props)
+
+    exact = ("exact", 12)
+    body = (
+        para(run("Pictures A are 0 pt below their paragraph's top, pictures B 0 pt below "
+                 "their line's top."))
+        + para(run("Case 01, on the next page: 12 pt before, at the top after a page break; "
+                   "A and B"))
+        + para(page_break_run())
+        + anchor(1, side_by_side(1), space=spacing(before=12, after=48))
+        + para(run("Case 02: two paragraphs of a style, 12 pt before, contextual spacing; "
+                   "A and B in the second"), keep_next=True)
+        + para(run("The first paragraph of the style, case 02."), p_style="Spaced",
+               keep_next=True)
+        + anchor(2, side_by_side(3), p_style="Spaced")
+        + para(run("Case 03: a paragraph with 24 pt after, then the anchor's with 6 pt "
+                   "before; A and B"), keep_next=True)
+        + para(run("Above case 03: 24 pt after."),
+               space=spacing(after=24), keep_next=True)
+        + anchor(3, side_by_side(5), space=spacing(before=6, after=48))
+        + para(run("Case 04: a box centred down, 0 pt below its paragraph, after 2 pt "
+                   "after; B"), keep_next=True)
+        + para(run("Above case 04: 2 pt after."),
+               space=spacing(after=2), keep_next=True)
+        + anchor(4, box(7) + side_by_side(7, "box"))
+        + para(run("Case 05: the box of case 04 in exact 12 pt lines, after such a line; B"),
+               keep_next=True)
+        + para(run("Above case 05: exact 12 pt."),
+               space=spacing(line=exact), keep_next=True)
+        + anchor(5, box(9) + side_by_side(9, "box"), space=spacing(after=48, line=exact))
+        + para(run("Case 06: the box in exact 12 pt lines, after one with 2 pt after; B"),
+               keep_next=True)
+        + para(run("Above case 06: exact 12 pt, 2 pt after."),
+               space=spacing(after=2, line=exact), keep_next=True)
+        + anchor(6, box(11) + side_by_side(11, "box"), space=spacing(after=48, line=exact))
+    )
+    return Doc(
+        "E-anchor-paragraph-spacing",
+        "Where Word puts a floating picture of 72 x 36 pt placed 0 pt down from its paragraph, "
+        "beside one 0 pt down from its line: in a paragraph with 12 pt before at the top of a "
+        "page after a page break, in the second of two paragraphs with w:contextualSpacing, "
+        "and after a paragraph with 24 pt after; and a text box of 144 x 36 pt centred down, "
+        "0 pt from its paragraph, after a paragraph with 2 pt after, in exact 12 pt lines and "
+        "both; no wrapping",
+        body + para(run("End of the document.")),
+        styles=spaced,
+        media=(SPACING_PICTURE,),
+    )
+
+
+def anchor_paragraph_header_note() -> Doc:
+    # #314's comment of 2026-11-16, cases 4 and 5: the anchor's paragraph with 12 pt before,
+    # second in the header, second in a footnote, and first in a footnote, under the
+    # separator. The body starts with an empty line of exact 48 pt, below which the header's
+    # pictures end.
+    header = (para(run("Header paragraph 1"))
+              + para(side_by_side(1) + run("Header paragraph 2, 12 pt before"),
+                     space=spacing(before=12)))
+    second = (note(run(" Note 1, paragraph 1."))
+              + para(side_by_side(3) + run("Note 1, paragraph 2, 12 pt before"),
+                     p_style="FootnoteText", space=spacing(before=12)))
+    first = note(side_by_side(5) + run(" Note 2, paragraph 1, 12 pt before"),
+                 space=spacing(before=12))
+    body = (
+        para("", space=spacing(line=("exact", 48)))
+        + para(run("Pictures A are 0 pt below their paragraph's top, pictures B 0 pt below "
+                   "their line's top."))
+        + para(run("Case 01: the header's second paragraph, 12 pt before, holds A and B"))
+        + para(run("Case 02: footnote 1's second paragraph, 12 pt before, holds A and B; "
+                   "reference") + note_reference(1))
+        + para("", space=spacing(line=("exact", 48)), page_break_before=True)
+        + para(run("Case 03: footnote 2's first paragraph, 12 pt before, holds A and B; "
+                   "reference") + note_reference(2))
+    )
+    return Doc(
+        "E-anchor-paragraph-header-note",
+        "Where Word puts a floating picture of 72 x 36 pt placed 0 pt down from its paragraph, "
+        "beside one 0 pt down from its line, when the paragraph has 12 pt before: second in "
+        "the header, second in a footnote, and first in a footnote, under the separator; "
+        "each note on a page of its own, no wrapping",
+        body + para(run("End of the document.")),
+        media=(SPACING_PICTURE,),
+        headers=(header_part("header1.xml", header),),
+        last_section=section(refs=(("headerReference", "default", "header1.xml"),)),
+        footnotes=(second, first),
+    )
+
+
+def header_cut_first_picture() -> Doc:
+    # #548, question 6, as written: E-header-cut-first-line with an inline picture 400 pt
+    # tall, more than 0.4 of A4 (336.8 pt), for the first line of the header and the footer.
+    # Each is at least 412 pt tall, the picture's line and a line of 12 pt: the header ends
+    # 447.4 pt or more below the top edge, the footer starts 394.5 pt or less below it, and
+    # together they leave the body no room.
+    def story(kind: str, n: int) -> str:
+        picture = picture_run(inline_drawing(n, 72, 400, drawing_picture("image1.png", 72, 400)))
+        return para(picture) + page_para(run(f"{kind} line 2"))
+
+    cases = [("header and footer of an inline picture 400 pt tall, then a 12 pt line",
+              story("header", 1), story("footer", 2), {})]
+    body, parts, last = cut_sections(cases)
+    return Doc(
+        "E-header-cut-first-picture",
+        "What Word keeps of a header and a footer that leave the body no room when their "
+        "first line holds an inline picture 400 pt tall, more than 0.4 of the page, followed "
+        "by a line of exact 12 pt",
+        body,
+        headers=parts,
+        last_section=last,
+        media=(("image1.png", grey_png(96, 533)),),
+    )
+
+
+def vml_frame(name: str, shape_id: str, style: str, *, wrap: str | None = None,
+              first: bool = False, shape_attrs: str = "", image_attrs: str = "",
+              children: str = "", typed: bool = True) -> str:
+    """A run holding a VML picture as vml_picture() writes it, with further attributes of its
+    v:shape and of its v:imagedata, children of the v:shape before the v:imagedata (such as a
+    v:stroke), and, unless typed, no type: a v:shape of VML's defaults, not the picture
+    frame."""
+    shape_type = PICTURE_FRAME if first else ""
+    kind = ' type="#_x0000_t75"' if typed else ""
+    wrap_xml = f'<w10:wrap type="{wrap}"/>' if wrap else ""
+    return (f'<w:r><w:pict>{shape_type}<v:shape id="{shape_id}"{kind} style="{style}"'
+            f'{shape_attrs}>{children}<v:imagedata r:id="{media_id(name)}" o:title=""'
+            f"{image_attrs}/>{wrap_xml}</v:shape></w:pict></w:r>")
+
+
+def vml_floating(name: str, shape_id: str, size: tuple[float, float], z: int,
+                 across: tuple[str, float | str], down: tuple[str, float | str],
+                 extra: str = "", **options) -> str:
+    """A run holding a floating VML picture, not wrapped (w10:wrap none): size in points;
+    across and down as (mso-position-*-relative, margin-left or margin-top in points, or an
+    mso-position-* value); extra CSS after the rest; options of vml_frame()."""
+    style = f"position:absolute;width:{size[0]:g}pt;height:{size[1]:g}pt;z-index:{z}"
+    for axis, side, (relative, value) in (("horizontal", "left", across),
+                                          ("vertical", "top", down)):
+        if isinstance(value, str):
+            style += f";mso-position-{axis}:{value}"
+        else:
+            style += f";margin-{side}:{value:g}pt"
+        style += f";mso-position-{axis}-relative:{relative}"
+    return vml_frame(name, shape_id, style + extra, wrap="none", **options)
+
+
+def vml_anchor_relative() -> Doc:
+    def picture(n: int, across: tuple[str, float], down: tuple[str, float]) -> str:
+        return vml_floating("image1.png", f"r{n}", MARGIN_SIZE, n, across, down, first=n == 1)
+
+    text_case = para(run("The anchor of case 01, indented 72 pt: ")
+                     + picture(1, ("text", 36), ("text", 18)) + run("its paragraph's one line."),
+                     ind={"left": 1440}, space=spacing(after=36))
+    char_line = five_lines(2, 3, picture(2, ("char", 12), ("line", 18)),
+                           space=spacing(after=36), keep_lines=True)
+    anchored = (para(run("Case 01: 36 pt from text across, 18 pt from text down, indented "
+                         "72 pt"), keep_next=True) + text_case
+                + para(run("Case 02: 12 pt from char across, 18 pt from line down, line 3 of "
+                           "five"), keep_next=True)
+                + char_line)
+    # Cases 01 and 02 are on page 1, each later case on a page of its own: case n on page
+    # n - 1, so that the inner and outer margin areas come on an even and an odd page.
+    cases = []
+    for n, (across, down) in enumerate((("left-margin-area", "top-margin-area"),
+                                        ("right-margin-area", "bottom-margin-area"),
+                                        ("inner-margin-area", "inner-margin-area"),
+                                        ("inner-margin-area", "inner-margin-area"),
+                                        ("outer-margin-area", "outer-margin-area"),
+                                        ("outer-margin-area", "outer-margin-area")), 3):
+        parity = "odd" if (n - 1) % 2 else "even"
+        areas = f"{across} both ways" if across == down else f"{across} and {down}"
+        cases.append((f"12 pt from {areas}; page {n - 1}, {parity}",
+                      picture(n, (across, 12), (down, 12))))
+    body = anchored + paged_cases(cases, first=3, new_page=True)
+    return Doc(
+        "E-vml-anchor-relative",
+        "Where Word puts a floating VML picture of 48 x 24 pt placed by offsets from text, "
+        "char and line, and from the margin areas (left-, right-, top-, bottom-, inner- and "
+        "outer-margin-area) across and down, the inner and outer ones on an even and an odd "
+        "page; the margins 72 pt on the left and top and 144 pt on the right and bottom, no "
+        "wrapping",
+        body + para(run("End of the document.")),
+        media=(ANCHOR_PICTURE,),
+        last_section=wide_margins(),
+    )
+
+
+def vml_anchor_align() -> Doc:
+    # MS-OI29500 says Word ignores margin-left when a picture is aligned (§19.1.2.1(dddd)) and
+    # adds left and margin-left (§19.1.2.1(hh)); every aligned picture here has a margin-left
+    # and a margin-top of 36 pt.
+    offsets = ";margin-left:36pt;margin-top:36pt"
+
+    def picture(n: int, across: str, down: str) -> str:
+        return vml_floating("image1.png", f"a{n}", ANCHOR_SIZE, n, ("margin", across),
+                            ("margin", down), offsets, first=n == 1)
+
+    cases = [
+        ("aligned left and top against the margins", picture(1, "left", "top")),
+        ("centred across and down the margins", picture(2, "center", "center")),
+        ("aligned right and bottom against the margins", picture(3, "right", "bottom")),
+    ]
+    for n, kind in enumerate(("inside", "inside", "outside", "outside"), 4):
+        parity = "even" if n % 2 == 0 else "odd"
+        cases.append((f"aligned {kind} across and down against the margins; page {n}, {parity}",
+                      picture(n, kind, kind)))
+    style = ("position:absolute;left:36pt;margin-left:36pt;margin-top:36pt;width:96pt;"
+             "height:48pt;z-index:8;mso-position-horizontal-relative:margin;"
+             "mso-position-vertical-relative:margin")
+    cases.append(("not aligned: left and margin-left of 36 pt each, margin-top of 36 pt",
+                  vml_frame("image1.png", "a8", style, wrap="none")))
+    return Doc(
+        "E-vml-anchor-align",
+        "Where Word puts a floating VML picture of 96 x 48 pt aligned against the margins "
+        "(mso-position-horizontal left, center, right, inside, outside; mso-position-vertical "
+        "top, center, bottom, inside, outside) that also has a margin-left and margin-top of "
+        "36 pt, the inside and outside ones on an even and an odd page, and one placed by "
+        "left and margin-left together; one picture to a page, the margins 72 pt on the left "
+        "and top and 144 pt on the right and bottom, no wrapping",
+        paged_cases(cases) + para(run("End of the document.")),
+        media=(ANCHOR_PICTURE,),
+        last_section=wide_margins(),
+    )
+
+
+# The z-index values Word writes for pictures behind the text: negative ones, the first of
+# them -251658240.
+BEHIND_Z = -251658240
+
+
+def vml_stack() -> Doc:
+    def picture(n: int, name: str, at: int, z: int) -> str:
+        return vml_floating(name, f"s{n}", ANCHOR_SIZE, z, ("margin", 100 + 48 * at),
+                            ("paragraph", 6 + 24 * at), first=n == 1)
+
+    dark, light = DARK_PICTURE[0], LIGHT_PICTURE[0]
+    cases = [
+        ("behind the text: dark of z-index -251658240 written first, light of -251657216",
+         picture(1, dark, 0, BEHIND_Z) + picture(2, light, 1, BEHIND_Z + 1024)),
+        ("the same z-index values, the dark picture written second",
+         picture(4, light, 1, BEHIND_Z + 1024) + picture(3, dark, 0, BEHIND_Z)),
+        ("both in front of the text: dark of z-index 2 written first, light of 1 second",
+         picture(5, dark, 0, 2) + picture(6, light, 1, 1)),
+    ]
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), keep_next=True, page_break_before=n > 1)
+        + para(objects + stack_text(n))
+        for n, (label, objects) in enumerate(cases, 1))
+    return Doc(
+        "E-vml-stack",
+        "In which order Word stacks overlapping floating VML pictures of 96 x 48 pt, dark and "
+        "light grey: two behind the text with different negative z-index values, written in "
+        "either order, and two in front of it; one case to a page, no wrapping",
+        body + para(run("End of the document.")),
+        media=(DARK_PICTURE, LIGHT_PICTURE),
+    )
+
+
+def pattern_rows() -> list[list[bool]]:
+    """A chequerboard of 10 x 10 cells, each two modules wide and one tall, with the 2 x 2
+    cells of the top left corner all dark: cropping a tenth from a side takes one row or
+    column of cells away, and the corner shows how the picture is turned or flipped."""
+    return [[(x // 2 < 2 and y < 2) or (x // 2 + y) % 2 == 0 for x in range(20)]
+            for y in range(10)]
+
+
+# The picture of the VML crop, rotation and effects documents: 200 x 100 px, drawn 144 x 72 pt.
+PATTERN_PICTURE = ("image1.png", bitmap_png(pattern_rows(), 10))
+PATTERN_SIZE = (144, 72)
+
+
+def vml_crop_rotate() -> Doc:
+    # Each picture lies 144 pt from the left margin and 0 pt below its paragraph's top; an
+    # empty line of 48 pt above the paragraph and 108 pt after it leave room for a picture
+    # turned by 90 degrees, which reaches 36 pt above and below its frame.
+    def picture(n: int, extra: str = "", image_attrs: str = "") -> str:
+        return vml_floating("image1.png", f"c{n}", PATTERN_SIZE, n, ("margin", 144),
+                            ("paragraph", 0), extra, first=n == 1, image_attrs=image_attrs)
+
+    cases = [
+        ("not cropped, not turned (to compare)", picture(1)),
+        ('cropleft "0.1"', picture(2, image_attrs=' cropleft="0.1"')),
+        ('cropleft "6554f", a tenth in units of 1/65536',
+         picture(3, image_attrs=' cropleft="6554f"')),
+        ('croptop "0.1"', picture(4, image_attrs=' croptop="0.1"')),
+        ('cropright "6554f"', picture(5, image_attrs=' cropright="6554f"')),
+        ('cropbottom "0.1"', picture(6, image_attrs=' cropbottom="0.1"')),
+        ('cropleft "-0.1", negative', picture(7, image_attrs=' cropleft="-0.1"')),
+        ("rotation:90, in degrees", picture(8, ";rotation:90")),
+        ("rotation:5898240fd, 90 degrees in 1/65536 degree units",
+         picture(9, ";rotation:5898240fd")),
+        ("flip:x", picture(10, ";flip:x")),
+        ("flip:y", picture(11, ";flip:y")),
+        ("flip:x y", picture(12, ";flip:x y")),
+    ]
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), keep_next=True)
+        + para("", space=spacing(line=("exact", 48)), keep_next=True)
+        + para(objects + run(f"The anchor of case {n:02d}."), space=spacing(after=108))
+        for n, (label, objects) in enumerate(cases, 1))
+    return Doc(
+        "E-vml-crop-rotate",
+        "How Word crops, turns and flips a floating VML picture of 144 x 72 pt, a "
+        "chequerboard of 10 x 10 cells with a dark corner at the top left: cropleft, croptop, "
+        "cropright and cropbottom as decimal fractions and in units of 1/65536, a negative "
+        "cropleft, rotation:90 in degrees and in 1/65536 degree units, flip:x, flip:y and flip:x "
+        "y; no wrapping",
+        body + para(run("End of the document.")),
+        media=(PATTERN_PICTURE,),
+    )
+
+
+def vml_px_effects() -> Doc:
+    pattern = "width:144pt;height:72pt"
+    cases = [
+        ("a size in pixels, width:96px;height:48px",
+         vml_frame("image1.png", "x1", "width:96px;height:48px", first=True)),
+        ("the size in points, width:72pt;height:36pt (to compare)",
+         vml_frame("image1.png", "x2", "width:72pt;height:36pt")),
+        ('washed out: gain "19661f" and blacklevel "22938f" (0.3 and 0.35)',
+         vml_frame("image1.png", "x3", pattern,
+                   image_attrs=' gain="19661f" blacklevel="22938f"')),
+        ("the picture without gain or blacklevel (to compare)",
+         vml_frame("image1.png", "x4", pattern)),
+        ('an outline: stroked "t" and a v:stroke of 3 pt, black',
+         vml_frame("image1.png", "x5", pattern, shape_attrs=' stroked="t"',
+                   children='<v:stroke color="black" weight="3pt"/>')),
+        ("a v:shape without a type, so of VML's defaults (stroked)",
+         vml_frame("image1.png", "x6", pattern, typed=False)),
+    ]
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), keep_next=True)
+        + para(run(f"Before the picture of case {n:02d} ") + picture + run(" after it."),
+               space=spacing(after=12))
+        for n, (label, picture) in enumerate(cases, 1))
+    return Doc(
+        "E-vml-px-effects",
+        "How Word draws inline VML pictures: a size in pixels beside the same size in points, "
+        "a picture washed out (gain and blacklevel) beside the same picture without them, one "
+        "with an outline of 3 pt (stroked, v:stroke), and a v:shape without a type; the "
+        "picture a chequerboard of 10 x 10 cells",
+        body + para(run("End of the document.")),
+        media=(PATTERN_PICTURE,),
+    )
+
+
+def vml_text_shape(element: str, shape_id: str, style: str, content: str, *,
+                   props: str = "", textbox_style: str = "", first: bool = False) -> str:
+    """A run of the run properties props holding a VML text box: a v:shape of the text box
+    type (element "shape") or a v:rect or v:roundrect, of the CSS style, with a 0.5 pt
+    outline and a v:textbox of the CSS textbox_style."""
+    kind = ' type="#_x0000_t202"' if element == "shape" else ""
+    shape_type = TEXT_BOX_TYPE if first else ""
+    r_pr = f"<w:rPr>{props}</w:rPr>" if props else ""
+    box_style = f' style="{textbox_style}"' if textbox_style else ""
+    return (f'<w:r>{r_pr}<w:pict>{shape_type}<v:{element} id="{shape_id}"{kind} '
+            f'style="{style}" strokeweight=".5pt"><v:textbox{box_style}><w:txbxContent>'
+            f"{content}</w:txbxContent></v:textbox></v:{element}></w:pict></w:r>")
+
+
+def textbox_vml_inline_shapes() -> Doc:
+    # #521's comment of 2026-11-16: in E-textbox-vml-inline Word gives the line of an inline
+    # VML text box 1.45 pt more above the baseline than the box is tall, and 1.66 pt more
+    # width on its right. These cases change the line's font and size, the box's size and
+    # its kind, each with 0 pt before; the line's runs, the box's run and the paragraph mark
+    # are of the case's font and size, Calibri 11 pt where the label names none.
+    box_text = para(run("Box text"))
+    size = "width:216pt;height:90pt"
+
+    def box(element: str, shape_id: str, style: str = size, content: str = box_text,
+            **options):
+        return lambda props: vml_text_shape(element, shape_id, style, content, props=props,
+                                            **options)
+
+    cases = [
+        ("a box of 216 x 90 pt, the line in Calibri 11 pt (to compare)", None, 11,
+         box("shape", "t1", first=True)),
+        ("the same box, the line in Calibri 20 pt", None, 20, box("shape", "t2")),
+        ("the same box, the line in Calibri 8 pt", None, 8, box("shape", "t3")),
+        ("the same box, the line in Times New Roman 11 pt", "Times New Roman", 11,
+         box("shape", "t4")),
+        ("the same box, the line in Noto Sans 11 pt", "Noto Sans", 11, box("shape", "t5")),
+        ("a box of 144 x 36 pt, the line in Calibri 11 pt", None, 11,
+         box("shape", "t6", "width:144pt;height:36pt")),
+        ("a box written 216 x 30 pt for three lines, mso-fit-shape-to-text", None, 11,
+         box("shape", "t7", "width:216pt;height:30pt", box_lines("Box line", 3),
+             textbox_style="mso-fit-shape-to-text:t")),
+        ("a v:rect of 216 x 90 pt with a v:textbox", None, 11, box("rect", "t8")),
+        ("a v:roundrect of 216 x 90 pt with a v:textbox", None, 11, box("roundrect", "t9")),
+    ]
+    body = ""
+    for n, (label, font, points, make) in enumerate(cases, 1):
+        # Calibri, the document default, is not written; every size is.
+        props = rpr(font, points)[len("<w:rPr>"):-len("</w:rPr>")]
+        body += (para(run(f"Case {n:02d}: {label}"), keep_next=True)
+                 + para(run(f"Case {n:02d} ", font, points) + make(props)
+                        + run(" after the box.", font, points), mark=props)
+                 + para(run(f"The paragraph after case {n:02d}."), space=spacing(after=12)))
+    return Doc(
+        "E-textbox-vml-inline-shapes",
+        "Where Word puts an inline VML text box and the text after it on its line: a box of "
+        "216 x 90 pt in lines of Calibri 11, 20 and 8 pt, Times New Roman 11 pt and Noto Sans "
+        "11 pt; in lines of Calibri 11 pt, a box of 144 x 36 pt, a box fitted to its text "
+        "(mso-fit-shape-to-text), and a v:rect and a v:roundrect with a v:textbox; each in a "
+        "paragraph with 0 pt before and a paragraph after it",
+        body + para(run("End of the document.")),
+    )
+
+
+def hidden_drawings() -> Doc:
+    # #592: wp:docPr hidden (ECMA-376 Part 1, §20.4.2.5) on DrawingML drawings, which the
+    # model does not read; E-hidden-pictures hides pictures with w:vanish only. A VML picture
+    # with visibility:hidden, which Word does not show, comes after them, and last a picture
+    # whose wp:anchor itself is hidden, which MS-OI29500 2.1.1350 a says Word does not support
+    # (it drops the attribute on save): a control that should be drawn and wrapped.
+    inline_size, floating_size = (72, 36), (144, 72)
+    fill = solid(BOX_FILL)
+
+    def graphic_of(kind: str, n: int, size: tuple[float, float]) -> str:
+        if kind == "picture":
+            return drawing_picture("image1.png", *size)
+        if kind == "text box":
+            return wps_shape(*size, para(run(f"Box of case {n:02d}")), fill=fill)
+        return wps_shape(*size, None, fill=fill)
+
+    def in_run(kind: str, drawing: str) -> str:
+        return (picture_run if kind == "picture" else shape_run)(drawing)
+
+    def inline(n: int, kind: str, hidden: bool) -> str:
+        return in_run(kind, inline_drawing(n, *inline_size, graphic_of(kind, n, inline_size),
+                                            hidden=hidden))
+
+    def floating(n: int, kind: str, wrap: str, hidden: bool) -> str:
+        return in_run(kind, anchored_drawing(
+            n, *floating_size, graphic_of(kind, n, floating_size), across=("margin", 0),
+            down=("paragraph", 0), wrap=wrap, hidden=hidden))
+
+    inline_cases = [("a visible inline picture (to compare)", "picture", False),
+                    ("an inline picture, docPr hidden", "picture", True),
+                    ("an inline text box, docPr hidden", "text box", True),
+                    ("an inline shape without text, docPr hidden", "shape", True)]
+    body = "".join(
+        para(run(f"Case {n:02d}: {label}"), keep_next=True)
+        + para(run(f"Before the drawing of case {n:02d} ") + inline(n, kind, hidden)
+               + run(" after it."), space=spacing(after=12))
+        for n, (label, kind, hidden) in enumerate(inline_cases, 1))
+    square = wrap_square()
+    floating_cases = [
+        ("a visible floating picture, wrapped square (to compare)", "picture", square, False),
+        ("a floating picture, docPr hidden, wrapped square", "picture", square, True),
+        ("a floating text box, docPr hidden, wrapped square", "text box", square, True),
+        ("a floating shape without text, docPr hidden, wrapped square", "shape", square, True),
+        ("a floating picture, docPr hidden, not wrapped", "picture", "<wp:wrapNone/>", True),
+        ("a floating text box, docPr hidden, not wrapped", "text box", "<wp:wrapNone/>", True),
+        ("a floating shape without text, docPr hidden, not wrapped", "shape",
+         "<wp:wrapNone/>", True),
+    ]
+    first = len(inline_cases) + 1
+    objects = [(label, floating(n, kind, wrap, hidden))
+               for n, (label, kind, wrap, hidden) in enumerate(floating_cases, first)]
+    vml_style = ("position:absolute;margin-left:0;margin-top:0;width:144pt;height:72pt;"
+                 "z-index:1;visibility:hidden;mso-position-horizontal-relative:margin;"
+                 "mso-position-vertical-relative:paragraph")
+    objects.append(("a floating VML picture, visibility:hidden, wrapped square (to compare)",
+                    vml_frame("image1.png", "h1", vml_style, wrap="square", first=True)))
+    n = first + len(objects)
+    objects.append(("a floating picture, hidden on wp:anchor, not on docPr, wrapped square",
+                    picture_run(anchored_drawing(
+                        n, *floating_size, drawing_picture("image1.png", *floating_size),
+                        across=("margin", 0), down=("paragraph", 0), wrap=square,
+                        anchor_hidden=True))))
+    # Two floating cases to a page, the first of them on a new page.
+    body += "".join(
+        para(run(f"Case {n:02d}: {label}"), space=spacing(before=12), keep_next=True,
+             page_break_before=(n - first) % 2 == 0)
+        + para(anchor + run(wrap_text(n)), space=spacing(after=12))
+        for n, (label, anchor) in enumerate(objects, first))
+    return Doc(
+        "E-hidden-drawings",
+        "Whether Word draws, and wraps text around, DrawingML drawings whose wp:docPr is "
+        "hidden: a picture, a text box and a shape inline, floating wrapped square and "
+        "floating not wrapped, beside a visible picture inline and floating, a floating VML "
+        "picture with visibility:hidden, and a floating picture whose wp:anchor is hidden, "
+        "which Word does not support",
+        body + para(run("End of the document.")),
+        media=(("image1.png", grey_png(192, 96)),),
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -7095,6 +9463,67 @@ def documents() -> list[Doc]:
         cut_lines_text(),
         cut_lines_shapes(),
         barcode_font(),
+        header_cut_threshold(12),
+        header_cut_threshold(24),
+        header_cut_distance(),
+        header_cut_page_sizes(),
+        header_cut_line_heights(),
+        header_cut_table(),
+        header_cut_first_line(),
+        header_cut_margins(),
+        table_row_exact_margins(),
+        sym_plain_font(),
+        greek_caps(),
+        cell_mark_height_picture(),
+        cell_mark_height_merged(),
+        footnote_no_room(14),
+        footnote_space_after(),
+        footnote_no_room_after_note(),
+        footnote_longer_than_page(),
+        footnote_widow_room(),
+        footnote_cut_lines(15),
+        footnote_cut_lines(14),
+        footnote_rest_beside_text(),
+        link_boxes(),
+        subscript_drop(),
+        keepnext_last_lines(),
+        keepnext_last_lines_section(),
+        *(line_multiple_foot(mode) for mode in (15, 14, 12, 11)),
+        table_header_repeat_off(),
+        justify_nbsp(14),
+        justify_nbsp(15),
+        endnote_numbering_settings(),
+        table_vmerge_heights(15),
+        table_vmerge_heights(14),
+        justify_narrow(15),
+        justify_narrow(14),
+        justify_narrow(12),
+        justify_narrow(11),
+        footnote_pages_section(),
+        number_formats_limits(),
+        number_formats_languages(),
+        number_formats_labels(),
+        highlight_spacing(),
+        header_cut_first_picture(),
+        anchor_page(),
+        anchor_margin(),
+        anchor_column_character(),
+        anchor_paragraph_line(),
+        anchor_inside_outside(False),
+        anchor_inside_outside(True),
+        anchor_stack(),
+        anchor_in_cell(),
+        anchor_effects(),
+        anchor_header(),
+        anchor_paragraph_spacing(),
+        anchor_paragraph_header_note(),
+        vml_anchor_relative(),
+        vml_anchor_align(),
+        vml_stack(),
+        vml_crop_rotate(),
+        vml_px_effects(),
+        textbox_vml_inline_shapes(),
+        hidden_drawings(),
     ]
 
 
@@ -7262,7 +9691,8 @@ def settings_xml(doc: Doc) -> str:
     return (
         f'<w:settings xmlns:w="{W_NS}">'
         '<w:zoom w:percent="100"/>'
-        '<w:defaultTabStop w:val="720"/>'
+        + ("<w:mirrorMargins/>" if doc.mirror_margins else "")
+        + '<w:defaultTabStop w:val="720"/>'
         + ("<w:evenAndOddHeaders/>" if doc.even_and_odd_headers else "")
         + '<w:characterSpacingControl w:val="doNotCompress"/>'
         f"{note_settings(doc)}"
@@ -7315,6 +9745,28 @@ def relationships(rels: list[tuple[str, ...]]) -> str:
     return f'<Relationships xmlns="{ns}">{entries}</Relationships>'
 
 
+def picture_ids(xml: str) -> list[str]:
+    """The relationship ids by which a part's markup names its pictures (a DrawingML
+    a:blip's r:embed, a VML v:imagedata's r:id), each once, in the order of first use."""
+    return list(dict.fromkeys(re.findall(
+        r'<(?:a:blip|v:imagedata)\s[^>]*?\br:(?:embed|id)="([^"]+)"', xml)))
+
+
+def part_rels(doc: Doc, name: str, xml: str) -> list[tuple[str, str, str]]:
+    """The image relationships of the part word/<name>: one to each picture of doc.media that
+    its markup names, in the order of doc.media, under the id media_id() gives it. A
+    relationship's id is unique in its part, and its target is relative to word/, where the
+    part is (ECMA-376 Part 2, §9.3; Part 1, §17.10 for headers and footers, §17.11 for
+    notes)."""
+    known = {media_id(picture): picture for picture, _ in doc.media}
+    used = picture_ids(xml)
+    for rel_id in used:
+        if rel_id not in known:
+            raise ValueError(f"{doc.name}: word/{name} names a picture {rel_id} the document "
+                             "does not have")
+    return [("image", f"media/{known[rel_id]}", rel_id) for rel_id in known if rel_id in used]
+
+
 def parts(doc: Doc) -> list[tuple[str, bytes]]:
     """The package parts of a document, in the order they are stored."""
     document = (
@@ -7357,8 +9809,7 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
         kind = "header" if name.startswith("header") else "footer"
         word_rels.append((kind, name, part_id(name)))
         overrides.append((f"/word/{name}", f"{CT_W}.{kind}+xml"))
-    for name, _ in doc.media:
-        word_rels.append(("image", f"media/{name}", media_id(name)))
+    word_rels += part_rels(doc, "document.xml", document)
     if doc.theme:
         word_rels.append(("theme", "theme/theme1.xml"))
         overrides.append(
@@ -7403,6 +9854,12 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
     for name, root in notes:
         result.append((f"word/{name}", xml_part(root)))
     result.append(("word/_rels/document.xml.rels", xml_part(relationships(word_rels))))
+    # The headers, footers and notes that hold pictures, each with a relationships part of
+    # its own; the others have none.
+    for name, root in [*doc.headers, *notes]:
+        rels = part_rels(doc, name, root)
+        if rels:
+            result.append((f"word/_rels/{name}.rels", xml_part(relationships(rels))))
     xml_parts = list(result)
     result += [(f"word/media/{name}", data) for name, data in doc.media]
     for name, data in xml_parts:

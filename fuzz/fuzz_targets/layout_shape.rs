@@ -3,15 +3,17 @@
 //! among them missing ones and the symbol fonts Symbol and Wingdings; bold, italic,
 //! capitals, small capitals, complex script, right to left, the East Asian hint, kerning;
 //! size), the rest are pieces of text, floating pictures and text boxes (anchored to any
-//! reference, by any offset or alignment, behind or in front, in any place of the stack; a
-//! box holds a paragraph of the piece's text, with insets and an anchor down the box the
-//! piece gives), symbols, the starts and ends of links (to a URI or a bookmark) and
+//! reference, by any offset or alignment, behind or in front, in any place of the stack,
+//! not wrapped or wrapped in any way on any side, with distances and with effects that may
+//! be negative; a box holds a paragraph of the piece's text, with insets and an anchor down
+//! the box the piece gives), symbols, the starts and ends of links (to a URI or a bookmark) and
 //! bookmarks, named by the piece's text, tabs,
 //! soft hyphens, and page and column breaks in those styles. The paragraph must keep what
 //! the layout relies on (`check_paragraph`), and break into lines that hold its text in
 //! order, in a column, with
 //! a line spacing, an alignment, a hanging indent and tab stops the first bytes give too,
-//! and a list label when they say so (`check_lines`). Up to four copies of it, kept with
+//! and a list label when they say so (`check_lines`), in a compatibility mode they give.
+//! Up to four copies of it, kept with
 //! the next, kept together, with or without widow control and a page break before as the
 //! first bytes say, are then laid out on pages of a height they give, the last of them in a
 //! second section of a start the first bytes give when they say so, with every line on
@@ -31,13 +33,13 @@ use officewright_font::{FontBook, FontOrigin};
 use officewright_layout::fuzzing::{check_lines, check_pages, check_paragraph};
 use officewright_layout::ir::{
     Alignment, AnchorHorizontalAlign, AnchorVerticalAlign, AnchoredObject, Border, BorderSide,
-    Cell, Document, DocumentSettings, Field, FieldKind, FontHint, HeaderFooterSet,
+    Cell, CompatMode, Document, DocumentSettings, Field, FieldKind, FontHint, HeaderFooterSet,
     HorizontalAnchor, HorizontalPlacement, HorizontalReference, ImageData, ImageFormat, ImageId,
     Indent, Inline, Insets, Level, LevelAlignment, LevelTextPart, LineSpacing, LinkTarget,
     ListDefinition, ListInstance, ListItem, Margins, NumberFormat, ObjectContent, PageSetup,
     Paragraph, ParagraphProps, Picture, Row, RunFonts, RunStyle, RunStyleId, Section, SectionStart,
     Size, Spacing, Suffix, TabKind, TabStop, Table, TableBorders, TableProps, TextBox,
-    TextBoxAnchor, VerticalAnchor, VerticalPlacement, VerticalReference, Wrap,
+    TextBoxAnchor, VerticalAnchor, VerticalPlacement, VerticalReference, Wrap, WrapSide,
 };
 
 const FAMILIES: [&str; 8] = [
@@ -53,6 +55,9 @@ const FAMILIES: [&str; 8] = [
 
 /// A floating picture of `image`, or a text box of a paragraph in `style`, whose place,
 /// size, layer and wrapping `bytes` give, and for a box its insets, its anchor and its text.
+/// An object text wraps around takes 9 bytes more, after its first 12: the wrapping and its
+/// side, the distances, and the effects, from -64 to 63.5 pt, at the left, top, right and
+/// bottom; a box's text follows them.
 fn floating(image: ImageId, bytes: &[u8], style: RunStyleId) -> Inline {
     let byte = |index: usize| bytes.get(index).copied().unwrap_or(0);
     let offset = |index: usize| f64::from(i16::from_le_bytes([byte(index), byte(index + 1)])) / 4.0;
@@ -102,13 +107,35 @@ fn floating(image: ImageId, bytes: &[u8], style: RunStyleId) -> Inline {
     } else {
         VerticalPlacement::Offset(Pt(offset(4)))
     };
-    let wrap = if byte(6) & 4 != 0 {
-        Wrap::Square
+    let wraps = byte(6) & 4 != 0;
+    let wrap = if wraps {
+        [Wrap::Square, Wrap::Tight, Wrap::Through, Wrap::TopAndBottom][usize::from(byte(12)) % 4]
     } else {
         Wrap::None
     };
+    let side = [
+        WrapSide::BothSides,
+        WrapSide::Left,
+        WrapSide::Right,
+        WrapSide::Largest,
+    ][usize::from(byte(12) >> 2) % 4];
+    let sides = |at: usize, length: &dyn Fn(u8) -> f64| {
+        Insets::default()
+            .with_left(Pt(length(byte(at))))
+            .with_top(Pt(length(byte(at + 1))))
+            .with_right(Pt(length(byte(at + 2))))
+            .with_bottom(Pt(length(byte(at + 3))))
+    };
+    let (distances, effects) = if wraps {
+        let distance = |byte: u8| f64::from(byte) / 4.0;
+        let effect = |byte: u8| f64::from(i8::from_le_bytes([byte])) / 2.0;
+        (sides(13, &distance), sides(17, &effect))
+    } else {
+        (Insets::default(), Insets::default())
+    };
     let content = if byte(6) & 16 != 0 {
-        let text = String::from_utf8_lossy(bytes.get(12..).unwrap_or_default());
+        let from = if wraps { 21 } else { 12 };
+        let text = String::from_utf8_lossy(bytes.get(from..).unwrap_or_default());
         let inset = |index: usize| Pt(f64::from(byte(index)) / 4.0);
         ObjectContent::text_box(
             TextBox::new()
@@ -146,7 +173,10 @@ fn floating(image: ImageId, bytes: &[u8], style: RunStyleId) -> Inline {
         )
         .with_behind_text(byte(6) & 8 != 0)
         .with_z_order(u32::from(byte(9)))
-        .with_wrap(wrap),
+        .with_wrap(wrap)
+        .with_wrap_side(side)
+        .with_distances(distances)
+        .with_effect_extent(effects),
     )
 }
 
@@ -205,7 +235,18 @@ fuzz_target!(|data: &[u8]| {
     let data = data.get(..2048).unwrap_or(data);
     // Even-page headers in use when bit 5 of byte 12 says so, as the footer below has them.
     let even = data.get(12).is_some_and(|byte| byte & 32 != 0);
-    let mut document = Document::new(DocumentSettings::default().with_even_and_odd_headers(even));
+    // The compatibility mode from bits 1 and 2 of byte 11.
+    let mode = [
+        CompatMode::Word2003,
+        CompatMode::Word2007,
+        CompatMode::Word2010,
+        CompatMode::Word2013,
+    ][usize::from(data.get(11).copied().unwrap_or(0) >> 1 & 3)];
+    let mut document = Document::new(
+        DocumentSettings::default()
+            .with_even_and_odd_headers(even)
+            .with_compat_mode(mode),
+    );
     let mut styles = Vec::new();
     for chunk in data.chunks(4).take(4) {
         styles.push(document.add_run_style(style(chunk)));

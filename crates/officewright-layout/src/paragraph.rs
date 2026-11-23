@@ -128,8 +128,9 @@ pub(crate) fn lay_out_around(
     )
 }
 
-/// [`lay_out_with`] for a paragraph in a table cell, whose lines of text take the height
-/// of its paragraph mark and breaks too (`Breaker::set_height`).
+/// [`lay_out_with`] for a paragraph in a table cell, whose lines of an inline picture or
+/// text box alone take the height of its paragraph mark and breaks too
+/// (`Breaker::set_height`).
 pub(crate) fn lay_out_in_cell(
     document: &Document,
     paragraph: (&Paragraph, Option<&Label>),
@@ -176,6 +177,8 @@ fn lay_out_paragraph(
         location,
         cell,
         around,
+        // Only a text box's paragraphs are laid out without their boxes.
+        in_box: !boxes,
     };
     let lines = Breaker::new(input, &itemized, &shaped, fonts, shaper).lines();
     // Word hyphenates only where a line wraps, in a paragraph that does not suppress it, in a
@@ -360,6 +363,7 @@ pub(crate) fn content_widths(
         // Widths only: no line's height is read.
         cell: true,
         around: None,
+        in_box: false,
     };
     let mut breaker = Breaker::new(input, &itemized, &shaped, fonts, shaper);
     let min = breaker.min_width();
@@ -502,6 +506,46 @@ mod tests {
     }
 
     #[test]
+    fn a_text_box_s_paragraph_takes_no_stop_past_the_end_before_mode_15() {
+        use crate::ir::{CompatMode, Inline, RunFonts, RunStyle, TabStop};
+        use crate::testing::{book, minimal};
+        // In mode 14 the text after a tab to the paragraph's own stop past the end goes to
+        // the stop in the body, and wraps in a text box (`Breaker::past_end`): a box's
+        // paragraphs are those laid out without their boxes.
+        let book = book(vec![minimal()]);
+        let mut document =
+            Document::new(DocumentSettings::default().with_compat_mode(CompatMode::Word2010));
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let paragraph = Paragraph::new(style)
+            .with_props(
+                ParagraphProps::default().with_tabs([TabStop::default().with_position(Pt(50.0))]),
+            )
+            .with_inlines([
+                Inline::text("A", style),
+                Inline::tab(style),
+                Inline::text("A", style),
+            ]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let location = Location::default();
+        for (boxes, lines) in [(true, 1), (false, 2)] {
+            let layout = lay_out_paragraph(
+                &document,
+                (&paragraph, None),
+                Pt(30.0),
+                (&mut fonts, &mut shaper),
+                (&location, None),
+                (boxes, false, None),
+            );
+            assert_eq!(layout.lines.len(), lines, "boxes {boxes}");
+        }
+    }
+
+    #[test]
     fn the_space_between_two_paragraphs_is_the_larger_of_theirs() {
         // Word's renders of the CVs: 12 pt below and 12 pt above are 12.08 pt apart
         // (cv-en-academic-open), 6 and 14 are 14.05, 4 and 6 are 6.09, 2 and 6 are 5.89
@@ -579,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn a_large_mark_makes_the_last_line_taller_only_in_a_table_cell() {
+    fn a_large_mark_makes_a_line_of_text_no_taller_in_a_table_cell_either() {
         use crate::fonts::Fonts;
         use crate::ir::{
             AnchoredObject, BreakClear, HorizontalAnchor, ImageData, ImageFormat, Inline,
@@ -587,9 +631,8 @@ mod tests {
         };
         use crate::testing::{book, minimal};
         // The test font: a line of 1.15 em. 10 pt text with a 20 pt mark and a 20 pt
-        // break: out of a cell, each line of text is as tall as its text; in a cell, the
-        // break's line and the last line take the 20 pt of the break and of the mark, as
-        // the rows of Word's letterheads do (generated/invoice-en-standard).
+        // break: in a cell as out of one, each line of text is as tall as its text, as in
+        // Word's references of E-cell-mark-height and -14.
         let book = book(vec![minimal()]);
         let mut document = Document::default();
         let style = |size: f64| {
@@ -606,12 +649,22 @@ mod tests {
             Inline::line_break(BreakClear::None, big),
             Inline::text("A", small),
         ]);
-        // A line of an inline picture 30 pt high is as tall as the picture out of a cell.
+        // A line of an inline picture 30 pt high is as tall as the picture out of a cell,
+        // and taller in one.
         let image = document.add_image(ImageData::new(ImageFormat::Png, &b"\x89PNG"[..]));
         let picture = Paragraph::new(big).with_inlines([Inline::Object(InlineObject::new(
             ObjectContent::Picture(Picture::new(image)),
             Size::new(Pt(40.0), Pt(30.0)),
         ))]);
+        // A line of 10 pt text beside that picture is as tall in a cell as out of one: the
+        // 20 pt mark adds nothing to it (a hypothesis for cells).
+        let beside = Paragraph::new(big).with_inlines([
+            Inline::text("A", small),
+            Inline::Object(InlineObject::new(
+                ObjectContent::Picture(Picture::new(image)),
+                Size::new(Pt(40.0), Pt(30.0)),
+            )),
+        ]);
         // A line holding only the anchor of a floating picture, which takes no room in it,
         // has the mark's height.
         let anchored = Paragraph::new(big).with_inlines([Inline::anchored(AnchoredObject::new(
@@ -656,7 +709,7 @@ mod tests {
             heights(&text, false)
         );
         assert!(
-            close(&heights(&text, true), &[line(20.0), line(20.0)]),
+            close(&heights(&text, true), &[line(10.0), line(10.0)]),
             "{:?}",
             heights(&text, true)
         );
@@ -670,11 +723,19 @@ mod tests {
             !in_cell.is_empty() && in_cell.iter().all(|height| *height > 30.0),
             "{in_cell:?}"
         );
+        let out_of_cell = heights(&beside, false);
         assert!(
-            close(&heights(&anchored, false), &[line(20.0)]),
-            "{:?}",
-            heights(&anchored, false)
+            out_of_cell.len() == 1 && close(&heights(&beside, true), &out_of_cell),
+            "{out_of_cell:?}, {:?}",
+            heights(&beside, true)
         );
+        for cell in [false, true] {
+            assert!(
+                close(&heights(&anchored, cell), &[line(20.0)]),
+                "cell {cell}: {:?}",
+                heights(&anchored, cell)
+            );
+        }
     }
 
     #[test]

@@ -30,8 +30,13 @@ tests/corpus/reference/<group>/<name>/ go instead
     in the later cells of a table row or, as the reference's pages show, at the start of the
     next row), the fonts the PDF references without embedding them, and what Word changed
     when it saved the copy: the w:compat settings it dropped and added, the style and
-    numbering properties it dropped, added and changed, and the paragraphs whose style it
-    changed; every value on a line of its own, without indentation (geometry_text);
+    numbering properties it dropped, added and changed, the paragraphs whose style it
+    changed, and the PDF's link annotations and named destinations (qpdf --json): each
+    link's page, rectangle and quadrilaterals in the same points (from the top left of the
+    MediaBox, as pdftotext measures; a turned page is refused) and its target (a URI, with
+    a file: URI or a local path recorded as file: alone, a destination, or the kind of its
+    action), each named destination's page and place; every value on a line of its own,
+    without indentation (geometry_text);
   - formatting.json, from make-reference.ps1 format 3 on: the formatting Word computes for
     every paragraph of every story, with its runs of formatting when Word gave them, and the
     body paragraphs' style ids and names taken from the re-saved copy.
@@ -50,8 +55,8 @@ used instead.
 
 The re-saved DOCX goes to tests/corpus/resaved/<group>/<name>.docx, and the document's row to
 the "Reference renders" table of tests/corpus/SOURCES.md. Nothing is written unless every
-document passes. Needs pdfinfo, pdffonts, pdftoppm and pdftotext (poppler-utils) and, for a
-PDF that does not embed every font, qpdf 11 or later.
+document passes. Needs pdfinfo, pdffonts, pdftoppm and pdftotext (poppler-utils) and qpdf 11
+or later, which reads every PDF's links and embeds the fonts a PDF does not embed.
 """
 
 from __future__ import annotations
@@ -1807,6 +1812,253 @@ def pdf_privacy_problems(info: str, xmp: str, data: bytes) -> list[str]:
     return problems
 
 
+# The link annotations and named destinations of a reference PDF (#569), from qpdf --json=2:
+# where Word puts a link's rectangle, and where a bookmark's destination is.
+
+# How qpdf's JSON writes a reference to an object: "12 0 R".
+OBJECT_REFERENCE = re.compile(r"\d+ \d+ R")
+# A URI that is a local path without the file: scheme: a drive (C:\, C:/) or a share (\\host).
+LOCAL_PATH = re.compile(r"[A-Za-z]:[\\/]|\\\\")
+
+
+def pdf_string(value: object) -> str | None:
+    """A PDF string of qpdf's JSON, or None for another value: qpdf gives text it can read
+    (PDFDocEncoding, or UTF-16 with its mark) after u:, other bytes in hexadecimal after b:,
+    read here as Latin-1."""
+    if not isinstance(value, str):
+        return None
+    if value.startswith("u:"):
+        return value[2:]
+    if value.startswith("b:"):
+        try:
+            return bytes.fromhex(value[2:]).decode("latin-1")
+        except ValueError:
+            return None
+    return None
+
+
+class PdfObjects:
+    """The objects of qpdf --json=2 output, with references resolved."""
+
+    def __init__(self, text: str):
+        try:
+            data = json.loads(text)
+            objects = data["qpdf"][1]
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as error:
+            raise ValueError(f"not qpdf's JSON of a PDF: {error}") from error
+        if not isinstance(objects, dict):
+            raise ValueError("not qpdf's JSON of a PDF: no objects")
+        self.objects = objects
+
+    def get(self, value: object, depth: int = 0) -> object:
+        """value, or the object it refers to (a chain of references is followed a little)."""
+        while isinstance(value, str) and OBJECT_REFERENCE.fullmatch(value) and depth < 8:
+            entry = self.objects.get(f"obj:{value}")
+            value = entry.get("value") if isinstance(entry, dict) else None
+            depth += 1
+        return value
+
+    def dict(self, value: object) -> dict:
+        found = self.get(value)
+        return found if isinstance(found, dict) else {}
+
+    def list(self, value: object) -> list:
+        found = self.get(value)
+        return found if isinstance(found, list) else []
+
+    def number(self, value: object) -> float | None:
+        found = self.get(value)
+        if isinstance(found, bool) or not isinstance(found, (int, float)):
+            return None
+        return float(found)
+
+    def pages(self) -> list[tuple[str, dict, list[float]]]:
+        """The pages in order: each one's reference, dictionary and MediaBox, as the page
+        inherits it. The MediaBox, not the CropBox, is the box pdftotext -bbox-layout and
+        pdftoppm measure from as the importer runs them; a page they would turn (its /Rotate,
+        as inherited, not a multiple of 360) is refused, as no box of geometry.json is
+        turned."""
+        trailer = self.objects.get("trailer")
+        trailer = trailer.get("value") if isinstance(trailer, dict) else None
+        if not isinstance(trailer, dict):
+            raise ValueError("the PDF has no trailer")
+        root = self.dict(self.dict(trailer).get("/Root")).get("/Pages")
+        found, seen = [], set()
+        stack = [(root, {})]
+        while stack:
+            reference, inherited = stack.pop()
+            if not isinstance(reference, str) or reference in seen or len(seen) > 100_000:
+                continue
+            seen.add(reference)
+            node = self.dict(reference)
+            if not node:
+                # A reference to an object qpdf's JSON lacks: the page count tells.
+                continue
+            boxes = dict(inherited)
+            box = [self.number(v) for v in self.list(node.get("/MediaBox"))]
+            if len(box) == 4 and all(v is not None for v in box):
+                boxes["/MediaBox"] = box
+            if "/Rotate" in node:
+                boxes["/Rotate"] = self.number(node.get("/Rotate"))
+            if self.get(node.get("/Type")) == "/Pages":
+                kids = self.list(node.get("/Kids"))
+                stack.extend((kid, boxes) for kid in reversed(kids))
+            else:
+                box = boxes.get("/MediaBox")
+                if box is None:
+                    raise ValueError(f"page {len(found) + 1} has no MediaBox")
+                rotate = boxes.get("/Rotate", 0.0)
+                if rotate is None:
+                    raise ValueError(f"page {len(found) + 1} has a /Rotate that is no number")
+                if rotate % 360 != 0:
+                    raise ValueError(f"page {len(found) + 1} is turned (/Rotate {rotate:g})")
+                found.append((reference, node, box))
+        return found
+
+
+def top_left(box: list[float], x: float, y: float) -> tuple[float, float]:
+    """A point of PDF user space in points from the page box's top left, y downwards, as the
+    line boxes of pdftotext are."""
+    left, top = min(box[0], box[2]), max(box[1], box[3])
+    return round(x - left, 3), round(top - y, 3)
+
+
+def destination(objects: PdfObjects, value: object, page_numbers: dict[str, int],
+                boxes: dict[str, list[float]]) -> dict | None:
+    """A destination: an explicit one ([page /XYZ left top zoom] and the other fits) on one of
+    the PDF's pages, as its page, fit and the place it names in points from the top left, or a
+    named one; None for anything else."""
+    found = objects.get(value)
+    if isinstance(found, dict) and "/D" in found:
+        found = objects.get(found["/D"])
+    name = pdf_string(found)
+    if name is not None:
+        return {"name": name}
+    if isinstance(found, str) and found.startswith("/"):
+        return {"name": found[1:]}
+    if not isinstance(found, list) or not found:
+        return None
+    page_ref = found[0]
+    page = page_numbers.get(page_ref) if isinstance(page_ref, str) else None
+    if page is None:
+        # Not one of the PDF's pages: no destination the reader can record.
+        return None
+    fit = objects.get(found[1]) if len(found) > 1 else None
+    out: dict = {"page": page, "fit": fit[1:] if isinstance(fit, str) else None}
+    box = boxes[page_ref]
+    if fit == "/XYZ":
+        left = objects.number(found[2]) if len(found) > 2 else None
+        top = objects.number(found[3]) if len(found) > 3 else None
+        x, y = top_left(box, left if left is not None else box[0],
+                        top if top is not None else box[3])
+        out["x"] = None if left is None else x
+        out["y"] = None if top is None else y
+    return out
+
+
+def link_target(objects: PdfObjects, annotation: dict, number: int,
+                page_numbers: dict[str, int], boxes: dict[str, list[float]]) -> dict:
+    """What a link on page number goes to: a URI, a destination, or the kind of action it
+    runs. A file: URI, or a local path written without that scheme (a drive or a share), is
+    recorded as file: alone, since its path names a folder of the machine Word ran on. A URI
+    action without a URI, and a destination that is none, are refused."""
+    action = objects.dict(annotation.get("/A"))
+    kind = objects.get(action.get("/S")) if action else None
+    if kind == "/URI":
+        uri = pdf_string(objects.get(action.get("/URI")))
+        if uri is None:
+            raise ValueError(f"a link on page {number} has a URI action without a URI")
+        if uri.lstrip().lower().startswith("file:") or LOCAL_PATH.match(uri.lstrip()):
+            return {"uri": "file:"}
+        return {"uri": uri}
+    if kind == "/GoTo" or (not action and "/Dest" in annotation):
+        value = action.get("/D") if kind == "/GoTo" else annotation.get("/Dest")
+        target = destination(objects, value, page_numbers, boxes)
+        if target is None:
+            raise ValueError(f"a link on page {number} goes to no destination")
+        return {"dest": target}
+    if action:
+        return {"action": kind[1:] if isinstance(kind, str) else None}
+    return {}
+
+
+def named_destinations(objects: PdfObjects, page_numbers: dict[str, int],
+                       boxes: dict[str, list[float]]) -> list[dict]:
+    """The named destinations of the catalog's /Dests dictionary and of the /Dests name
+    tree of its /Names, in name order. A value that is no destination array or dictionary
+    (ISO 32000-1 12.3.2.3), such as another name, and one whose page is none of the PDF's
+    pages, are refused."""
+    trailer = objects.objects.get("trailer", {}).get("value", {})
+    catalog = objects.dict(trailer.get("/Root") if isinstance(trailer, dict) else None)
+    found: dict[str, object] = {}
+    for key, value in objects.dict(catalog.get("/Dests")).items():
+        found[key[1:]] = value
+    stack, seen = [objects.dict(catalog.get("/Names")).get("/Dests")], set()
+    while stack:
+        node_ref = stack.pop()
+        if isinstance(node_ref, str):
+            if node_ref in seen:
+                continue
+            seen.add(node_ref)
+        node = objects.dict(node_ref)
+        names = objects.list(node.get("/Names"))
+        for at in range(0, len(names) - 1, 2):
+            name = pdf_string(objects.get(names[at]))
+            if name is not None:
+                found[name] = names[at + 1]
+        stack.extend(objects.list(node.get("/Kids")))
+    out = []
+    for name in sorted(found):
+        target = destination(objects, found[name], page_numbers, boxes)
+        if target is None or "name" in target:
+            raise ValueError(f"the named destination {name} is not a destination")
+        out.append({"name": name, **target})
+    return out
+
+
+def pdf_links(text: str, page_count: int) -> tuple[list[dict], list[dict]]:
+    """The link annotations of every page (its number, rectangle and quadrilaterals in
+    points from the top left of its MediaBox, and target) and the named destinations of a
+    PDF of page_count pages, from qpdf --json=2. A page tree that does not hold those pages
+    is refused, and so are malformed quadrilaterals."""
+    objects = PdfObjects(text)
+    pages = objects.pages()
+    if len(pages) != page_count:
+        raise ValueError(f"the page tree of qpdf's JSON holds {len(pages)} pages, not "
+                         f"{page_count}")
+    page_numbers = {reference: n for n, (reference, _, _) in enumerate(pages, 1)}
+    boxes = {reference: box for reference, _, box in pages}
+    links = []
+    for number, (_, page, box) in enumerate(pages, 1):
+        for annotation_ref in objects.list(page.get("/Annots")):
+            annotation = objects.dict(annotation_ref)
+            if objects.get(annotation.get("/Subtype")) != "/Link":
+                continue
+            rect = [objects.number(v) for v in objects.list(annotation.get("/Rect"))]
+            if len(rect) != 4 or any(v is None for v in rect):
+                raise ValueError(f"a link on page {number} has no rectangle")
+            (x0, y0), (x1, y1) = top_left(box, rect[0], rect[1]), top_left(box, rect[2], rect[3])
+            link = {"page": number, "box": [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]}
+            if "/QuadPoints" in annotation:
+                quads = [objects.number(v) for v in objects.list(annotation.get("/QuadPoints"))]
+                if not quads or len(quads) % 8 != 0 or any(v is None for v in quads):
+                    raise ValueError(f"a link on page {number} has malformed /QuadPoints")
+                link["quad_points"] = [list(top_left(box, quads[k], quads[k + 1]))
+                                       for k in range(0, len(quads), 2)]
+            link.update(link_target(objects, annotation, number, page_numbers, boxes))
+            links.append(link)
+    return links, named_destinations(objects, page_numbers, boxes)
+
+
+def link_privacy_problems(links: list[dict], destinations: list[dict]) -> list[str]:
+    """Profile paths in the URIs and names the links and destinations record."""
+    texts = [link.get("uri") for link in links]
+    texts += [(link.get("dest") or {}).get("name") for link in links]
+    texts += [target.get("name") for target in destinations]
+    return ["a link of the PDF names a user profile path"
+            for value in texts if value and PROFILE_PATH.search(value.encode())][:1]
+
+
 def pdf_pages(info: str) -> int:
     match = re.search(r"^Pages:\s+(\d+)\s*$", info, re.M)
     if not match:
@@ -2369,6 +2621,13 @@ def check_result(
         page_breaks = rendered_page_breaks(resaved_parts, geometry_pages)
     except (ElementTree.ParseError, KeyError) as error:
         raise Refused(f"{record['file']}: cannot read a package: {error}") from error
+    try:
+        links, destinations = pdf_links(tools.objects(pdf), pages)
+    except ValueError as error:
+        raise Refused(f"{record['file']}: cannot read the PDF's links: {error}") from error
+    problems = link_privacy_problems(links, destinations)
+    if problems:
+        raise Refused(f"{record['file']}: {'; '.join(problems)}")
     missing_embeds = not_embedded(tools.fonts(pdf))
     try:
         drawn = [drawn_font(name, fonts or {}) for name in missing_embeds]
@@ -2390,6 +2649,8 @@ def check_result(
         "numbering_changed": numbering_changed,
         "paragraph_styles_changed": paragraph_styles,
         "page_breaks": page_breaks,
+        "links": links,
+        "destinations": destinations,
         "pages": geometry_pages,
     }
     formatting, formatting_note = None, ""

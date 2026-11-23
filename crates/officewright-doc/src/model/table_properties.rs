@@ -866,8 +866,25 @@ impl TableCellProperties {
 
     /// A cell's own properties to lay over those `below` it gets from its table style:
     /// a side whose border the cell sets to `none` takes the style's border, as an
-    /// omitted one does (MS-OI29500 §17.4.66(a)).
+    /// omitted one does (MS-OI29500 §17.4.66(a)); so does a top or bottom margin that is
+    /// no length (`nil`, a percentage or `auto`), where the style gives that margin.
+    ///
+    /// Word draws the cells of word-rules/E-table-cell-margins-style.docx whose own top
+    /// margins are of those types with the style's 15 pt above their text, over the
+    /// table's 5 pt (#596). Their start and end margins stay the cell's own, which the
+    /// layout takes from the table, as Word's render shows. The bottom margin is taken as
+    /// the top: our choice, since the render cannot show it, the row's height being that
+    /// of the cell without margins of its own.
     pub(crate) fn over_style(mut self, below: &Self) -> Self {
+        if let (Some(own), Some(style)) = (&mut self.margins, &below.margins) {
+            for (side, styled) in [(&mut own.top, &style.top), (&mut own.bottom, &style.bottom)] {
+                if side.is_some_and(|width| !matches!(width, TableWidth::Length(_)))
+                    && styled.is_some()
+                {
+                    *side = None;
+                }
+            }
+        }
         let (Some(own), Some(style)) = (&mut self.borders, &below.borders) else {
             return self;
         };
