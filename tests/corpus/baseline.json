@@ -507,6 +507,7 @@
     "tests/corpus/word-rules/E-strike.docx": "opened",
     "tests/corpus/word-rules/E-style-toggles-defaults.docx": "opened",
     "tests/corpus/word-rules/E-style-toggles.docx": "opened",
+    "tests/corpus/word-rules/E-subscript-drop-derived.docx": "opened",
     "tests/corpus/word-rules/E-subscript-drop.docx": "opened",
     "tests/corpus/word-rules/E-superscript-sizes.docx": "opened",
     "tests/corpus/word-rules/E-superscript-steps.docx": "opened",

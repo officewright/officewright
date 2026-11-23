@@ -176,7 +176,8 @@ fi
 step "corpus runner over tests/corpus (against tests/corpus/baseline.json)"
 # Every committed Word document opens and is rendered into PDF in a child process, with the
 # fonts of tests/fonts-word/noto-truetype, tests/fonts-word/test-symbol, tests/fonts,
-# tests/fonts-word/libre-barcode-128 and tests/fonts-word/test-dmap and none of the
+# tests/fonts-word/libre-barcode-128, tests/fonts-word/test-dmap,
+# tests/fonts-word/test-descent and tests/fonts-word/test-subscript and none of the
 # system's; a panic, hang, memory blow-up, a document that opens but cannot be rendered,
 # or any change of a file's status from the baseline fails. On Linux each document with a
 # Word reference is also scored, and a score that moves by more than 0.01 fails; macOS and
@@ -188,14 +189,19 @@ step "corpus runner over tests/corpus (against tests/corpus/baseline.json)"
 # with that build, but for E-line-fonts (THIRD-PARTY-NOTICES.md). The symbol font of
 # tests/fonts-word/test-symbol is the one installed when Word renders E-symbol-font, the
 # barcode font of tests/fonts-word/libre-barcode-128 the one installed when it renders
-# E-barcode-font, and the DMAP font of tests/fonts-word/test-dmap the one installed when it
-# renders E-dmap-font; the DMAP font comes last, so that the layout falls back to it only
-# where no other face has a character, or for a family that shares its first word
-# (Officewright Test Symbol).
+# E-barcode-font, the DMAP font of tests/fonts-word/test-dmap the one installed when it
+# renders E-dmap-font, and the subscript fonts of tests/fonts-word/test-descent and
+# tests/fonts-word/test-subscript the ones installed when it renders
+# E-subscript-drop-derived. The DMAP font comes after the others, so that the layout falls
+# back to it only where no other face has a character, or for a family that shares its
+# first word (Officewright Test Symbol); the subscript fonts come last, after it, so that
+# such a family still falls back to the DMAP font, and any other text to a face before
+# them, since the TrueType Noto Sans has every character they have.
 rm -rf target/corpus-pdf
 corpus_options=(--render target/corpus-pdf --font-dir tests/fonts-word/noto-truetype
 	--font-dir tests/fonts-word/test-symbol --font-dir tests/fonts
-	--font-dir tests/fonts-word/libre-barcode-128 --font-dir tests/fonts-word/test-dmap)
+	--font-dir tests/fonts-word/libre-barcode-128 --font-dir tests/fonts-word/test-dmap
+	--font-dir tests/fonts-word/test-descent --font-dir tests/fonts-word/test-subscript)
 if [ "$os" = linux ]; then
 	corpus_options+=(--references tests/corpus/reference)
 else

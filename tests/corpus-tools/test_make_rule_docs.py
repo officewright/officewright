@@ -8300,5 +8300,132 @@ class FloatingObjectDocuments(unittest.TestCase):
         self.assertEqual(pages, [1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6])
 
 
+FONTS_WORD = SCRIPTS.parent / "tests/fonts-word"
+
+
+def family_name(path):
+    """The family name (name ID 1) of a font's Windows Unicode English record."""
+    data = path.read_bytes()
+    (count,) = struct.unpack(">H", data[4:6])
+    for i in range(count):
+        tag, _, offset, length = struct.unpack(">4sIII", data[12 + 16 * i : 28 + 16 * i])
+        if tag == b"name":
+            table = data[offset : offset + length]
+    _, records, strings = struct.unpack(">HHH", table[:6])
+    for i in range(records):
+        platform, encoding, language, name_id, length, offset = struct.unpack(
+            ">HHHHHH", table[6 + 12 * i : 18 + 12 * i])
+        if (platform, encoding, language, name_id) == (3, 1, 0x409, 1):
+            return table[strings + offset : strings + offset + length].decode("utf-16-be")
+    return None
+
+
+class SubscriptDropDerived(unittest.TestCase):
+    """E-subscript-drop-derived (#586 item 1): subscripts in the two subscript fonts and in
+    the TrueType Noto Sans they are made from."""
+
+    # The font files of the families the document names.
+    FILES = {
+        "Noto Sans": FONTS_WORD / "noto-truetype/NotoSans-Regular.ttf",
+        "Officewright Test Descent":
+            FONTS_WORD / "test-descent/OfficewrightTestDescent-Regular.ttf",
+        "Officewright Test Subscript":
+            FONTS_WORD / "test-subscript/OfficewrightTestSubscript-Regular.ttf",
+    }
+
+    def setUp(self):
+        self.doc = next(doc for doc in rules.documents()
+                        if doc.name == "E-subscript-drop-derived")
+        self.parts = dict(rules.parts(self.doc))
+        self.paragraphs = ElementTree.fromstring(self.parts["word/document.xml"]).findall(
+            f"{W}body/{W}p")
+
+    @staticmethod
+    def texts(element):
+        return "".join(t.text or "" for t in element.iter(f"{W}t"))
+
+    def cases(self):
+        """(number, font, size, label run, Base run, subscript run) of each case."""
+        found = []
+        for p in self.paragraphs:
+            if not self.texts(p).startswith("Case "):
+                continue
+            label, base, sub = p.findall(f"{W}r")
+            match = re.fullmatch(r"Case (\d\d): (.+) (\d+) pt: ", self.texts(label))
+            self.assertIsNotNone(match, self.texts(label))
+            found.append((int(match[1]), match[2], int(match[3]), label, base, sub))
+        return found
+
+    def test_the_cases_are_every_size_of_the_issue_in_the_three_fonts(self):
+        cases = self.cases()
+        self.assertEqual([n for n, *_ in cases], list(range(1, 94)))
+        # 12, 24, 36, 48 and 72 pt, and every point from 20 to 48 pt (#586 item 1).
+        sizes = {12, 24, 36, 48, 72} | set(range(20, 49))
+        fonts = {"Noto Sans", "Officewright Test Descent", "Officewright Test Subscript"}
+        self.assertEqual(sorted((font, size) for _, font, size, *_ in cases),
+                         sorted((font, size) for font in fonts for size in sizes))
+        # The intro, every case, and the closing paragraph.
+        self.assertEqual(len(self.paragraphs), 95)
+        self.assertEqual(self.texts(self.paragraphs[0]),
+                         "In each case, Base at the size its label names and 456 as a "
+                         "subscript, both in the font its label names in all four slots.")
+        self.assertEqual(self.texts(self.paragraphs[-1]), "End of the document.")
+        # The purpose names the same sizes.
+        self.assertTrue(self.doc.purpose.endswith(
+            "at 12 pt, every point from 20 to 48 pt and 72 pt"))
+
+    def test_each_case_has_the_markup_its_label_names(self):
+        for n, font, size, label, base, sub in self.cases():
+            with self.subTest(n):
+                # The label in the document defaults' Calibri 11 pt.
+                self.assertIsNone(label.find(f"{W}rPr"))
+                self.assertEqual((self.texts(base), self.texts(sub)), ("Base", "456"))
+                for r in (base, sub):
+                    fonts = r.find(f"{W}rPr/{W}rFonts")
+                    self.assertEqual([fonts.get(f"{W}{slot}") for slot in
+                                      ("ascii", "hAnsi", "eastAsia", "cs")], [font] * 4)
+                    for tag in ("sz", "szCs"):
+                        self.assertEqual(r.find(f"{W}rPr/{W}{tag}").get(f"{W}val"),
+                                         str(2 * size))
+                self.assertIsNone(base.find(f"{W}rPr/{W}vertAlign"))
+                self.assertEqual(sub.find(f"{W}rPr/{W}vertAlign").get(f"{W}val"), "subscript")
+                self.assertIsNone(self.paragraphs[n].find(f"{W}pPr"))
+        styles = self.parts["word/styles.xml"].decode()
+        self.assertIn('<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" '
+                      'w:cs="Calibri"/><w:sz w:val="22"/>', styles)
+        table = ElementTree.fromstring(self.parts["word/fontTable.xml"])
+        self.assertEqual({f.get(f"{W}name") for f in table.iter(f"{W}font")},
+                         {"Calibri", "Noto Sans", "Officewright Test Descent",
+                          "Officewright Test Subscript"})
+
+    def test_the_fonts_are_the_committed_ones(self):
+        # Each family the document names is that of a font Word gets installed, and the
+        # purpose's 0.3 em are what the subscript fonts change.
+        for family, path in self.FILES.items():
+            self.assertEqual(family_name(path), family)
+        from test_subscript_fonts import metrics
+        from test_symbol_font import tables
+        noto, descent, subscript = (metrics(tables(path.read_bytes()))
+                                    for path in self.FILES.values())
+        self.assertEqual(noto["units"], 1000)
+        for field in ("hhea", "typo"):
+            self.assertEqual(noto[field] - descent[field], 300)
+        self.assertEqual(descent["win"] - noto["win"], 300)
+        self.assertEqual(subscript["subscript"], 300)
+        self.assertIn("with a descent 0.3 em deeper", self.doc.purpose)
+        self.assertIn("ySubscriptYOffset of 0.3 em", self.doc.purpose)
+
+    def test_each_case_is_one_line(self):
+        # The label in Carlito 11 pt, Base at the size and the subscript at 65 % of it,
+        # rounded up to a half point, in its font, within the text width.
+        for n, font, size, label, *_ in self.cases():
+            with self.subTest(n):
+                sub_size = -(-size * 0.65 * 2 // 1) / 2
+                width = (carlito_width(self.texts(label))
+                         + carlito_width("Base", size, self.FILES[font])
+                         + carlito_width("456", sub_size, self.FILES[font]))
+                self.assertLess(width, rules.TEXT_W / 20)
+
+
 if __name__ == "__main__":
     unittest.main()

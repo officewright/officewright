@@ -128,8 +128,9 @@ tests/corpus/reference/ ground truth from PDFs of Microsoft Word/Excel/PowerPoin
                         committed, their SHA-256 and the app version are in SOURCES.md
 tests/corpus/resaved/   the copy Word saved of each document before exporting its reference PDF
 tests/corpus-tools/     tests of make-rule-docs.py and corpus-import.py, that every test font is credited
-                        with its SHA-256, and that the symbol and DMAP fonts are what make-symbol-font.py and
-                        make-dmap-font.py write (Python), and of make-reference.ps1
+                        with its SHA-256, and that the symbol, DMAP and subscript fonts are what
+                        make-symbol-font.py, make-dmap-font.py and make-subscript-fonts.py write (Python),
+                        and of make-reference.ps1
                         without Word (Windows PowerShell, Windows only); poppler/ checks corpus-import.py's
                         font embedding and its reading of links with the real qpdf and poppler (Linux, macOS)
 tests/scripts/          tests of scripts/check-added-files.sh and scripts/check-corpus-size.py in throwaway git
@@ -143,7 +144,11 @@ tests/fonts-word/       OFL fonts installed for Word when it renders references,
                         (test-symbol/), its Regular face with a Windows symbol character map, written by
                         scripts/make-symbol-font.py, and the DMAP font Officewright Test DMAP (test-dmap/),
                         its Regular face with a DMAP table that maps A, B and U+E000 to other glyphs than
-                        its cmap does, written by scripts/make-dmap-font.py, and the barcode font Libre
+                        its cmap does, written by scripts/make-dmap-font.py, and the subscript fonts
+                        Officewright Test Descent (test-descent/), its Regular face with a descent 0.3 em
+                        deeper in hhea, sTypoDescender and usWinDescent, and Officewright Test Subscript
+                        (test-subscript/), its Regular face with an OS/2 ySubscriptYOffset of 0.3 em,
+                        both written by scripts/make-subscript-fonts.py, and the barcode font Libre
                         Barcode 128, unmodified (libre-barcode-128/); no crate's tests read them, the
                         corpus runner of check.sh lays documents out with them
 tools/corpus-runner/    workspace member, publish = false: runs the library over a corpus, writes a JSON report
@@ -168,6 +173,8 @@ scripts/check-test-fonts.sh  compares tests/fonts and tests/fonts-word with the 
 scripts/make-rule-docs.py  writes tests/corpus/word-rules/ (stored ZIP, fixed dates: same bytes everywhere)
 scripts/make-symbol-font.py  writes the symbol font of tests/fonts-word/test-symbol/ from the TrueType Noto Sans
 scripts/make-dmap-font.py  writes the DMAP font of tests/fonts-word/test-dmap/ from the TrueType Noto Sans
+scripts/make-subscript-fonts.py  writes the subscript fonts of tests/fonts-word/test-descent/ and
+                        test-subscript/ from the TrueType Noto Sans
 scripts/import-public-docs.py  cleans the listed public documents into tests/corpus/business/
 scripts/make-business-docs.py  writes tests/corpus/generated/ the same way, with open-font twins
 scripts/windows/make-reference.ps1  renders the reference PDFs with Word on the maintainer's Windows machine
@@ -393,8 +400,8 @@ scripts/check-added-files.sh: no tracked Python bytecode, no file naming a home 
   check-corpus-size.py, of nightly.sh's parts and of check.sh's CORPUS_JOBS in tests/scripts
 tests/corpus-tools (Python unittest): committed rule documents and their SOURCES.md rows equal make-rule-docs.py output;
   corpus-import.py refusals; every file in tests/fonts and tests/fonts-word is listed with its SHA-256 in
-  THIRD-PARTY-NOTICES.md, and check-test-fonts.sh's pins are its; the symbol and DMAP fonts are what
-  make-symbol-font.py and make-dmap-font.py write
+  THIRD-PARTY-NOTICES.md, and check-test-fonts.sh's pins are its; the symbol, DMAP and subscript fonts are
+  what make-symbol-font.py, make-dmap-font.py and make-subscript-fonts.py write
 tests/corpus-tools/poppler (Linux, macOS): fonts corpus-import.py embeds are what poppler draws; the links it reads
   are the ones qpdf's JSON gives
 tests/corpus-tools/test_make_reference.ps1 (Windows): a Word step that hangs is stopped, checked and never waited on forever
@@ -421,12 +428,14 @@ PDF output of officewright text-to-pdf (tests/pdf-output): qpdf --check without 
 corpus-runner over tests/corpus (committed corpus), CORPUS_JOBS documents at a time if that variable is set, else one
   per core, every document rendered with the fonts of tests/fonts and, first, tests/fonts-word/noto-truetype (the
   TrueType Noto Sans, the build Word had for the references that use it) and tests/fonts-word/test-symbol (the symbol
-  font), then, after tests/fonts, tests/fonts-word/libre-barcode-128 (the barcode font), and last
-  tests/fonts-word/test-dmap (the DMAP font), compared with tests/corpus/baseline.json: statuses and the scores
-  against Word's references (Linux), statuses only (macOS, Windows)
+  font), then, after tests/fonts, tests/fonts-word/libre-barcode-128 (the barcode font),
+  tests/fonts-word/test-dmap (the DMAP font), and last tests/fonts-word/test-descent and
+  tests/fonts-word/test-subscript (the subscript fonts, after the DMAP font, so that no other document lays out with
+  another face than before), compared with tests/corpus/baseline.json: statuses and the scores against Word's
+  references (Linux), statuses only (macOS, Windows)
 ```
 
-`scripts/nightly.sh` (scheduled CI; under an hour in parallel jobs, about six hours as one run): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), the files of `tests/fonts` and `tests/fonts-word` compared byte for byte with the upstream sources THIRD-PARTY-NOTICES.md names (Libre Barcode 128 among them), the symbol and DMAP fonts with what `make-symbol-font.py` and `make-dmap-font.py` write from upstream's Noto Sans (`scripts/check-test-fonts.sh`), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; 30 s per input, an allocation of 1 GiB or more fails the input, and the fuzzer may grow to 2.5 GiB, since it also holds its corpus and AddressSanitizer's quarantine and overhead; each target's crashing inputs uploaded as a CI artifact of its job; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. `nightly.yml` runs `nightly.sh checks` (all but the fuzzing) in one job and `nightly.sh fuzz <target>` in a job of its own for each target that `nightly.sh fuzz-targets` lists, so no job nears GitHub's limit of 6 hours; with no arguments the script runs all of it, the targets one after another. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
+`scripts/nightly.sh` (scheduled CI; under an hour in parallel jobs, about six hours as one run): Miri on `officewright-ffi`, `fetch-corpus.sh --check all` (every pinned commit is still fetchable and every archive still has its pinned size; downloads nothing), the files of `tests/fonts` and `tests/fonts-word` compared byte for byte with the upstream sources THIRD-PARTY-NOTICES.md names (Libre Barcode 128 among them), the symbol, DMAP and subscript fonts with what `make-symbol-font.py`, `make-dmap-font.py` and `make-subscript-fonts.py` write from upstream's Noto Sans (`scripts/check-test-fonts.sh`), fuzzing (30 min per target, each seeded with files of the format it reads, listed in `seeds()` in nightly.sh; 30 s per input, an allocation of 1 GiB or more fails the input, and the fuzzer may grow to 2.5 GiB, since it also holds its corpus and AddressSanitizer's quarantine and overhead; each target's crashing inputs uploaded as a CI artifact of its job; from Milestone 3), corpus-runner over the Word documents of `corpus-ext/` (Apache POI and LibreOffice, fetched by the run; each child under the 1 GiB limit; compared with `tools/corpus-runner/baseline-ext.json`), report uploaded as a CI artifact. `nightly.yml` runs `nightly.sh checks` (all but the fuzzing) in one job and `nightly.sh fuzz <target>` in a job of its own for each target that `nightly.sh fuzz-targets` lists, so no job nears GitHub's limit of 6 hours; with no arguments the script runs all of it, the targets one after another. The full `fetch-corpus.sh all` from scratch, which downloads every source and verifies every SHA-256, runs weekly.
 
 `.githooks/pre-commit` runs `scripts/check-added-files.sh --staged`, fmt, clippy and test. Enable once per clone: `git config core.hooksPath .githooks`. CI (`.github/workflows/ci.yml`, on pull requests, pushes to main and the merge queue's `merge_group` runs, the only ones that save no Rust cache) runs `check.sh` on Linux, Windows (Git Bash with the MSVC environment from `ilammy/msvc-dev-cmd`) and macOS plus an MSRV job on Rust 1.85 (`cargo test`, with poppler and qpdf for the corpus runner's tests); `nightly.yml` runs `nightly.sh` on Linux, its checks and each fuzz target in parallel jobs; `weekly.yml` runs the full corpus fetch on Linux. Actions are pinned by commit SHA and tools by version, except qpdf and poppler for the PDF output check and the MSRV job's corpus runner tests: they come from the runner's package manager (apt on Ubuntu 26.04, Homebrew on macOS), which keeps no installable old versions across runner image updates, so each CI step that installs them prints the versions it got.
 

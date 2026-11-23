@@ -6,10 +6,12 @@
 # whose SHA-256 is checked first; Carlito and Noto Sans (its CFF and TrueType builds) from
 # shallow, partial, sparse clones of the pinned commits, which git verifies, and so does
 # Libre Barcode 128 from Google Fonts' repository. The symbol font
-# of tests/fonts-word/test-symbol and the DMAP font of tests/fonts-word/test-dmap are
-# compared with what scripts/make-symbol-font.py and scripts/make-dmap-font.py write from
-# upstream's TrueType NotoSans-Regular.ttf. Every entry of both folders must be a
-# regular file. Needs network, curl, tar, git and python3. Run by scripts/nightly.sh.
+# of tests/fonts-word/test-symbol, the DMAP font of tests/fonts-word/test-dmap and the
+# subscript fonts of tests/fonts-word/test-descent and tests/fonts-word/test-subscript are
+# compared with what scripts/make-symbol-font.py, scripts/make-dmap-font.py and
+# scripts/make-subscript-fonts.py write from upstream's TrueType NotoSans-Regular.ttf. Every
+# entry of both folders must be a regular file. Needs network, curl, tar, git and python3.
+# Run by scripts/nightly.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -91,6 +93,9 @@ python3 -I -B scripts/make-symbol-font.py --from "$work/noto/fonts/NotoSans/unhi
 python3 -I -B scripts/make-dmap-font.py --from "$work/noto/fonts/NotoSans/unhinted/ttf/NotoSans-Regular.ttf" \
 	--to "$work/derived/OfficewrightTestDMAP-Regular.ttf" ||
 	fail "scripts/make-dmap-font.py cannot write the DMAP font from upstream's NotoSans-Regular.ttf"
+python3 -I -B scripts/make-subscript-fonts.py --from "$work/noto/fonts/NotoSans/unhinted/ttf/NotoSans-Regular.ttf" \
+	--to "$work/subscript" ||
+	fail "scripts/make-subscript-fonts.py cannot write the subscript fonts from upstream's NotoSans-Regular.ttf"
 
 checked=0
 while IFS= read -r -d '' file; do
@@ -105,12 +110,16 @@ while IFS= read -r -d '' file; do
 	tests/fonts/carlito/OFL.txt) upstream=$work/carlito/OFL.txt ;;
 	tests/fonts/carlito/*) upstream=$work/carlito/fonts/ttf/$name ;;
 	tests/fonts/noto/LICENSE | tests/fonts-word/noto-truetype/LICENSE | tests/fonts-word/test-symbol/LICENSE | \
-		tests/fonts-word/test-dmap/LICENSE)
+		tests/fonts-word/test-dmap/LICENSE | tests/fonts-word/test-descent/LICENSE | \
+		tests/fonts-word/test-subscript/LICENSE)
 		upstream=$work/noto/fonts/LICENSE
 		;;
 	tests/fonts/noto/*) upstream=$work/noto/fonts/NotoSans/unhinted/otf/$name ;;
 	tests/fonts-word/noto-truetype/*) upstream=$work/noto/fonts/NotoSans/unhinted/ttf/$name ;;
 	tests/fonts-word/test-symbol/* | tests/fonts-word/test-dmap/*) upstream=$work/derived/$name ;;
+	tests/fonts-word/test-descent/* | tests/fonts-word/test-subscript/*)
+		upstream=$work/subscript/${file#tests/fonts-word/}
+		;;
 	tests/fonts-word/libre-barcode-128/*) upstream=$work/librebarcode/ofl/librebarcode128/$name ;;
 	*)
 		fail "$file has no upstream source in this script"
@@ -126,4 +135,4 @@ done <"$work/files"
 
 [ "$checked" -gt 0 ] || fail "no files in tests/fonts and tests/fonts-word"
 [ -z "$failed" ] || exit 1
-echo "check-test-fonts.sh: all $checked files in tests/fonts and tests/fonts-word are upstream's, or what make-symbol-font.py and make-dmap-font.py write from upstream's"
+echo "check-test-fonts.sh: all $checked files in tests/fonts and tests/fonts-word are upstream's, or what make-symbol-font.py, make-dmap-font.py and make-subscript-fonts.py write from upstream's"
