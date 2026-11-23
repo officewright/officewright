@@ -168,7 +168,7 @@ fn keeps_line_units_in_points_on_a_document_grid_and_bounds_units() {
 }
 
 /// An inline, briefly; fields with their results.
-fn describe(inline: &ir::Inline) -> String {
+pub(super) fn describe(inline: &ir::Inline) -> String {
     match inline {
         ir::Inline::Text { text, .. } => format!("text {text}"),
         ir::Inline::Tab { .. } => "tab".to_owned(),
@@ -190,7 +190,7 @@ fn describe(inline: &ir::Inline) -> String {
 }
 
 /// The inlines of each paragraph of the first section, briefly.
-fn contents(translation: &Translation) -> Vec<Vec<String>> {
+pub(super) fn contents(translation: &Translation) -> Vec<Vec<String>> {
     paragraphs(translation)
         .into_iter()
         .map(|paragraph| paragraph.inlines().iter().map(describe).collect())
@@ -482,14 +482,24 @@ fn takes_revisions_as_accepted_and_sees_through_containers() {
         r#"<w:p><w:ins w:id="1" w:author="A"><w:r><w:t>in </w:t></w:r></w:ins><w:del w:id="2" w:author="A"><w:r><w:delText>gone</w:delText></w:r></w:del><w:moveFrom w:id="3" w:author="A"><w:r><w:t>away</w:t></w:r></w:moveFrom><w:moveTo w:id="4" w:author="A"><w:r><w:t>here </w:t></w:r></w:moveTo><w:hyperlink w:anchor="top"><w:r><w:t>link </w:t></w:r></w:hyperlink><w:sdt><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt><w:bookmarkStart w:id="0" w:name="b"/><w:bookmarkEnd w:id="0"/><w:proofErr w:type="spellStart"/></w:p><w:bookmarkStart w:id="1" w:name="between"/><w:sdt><w:sdtContent><w:p><w:r><w:t>in a block control</w:t></w:r></w:p></w:sdtContent></w:sdt><w:bookmarkEnd w:id="1"/>"#,
     );
     let translation = translate(&document);
+    // The hyperlink is a link around its text; a bookmark starts where it stands, or at
+    // the next paragraph when it stands among blocks (#570).
     assert_eq!(
         contents(&translation),
         [
-            vec!["text in ", "text here ", "text link ", "text control"],
-            vec!["text in a block control"],
+            vec![
+                "text in ",
+                "text here ",
+                "LinkStart { target: Bookmark(\"top\") }",
+                "text link ",
+                "LinkEnd",
+                "text control",
+                "Bookmark { name: \"b\" }",
+            ],
+            vec!["Bookmark { name: \"between\" }", "text in a block control"],
         ]
     );
-    // Bookmarks and proofing marks need no layout and are not listed.
+    // Bookmarks and proofing marks are not listed.
     assert!(
         translation.left_out().is_empty(),
         "{:?}",

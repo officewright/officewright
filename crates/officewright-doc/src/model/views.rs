@@ -982,6 +982,13 @@ impl<'a> BookmarkStart<'a> {
             .attribute(&self.document.names.w, local_name)
     }
 
+    /// Where it was read: the same for every view of this start, and for no other.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn span(self) -> Span {
+        self.span
+    }
+
     /// Its id (`w:id`), which its end names; `None` where it has none, or one that is no
     /// integer.
     pub fn id(self) -> Option<i64> {

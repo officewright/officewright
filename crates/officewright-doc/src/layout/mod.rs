@@ -9,6 +9,7 @@
 
 mod drawing;
 mod inline;
+mod links;
 mod list;
 mod notes;
 mod paragraph;
@@ -17,12 +18,15 @@ mod section;
 mod style;
 mod table;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use officewright_core::Pt;
 use officewright_layout::ir;
 use officewright_layout::{LayoutReport, Location, ReportEntry, ReportKind};
 
+use crate::model::xml::Span;
 use crate::model::{Block, Document, Formats};
 
 #[cfg(test)]
@@ -252,7 +256,24 @@ struct Translator<'a> {
     /// tracked change: in a cell, Word marks so the last paragraph of every cell of a row
     /// it deletes or moves away.
     ends_deleted: bool,
+    /// The bookmark start Word keeps of each name: the last (MS-OI29500 §17.13.6.2(c)),
+    /// by where it was read.
+    last_bookmarks: HashMap<&'a str, Span>,
+    /// The names of the bookmarks met among blocks, between rows or between cells, which
+    /// start at the next paragraph.
+    pending_bookmarks: Vec<String>,
+    /// The target of each distinct address of the document's links, by the target and the
+    /// anchor that make it (the empty string for none): every link to one address shares
+    /// it.
+    link_targets: HashMap<Cow<'a, str>, HashMap<Cow<'a, str>, Arc<ir::LinkTarget>>>,
+    /// The bytes of the targets in [`link_targets`](Self::link_targets), at most
+    /// [`MAX_LINK_BYTES`].
+    link_bytes: usize,
 }
+
+/// The most bytes of distinct link targets the translation makes: one target in the
+/// relationships with another anchor in each of its links makes a target for each.
+const MAX_LINK_BYTES: usize = 32 << 20;
 
 /// A paragraph whose mark is deleted as a tracked change, until a block follows it. Its
 /// place is built only when it is listed: most such paragraphs end a cell, and the path
@@ -325,6 +346,8 @@ enum Once {
     TextBoxTransparency = 1 << 48,
     TextBoxLineInside = 1 << 49,
     WrapLeftOut = 1 << 50,
+    LinkBytes = 1 << 51,
+    LongLinkField = 1 << 52,
 }
 
 impl<'a> Translator<'a> {
@@ -354,6 +377,10 @@ impl<'a> Translator<'a> {
             reported: 0,
             deleted_mark: None,
             ends_deleted: false,
+            last_bookmarks: last_bookmarks(document),
+            pending_bookmarks: Vec::new(),
+            link_targets: HashMap::new(),
+            link_bytes: 0,
         }
     }
 
@@ -457,8 +484,9 @@ impl<'a> Translator<'a> {
                         out.push(table.into());
                     }
                 }
-                // Bookmarks show nothing; the IR's marks for them come with #570.
-                Block::BookmarkStart(_) | Block::BookmarkEnd(_) => {}
+                // A bookmark among blocks starts at the next paragraph.
+                Block::BookmarkStart(start) => self.bookmark_before(start),
+                Block::BookmarkEnd(_) => {}
                 Block::Other(other) => {
                     if !is_marker(other.local_name()) {
                         let name = other.local_name().to_owned();
@@ -587,6 +615,18 @@ impl<'a> Translator<'a> {
             None => location,
         }
     }
+}
+
+/// The bookmark start Word keeps of each name: the last of every story, read in the order
+/// the reader reads them (MS-OI29500 §17.13.6.2(c)). Starts without a name are none.
+fn last_bookmarks(document: &Document) -> HashMap<&str, Span> {
+    let mut last = HashMap::new();
+    for start in document.bookmark_starts() {
+        if let Some(name) = start.name().filter(|name| !name.is_empty()) {
+            last.insert(name, start.span());
+        }
+    }
+    last
 }
 
 /// Whether an element kept without being understood only marks a place, such as a

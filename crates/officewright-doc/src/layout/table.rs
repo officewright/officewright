@@ -11,9 +11,9 @@ use officewright_layout::ir;
 use super::paragraph::border;
 use super::{Once, Step, Translator};
 use crate::model::{
-    Block, Border, BorderStyle, CellMerge, HeightRule, PositionAnchor, Table, TableBorders,
-    TableCell, TableCellProperties, TableJustification, TableLayout, TablePosition, TableRow,
-    TableWidth, TextDirection, VerticalJustification,
+    Block, Border, BorderStyle, CellMerge, HeightRule, PositionAnchor, RowContent, Table,
+    TableBorders, TableCell, TableCellProperties, TableContent, TableJustification, TableLayout,
+    TablePosition, TableRow, TableWidth, TextDirection, VerticalJustification,
 };
 
 impl<'a> Translator<'a> {
@@ -40,7 +40,16 @@ impl<'a> Translator<'a> {
             .collect();
         self.table_depth += 1;
         let mut rows = Vec::new();
-        for row in table.rows() {
+        for content in table.content() {
+            // A bookmark between rows starts at the next paragraph, the row's first.
+            let row = match content {
+                TableContent::Row(row) => row,
+                TableContent::BookmarkStart(start) => {
+                    self.bookmark_before(start);
+                    continue;
+                }
+                _ => continue,
+            };
             self.path
                 .extend([Step::Field("rows"), Step::Index(rows.len())]);
             if let Some(row) = self.row(row, &props) {
@@ -123,7 +132,16 @@ impl<'a> Translator<'a> {
         // In tests, where the last cell's blocks were built.
         #[cfg(test)]
         let mut built_at = 0;
-        for cell in row.cells() {
+        for content in row.content() {
+            // A bookmark between cells starts at the next paragraph, the next cell's first.
+            let cell = match content {
+                RowContent::Cell(cell) => cell,
+                RowContent::BookmarkStart(start) => {
+                    self.bookmark_before(start);
+                    continue;
+                }
+                _ => continue,
+            };
             let (span, continues, properties) = self.merge(cell);
             // A cell that continues a horizontal merge (`w:hMerge`, ISO/IEC 29500-4
             // §14.4.13) widens the cell before it, as a span does. The widened cell is

@@ -2,21 +2,38 @@
 //!
 //! Containers (hyperlinks, content controls, revisions, simple fields) are walked with a
 //! stack, never recursively. Revisions are taken as accepted: insertions and content
-//! moved here are kept, deletions and content moved away are left out.
+//! moved here are kept, deletions and content moved away are left out. Hyperlinks and
+//! `HYPERLINK` fields become the IR's link marks around their content, and the bookmark
+//! Word keeps of each name a bookmark mark.
+
+use std::sync::Arc;
 
 use officewright_layout::ReportKind;
 use officewright_layout::ir;
 
-use super::{Once, Translator, is_marker};
+use super::{Once, Translator, is_marker, links};
 use crate::model::properties::{Color, TextFill};
 use crate::model::{
-    BreakClear, BreakKind, CharacterFormat, ColorValue, FieldCharKind, Inline, Paragraph,
-    RevisionKind, Run, RunContent,
+    BreakClear, BreakKind, CharacterFormat, ColorValue, FieldCharKind, FieldInstruction,
+    HyperlinkField, Inline, Paragraph, RevisionKind, Run, RunContent,
 };
 
 /// The longest part of a field's instruction read: far more than the name and switches
-/// of any field the layout computes.
-const MAX_INSTRUCTION: usize = 1024;
+/// of any field the layout computes, and as long as the longest link target a PDF holds
+/// (32,767 bytes), for a `HYPERLINK` field.
+const MAX_INSTRUCTION: usize = 32 << 10;
+
+/// What ends with the content of a container on the stack.
+#[derive(Clone, Copy)]
+enum Close {
+    /// Nothing.
+    Nothing,
+    /// A simple field, with any field begun inside it that did not end there: how many
+    /// fields were open before it.
+    Fields(usize),
+    /// A link.
+    Link,
+}
 
 impl<'a> Translator<'a> {
     /// The inlines of a paragraph. `mark` is the style of its mark, which a simple field
@@ -27,27 +44,44 @@ impl<'a> Translator<'a> {
         mark: ir::RunStyleId,
     ) -> Vec<ir::Inline> {
         let mut content = Content::default();
-        // Each open container, and for a simple field how many fields were open before
-        // it: when its content ends, it closes, with any field begun inside it that did
-        // not end there.
-        let mut stack: Vec<(Box<dyn Iterator<Item = Inline<'a>> + 'a>, Option<usize>)> =
-            vec![(Box::new(paragraph.inlines()), None)];
+        // The bookmarks met before the paragraph, among blocks or in a table, start here.
+        for name in std::mem::take(&mut self.pending_bookmarks) {
+            content.push(ir::Inline::bookmark(name));
+        }
+        // Each open container, and what ends with its content.
+        let mut stack: Vec<(Box<dyn Iterator<Item = Inline<'a>> + 'a>, Close)> =
+            vec![(Box::new(paragraph.inlines()), Close::Nothing)];
         while let Some((top, _)) = stack.last_mut() {
             let Some(inline) = top.next() else {
-                if let Some((_, Some(open))) = stack.pop() {
-                    while content.fields.len() > open {
-                        content.end();
+                match stack.pop() {
+                    Some((_, Close::Fields(open))) => {
+                        while content.fields.len() > open {
+                            content.end();
+                        }
                     }
+                    Some((_, Close::Link)) => content.push(ir::Inline::link_end()),
+                    _ => {}
                 }
                 continue;
             };
             match inline {
                 Inline::Run(run) => self.run(run, &mut content),
-                Inline::Hyperlink(link) => stack.push((Box::new(link.inlines()), None)),
-                Inline::ContentControl(control) => stack.push((Box::new(control.inlines()), None)),
+                Inline::Hyperlink(link) => {
+                    let close = match self.link_target(link.target(), link.anchor()) {
+                        Some(target) => {
+                            content.push(links::link_start(&target));
+                            Close::Link
+                        }
+                        None => Close::Nothing,
+                    };
+                    stack.push((Box::new(link.inlines()), close));
+                }
+                Inline::ContentControl(control) => {
+                    stack.push((Box::new(control.inlines()), Close::Nothing));
+                }
                 Inline::Revision(revision) => match revision.kind() {
                     RevisionKind::Insertion | RevisionKind::MoveTo => {
-                        stack.push((Box::new(revision.inlines()), None));
+                        stack.push((Box::new(revision.inlines()), Close::Nothing));
                     }
                     RevisionKind::Deletion | RevisionKind::MoveFrom => {}
                 },
@@ -55,11 +89,15 @@ impl<'a> Translator<'a> {
                     let open = content.fields.len();
                     content.begin(mark);
                     content.instruction(field.instruction());
-                    content.separate();
-                    stack.push((Box::new(field.inlines()), Some(open)));
+                    self.separate(&mut content);
+                    stack.push((Box::new(field.inlines()), Close::Fields(open)));
                 }
-                // Bookmarks show nothing; the IR's marks for them come with #570.
-                Inline::BookmarkStart(_) | Inline::BookmarkEnd(_) => {}
+                Inline::BookmarkStart(start) => {
+                    if let Some(name) = self.kept_bookmark(start) {
+                        content.push(ir::Inline::bookmark(name));
+                    }
+                }
+                Inline::BookmarkEnd(_) => {}
                 Inline::Other(other) => match other.local_name() {
                     "oMath" | "oMathPara" => {
                         self.leave_out(ReportKind::FeatureUnsupported, || {
@@ -125,7 +163,7 @@ impl<'a> Translator<'a> {
                     content.push(ir::Inline::symbol(font, code, style));
                 }
                 RunContent::FieldChar(FieldCharKind::Begin) => content.begin(style),
-                RunContent::FieldChar(FieldCharKind::Separate) => content.separate(),
+                RunContent::FieldChar(FieldCharKind::Separate) => self.separate(content),
                 RunContent::FieldChar(FieldCharKind::End) => content.end(),
                 RunContent::NoBreakHyphen => {
                     shows = true;
@@ -225,6 +263,22 @@ impl<'a> Translator<'a> {
                 Once::RaisedObject,
                 "a picture or an object in the line of a raised or lowered run (w:position) is drawn on the baseline, here and wherever else the document has one",
             );
+        }
+    }
+
+    /// A field's separator: its result starts, as a link for a `HYPERLINK` field.
+    fn separate(&mut self, content: &mut Content) {
+        match content.separate() {
+            Separated::Link(link) => {
+                if let Some(target) = self.field_link_target(&link) {
+                    content.start_link(&target);
+                }
+            }
+            Separated::CutLink => self.report_once(
+                Once::LongLinkField,
+                "a HYPERLINK field whose instruction is longer than 32 KiB is shown without its link, here and wherever else the document has one",
+            ),
+            Separated::Other => {}
         }
     }
 
@@ -370,18 +424,33 @@ struct Content {
 
 /// A field being read.
 enum Frame {
-    /// Between its beginning and its separator: its instruction, and the style it began
-    /// in.
-    Instruction { text: String, style: ir::RunStyleId },
-    /// Its result, from `start` in [`Content::results`], and the style of a value the
-    /// layout computes: that of the result's first inline that has one, else the one it
-    /// began in.
+    /// Between its beginning and its separator: its instruction, whether it was cut at
+    /// [`MAX_INSTRUCTION`], and the style it began in.
+    Instruction {
+        text: String,
+        cut: bool,
+        style: ir::RunStyleId,
+    },
+    /// Its result, from `start` in [`Content::results`], the style of a value the layout
+    /// computes: that of the result's first inline that has one, else the one it began
+    /// in, and whether the result is a link, which ends with it.
     Result {
         kind: ir::FieldKind,
         format: Option<ir::NumberFormat>,
         start: usize,
         style: ir::RunStyleId,
+        link: bool,
     },
+}
+
+/// What a field's separator showed of its instruction.
+enum Separated {
+    /// A `HYPERLINK` field.
+    Link(HyperlinkField),
+    /// A `HYPERLINK` field whose instruction was cut, so that its target is not known.
+    CutLink,
+    /// Another field, or a stray separator.
+    Other,
 }
 
 /// Where an inline goes among the inlines of its paragraph: at `index` of them, or, with
@@ -470,14 +539,16 @@ impl Content {
         self.instructions.push(self.fields.len());
         self.fields.push(Frame::Instruction {
             text: String::new(),
+            cut: false,
             style,
         });
     }
 
     fn instruction(&mut self, more: &str) {
-        if let Some(Frame::Instruction { text, .. }) = self.fields.last_mut() {
+        if let Some(Frame::Instruction { text, cut, .. }) = self.fields.last_mut() {
             for c in more.chars() {
                 if text.len() + c.len_utf8() > MAX_INSTRUCTION {
+                    *cut = true;
                     break;
                 }
                 text.push(c);
@@ -485,12 +556,17 @@ impl Content {
         }
     }
 
-    fn separate(&mut self) {
-        let Some(Frame::Instruction { text, style }) = self.fields.last() else {
+    fn separate(&mut self) -> Separated {
+        let Some(Frame::Instruction { text, cut, style }) = self.fields.last() else {
             // A separator outside an instruction is stray; Word ignores it.
-            return;
+            return Separated::Other;
         };
         let (kind, format) = parse(text);
+        let separated = match FieldInstruction::parse(text).hyperlink() {
+            Some(_) if *cut => Separated::CutLink,
+            Some(link) => Separated::Link(link),
+            None => Separated::Other,
+        };
         let style = *style;
         let start = self.results.len();
         if let Some(top) = self.fields.last_mut() {
@@ -499,10 +575,20 @@ impl Content {
                 format,
                 start,
                 style,
+                link: false,
             };
         }
         self.instructions.pop();
         self.unstyled.push(self.fields.len().saturating_sub(1));
+        separated
+    }
+
+    /// Starts a link at the start of the result of the field just separated.
+    fn start_link(&mut self, target: &Arc<ir::LinkTarget>) {
+        if let Some(Frame::Result { link, .. }) = self.fields.last_mut() {
+            *link = true;
+            self.results.push(links::link_start(target));
+        }
     }
 
     fn end(&mut self) {
@@ -510,7 +596,7 @@ impl Content {
         let (kind, format, start, style) = match self.fields.pop() {
             // An end without a beginning is stray.
             None => return,
-            Some(Frame::Instruction { text, style }) => {
+            Some(Frame::Instruction { text, style, .. }) => {
                 self.instructions.pop();
                 let (kind, format) = parse(&text);
                 (kind, format, None, style)
@@ -520,9 +606,14 @@ impl Content {
                 format,
                 start,
                 style,
+                link,
             }) => {
                 if self.unstyled.last() == Some(&at) {
                     self.unstyled.pop();
+                }
+                // The link ends with the result.
+                if link {
+                    self.results.push(ir::Inline::link_end());
                 }
                 (kind, format, Some(start), style)
             }
