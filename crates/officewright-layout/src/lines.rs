@@ -46,10 +46,12 @@ pub(crate) const EPSILON: f64 = 1e-9;
 
 /// The share of their width by which the spaces of a justified line may narrow so that the
 /// next word fits on it, as Word 2013 and later narrow them (#497): Word's gaps in
-/// `generated/contract-ru` go down to 76 % of the space, and with a fifth the lines of
-/// the corpus agree best with Word's: 15 documents gain lines and none loses one, where
-/// with a quarter `generated/letter-uk` loses a line and with more, others do. Measured
-/// so until a rule document shows Word's limit.
+/// `generated/contract-ru` go down to 76 % of the space. A fifth is measured over the
+/// corpus, where with it no document's lines agree with Word's less than without it. It
+/// is not Word's rule, which no share of the spaces gives: Word narrows some lines by
+/// more than a fifth (24 % in `generated/contract-ru`) and does not narrow others that
+/// need less (about a tenth for «з» in `generated/letter-uk`), so a line can hold a word
+/// more or less than Word's. Measured so until a rule document shows Word's limit.
 const SPACE_SHRINK: f64 = 0.2;
 
 /// How many clusters after a cut are shaped again at most when HarfRust marks none of
@@ -833,7 +835,8 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let mut cursor = Cursor::new(left);
         // How far past its end a justified line may reach: it narrows its spaces, from
         // Word 2013 on. Documents saved in Word 2010's mode keep their spaces (the EC
-        // documents of business/, mode 14, lose a third of their lines to narrowing).
+        // documents of business/, mode 14, lose up to a quarter of their lines to
+        // narrowing).
         let justified = self.paragraph.props().alignment() == Alignment::Both
             && self.document.settings().compat_mode() >= CompatMode::Word2013;
         let squeeze = |cursor: &Cursor| {
@@ -851,8 +854,9 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                 0.0
             }
         };
-        // The unit after the last place the line may end, where it would fit, and
-        // whether that place is a soft hyphen.
+        // The unit after the last place the line may end, where it would fit, whether
+        // that place is a soft hyphen, and how far past its end the line may reach when
+        // it ends there.
         let mut candidate: Option<(usize, bool, f64)> = None;
         let mut overflow = false;
         let mut hanging_tab: Option<usize> = None;
@@ -1736,8 +1740,10 @@ struct Cursor {
     has_content: bool,
     pending: Option<Pending>,
     /// The width of the spaces after the last tab that text follows, which justification
-    /// may narrow, and of the spaces since the last text.
+    /// may narrow.
     inner_spaces: f64,
+    /// The width of the spaces since the last text, which justification may narrow once
+    /// text follows them.
     last_spaces: f64,
 }
 
