@@ -94,8 +94,10 @@ Fonts in `tests/fonts/` and `tests/fonts-word/`, at the repository root and so o
 every crate. None of the library's crates or their tests read those of `tests/fonts-word/`:
 the corpus runner (`tools/corpus-runner`, run by `scripts/check.sh`) lays documents out with
 them, `scripts/make-symbol-font.py` and `tests/corpus-tools/test_symbol_font.py` read the
-symbol font and the face it is made from, and `scripts/make-dmap-font.py` and
-`tests/corpus-tools/test_dmap_font.py` the DMAP font and that face.
+symbol font and the face it is made from, `scripts/make-dmap-font.py` and
+`tests/corpus-tools/test_dmap_font.py` the DMAP font and that face, and
+`scripts/make-subscript-fonts.py` and `tests/corpus-tools/test_subscript_fonts.py` the
+subscript fonts and that face.
 Those of `tests/fonts/` are read by the corpus runner and by
 `crates/officewright-font/tests/third_party_fonts.rs`,
 `crates/officewright-font/tests/metric_compatible.rs`,
@@ -107,13 +109,15 @@ checks in `tests/pdf-output` and `tests/corpus-tools/poppler/test_font_embedding
 they seed the fuzz targets in `fuzz/`. `tests/corpus-tools/test_test_fonts.py` checks
 that every file in both folders is listed below with its SHA-256, and that every file
 listed is there; `scripts/check-test-fonts.sh`, run at night, that each is byte for byte
-the file of the source given for it, or for the symbol font and the DMAP font what
-`scripts/make-symbol-font.py` and `scripts/make-dmap-font.py` write from that source. The
+the file of the source given for it, or for the symbol font, the DMAP font and the
+subscript fonts what `scripts/make-symbol-font.py`, `scripts/make-dmap-font.py` and
+`scripts/make-subscript-fonts.py` write from that source. The
 tests embed the fonts, reduced to some of their glyphs, in PDF files they write to
 temporary directories; those files are not committed or published. Each font but the
-symbol font, Officewright Test Symbol, and the DMAP font, Officewright Test DMAP, is
-unmodified, and each sits next to the license file it was distributed with, byte for byte;
-those two are modified versions of Noto Sans, described in its section.
+symbol font, Officewright Test Symbol, the DMAP font, Officewright Test DMAP, and the
+subscript fonts, Officewright Test Descent and Officewright Test Subscript, is unmodified,
+and each sits next to the license file it was distributed with, byte for byte; those four
+are modified versions of Noto Sans, described in its section.
 
 ### Liberation Sans, Serif and Mono
 
@@ -251,6 +255,37 @@ those two are modified versions of Noto Sans, described in its section.
   this folder. `make-dmap-font.py` writes the same bytes on every machine:
   `tests/corpus-tools/test_dmap_font.py` checks the committed font against it, and
   `scripts/check-test-fonts.sh` against what it writes from upstream's `NotoSans-Regular.ttf`.
+- Files of the subscript fonts, two modified versions of the TrueType Regular face:
+  `tests/fonts-word/test-descent/OfficewrightTestDescent-Regular.ttf`
+  (SHA-256 `b62914d1dfb260e8fe93de2535f0ab32d986a2aaed9389c8161602b1c746a869`) and
+  `tests/fonts-word/test-subscript/OfficewrightTestSubscript-Regular.ttf`
+  (SHA-256 `d78eb77211f1d8f5e109ef226d6bcde15a019a0c87c23621e9faf1ff41320f5b`), both written
+  by `scripts/make-subscript-fonts.py` from
+  `tests/fonts-word/noto-truetype/NotoSans-Regular.ttf`, and
+  `tests/fonts-word/test-descent/LICENSE`
+  (SHA-256 `f2095b08bed08b23a6fe26112fcd679a2bee3f002eef077eb05d215ed1051bd8`) and
+  `tests/fonts-word/test-subscript/LICENSE`
+  (SHA-256 `f2095b08bed08b23a6fe26112fcd679a2bee3f002eef077eb05d215ed1051bd8`), the file
+  `fonts/LICENSE` of the same repository at the same commit. Changes: in the first, the
+  descent is 300 units (0.3 em) deeper in the hhea table's descender (-293 to -593) and in
+  the OS/2 table's sTypoDescender (-293 to -593) and usWinDescent (395 to 695), and the
+  family is named Officewright Test Descent; in the second, the OS/2 table's
+  ySubscriptYOffset is 300 units (0.3 em) instead of 75, and the family is named Officewright
+  Test Subscript. In both, the names keep Noto Sans's copyright, version, trademark,
+  designer and license notices, and the OS/2 table names vendor NONE. Every other table is
+  Noto Sans's, byte for byte, and so are the rest of the hhea and OS/2 tables, but for the
+  head table's checksum of the whole font (checkSumAdjustment). They are distributed under
+  the SIL Open Font License 1.1, as the license requires of a modified version.
+- Why the subscript fonts: Word's drops of subscripts in Calibri and Liberation Sans fit the
+  layout's rule, which reads the font's descent, as well as a fixed fraction of the size,
+  and Noto Sans's own subscript offset predicts a third drop (#586). A font that differs from
+  Noto Sans only in its descent, and one that differs only in its subscript offset, show
+  which of them Word follows. Word renders the reference of `E-subscript-drop-derived` with
+  both fonts installed for the user, and the corpus runner of `scripts/check.sh` lays that
+  document out with these folders. `make-subscript-fonts.py` writes the same bytes on every
+  machine: `tests/corpus-tools/test_subscript_fonts.py` checks the committed fonts against
+  it, and `scripts/check-test-fonts.sh` against what it writes from upstream's
+  `NotoSans-Regular.ttf`.
 
 ### Libre Barcode 128
 

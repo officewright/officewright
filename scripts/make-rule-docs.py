@@ -8323,6 +8323,45 @@ def highlight_spacing() -> Doc:
     )
 
 
+# Batch 14, part D. How far Word drops a subscript (#586, item 1). The layout drops one by
+# as much as the font's descent at the size its formatting gives exceeds its descent at the
+# size it is drawn at; in Calibri and Liberation Sans a fixed fraction of the size fits
+# Word's drops as well, and Noto Sans's OS/2 ySubscriptYOffset predicts a third drop. The
+# subscript fonts of tests/fonts-word/test-descent and tests/fonts-word/test-subscript are
+# the TrueType Noto Sans (tests/fonts-word/noto-truetype, the build Word has installed for
+# E-line-fonts-truetype) with only its descent 0.3 em deeper (hhea, sTypoDescender and
+# usWinDescent), and with only its ySubscriptYOffset 0.3 em instead of 0.075 em: beside Noto
+# Sans's own drops, a rule that reads the descent drops the first font's subscripts further,
+# one that reads the subscript offset the second's, and a fixed fraction neither.
+# scripts/make-subscript-fonts.py gives what each rule predicts at these sizes. Every case
+# is one line: its label, then Base at its size and 456 as a subscript, both in its font in
+# all four slots.
+# The sizes are those of E-subscript-drop (SUBSCRIPT_DROP_SIZES), #586 item 1.
+SUBSCRIPT_DERIVED_FONTS = ("Noto Sans", "Officewright Test Descent", "Officewright Test Subscript")
+
+
+def subscript_drop_derived() -> Doc:
+    body, n = "", 0
+    for size in SUBSCRIPT_DROP_SIZES:
+        for font in SUBSCRIPT_DERIVED_FONTS:
+            n += 1
+            hp = half_points(size)
+            props = (f'<w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:eastAsia="{font}" '
+                     f'w:cs="{font}"/><w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>')
+            body += labelled(n, f"{font} {size} pt", styled_run("Base", props),
+                             styled_run("456", props + '<w:vertAlign w:val="subscript"/>'))
+    intro = para(run("In each case, Base at the size its label names and 456 as a subscript, "
+                     "both in the font its label names in all four slots."))
+    return Doc(
+        "E-subscript-drop-derived",
+        "How far Word drops a subscript in Officewright Test Descent, the TrueType Noto Sans "
+        "with a descent 0.3 em deeper, and in Officewright Test Subscript, the same with an "
+        "OS/2 ySubscriptYOffset of 0.3 em, beside Noto Sans itself, at 12 pt, every point "
+        "from 20 to 48 pt and 72 pt",
+        intro + body + para(run("End of the document.")),
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -8554,6 +8593,7 @@ def documents() -> list[Doc]:
         number_formats_languages(),
         number_formats_labels(),
         highlight_spacing(),
+        subscript_drop_derived(),
     ]
 
 
