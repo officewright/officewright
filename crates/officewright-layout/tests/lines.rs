@@ -944,6 +944,51 @@ fn a_list_label_keeps_its_tab_past_the_end_in_every_mode() -> TestResult {
 }
 
 #[test]
+fn before_word_2013_a_justified_line_keeps_its_spaces_after_a_tab_past_the_end() -> TestResult {
+    use officewright_layout::ir::Alignment;
+
+    // A tab to a start stop of the paragraph's own past the end takes the text after it
+    // past the end of the line, and the line ends at the next place it may end: a
+    // justified line, which narrows its spaces to hold a word from mode 15 on, lays out
+    // as a line aligned at its start.
+    let book = book()?;
+    for mode in [
+        CompatMode::Word2003,
+        CompatMode::Word2007,
+        CompatMode::Word2010,
+    ] {
+        let (document, style) = eleven_points_in(mode, "Liberation Sans");
+        let lay = |alignment| {
+            let props = ParagraphProps::default()
+                .with_tabs([TabStop::default().with_position(Pt(300.0))])
+                .with_alignment(alignment);
+            let inlines = vec![
+                Inline::text("Name Two", style),
+                Inline::tab(style),
+                Inline::text("Value more", style),
+            ];
+            fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 200.0)
+        };
+        let words = |laid: &LaidOut| -> Vec<(String, f64)> {
+            laid.lines()
+                .first()
+                .map(|line| {
+                    let words = line.words().iter();
+                    words
+                        .map(|word| (word.text().to_owned(), word.start()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let (start, both) = (lay(Alignment::Start), lay(Alignment::Both));
+        let lines: Vec<&str> = both.lines().iter().map(|line| line.text()).collect();
+        assert_eq!(lines, ["Name Two\tValue ", "more"], "{mode:?}");
+        assert_eq!(words(&both), words(&start), "{mode:?}");
+    }
+    Ok(())
+}
+
+#[test]
 fn before_word_2013_a_tab_goes_to_its_own_stop_past_the_end() -> TestResult {
     // E-tab-margin-alone-12 and -14: a tab to a start stop 18 pt into the right margin
     // and one past the edge of the page take the text after them there. The line ends at
