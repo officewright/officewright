@@ -13,7 +13,9 @@ use crate::embed::{Codes, EXTRA_OBJECTS, Prepared, show};
 use crate::font::{SYNTHETIC_BOLD_STROKE, SYNTHETIC_ITALIC_SKEW, Synthetic, check_font_size};
 use crate::glyphs::MAX_STRING_BYTES;
 use crate::image::draw_operators;
-use crate::link::{Destination, Destinations, Link, LinkTargets, MAX_LINKS, Target};
+use crate::link::{
+    CheckedLinkTarget, Destination, Destinations, Link, LinkTargets, MAX_LINKS, Target,
+};
 use crate::path::check_range;
 use crate::stream::stream_object;
 use crate::{Compression, Error, Font, GlyphRun, GraphicsPath, Image, LinkTarget, Result, Stroke};
@@ -65,6 +67,13 @@ pub struct Document {
     /// The link targets checked so far, while no page is handed out; the page handed out
     /// keeps them, so that the links of one target share it on every page.
     link_targets: LinkTargets,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many link targets the writer has hashed on this thread to find their actions,
+    /// for the tests that bound that work.
+    static TARGETS_HASHED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The identity of the next document made or cloned.
@@ -436,17 +445,26 @@ impl Document {
         }
         // Then the action of each link target, once for all the links to it, in the order
         // the links first go to it; `link_actions` has each link's.
+        // A target the links share is found by its address, without hashing it again, so
+        // that a target many links go to costs its length once (#621).
         let mut actions: Vec<&Target> = Vec::new();
         let mut action_of: HashMap<&Target, usize> = HashMap::new();
+        let mut shared_action: HashMap<*const Target, usize> = HashMap::new();
         let link_actions: Vec<usize> = self
             .pages
             .iter()
             .flat_map(|page| &page.links)
             .map(|link| {
-                *action_of.entry(link.target()).or_insert_with(|| {
-                    actions.push(link.target());
-                    actions.len() - 1
-                })
+                *shared_action
+                    .entry(link.shared_target())
+                    .or_insert_with(|| {
+                        #[cfg(test)]
+                        TARGETS_HASHED.with(|hashed| hashed.set(hashed.get() + 1));
+                        *action_of.entry(link.target()).or_insert_with(|| {
+                            actions.push(link.target());
+                            actions.len() - 1
+                        })
+                    })
             })
             .collect();
         let action_object = next_object;
@@ -955,6 +973,42 @@ impl Page {
         height: Pt,
         target: &LinkTarget,
     ) -> Result<()> {
+        let rect = self.link_rect(x, y, width, height)?;
+        let link = Link::new(rect, target, &mut self.link_targets)?;
+        self.links.push(link);
+        Ok(())
+    }
+
+    #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
+    /// Makes the rectangle a link to `target`, checked once before
+    /// ([`LinkTarget::check`]), as [`add_link`](Self::add_link) does: the link neither
+    /// checks, hashes nor copies the target, so that the links of a target many go to, a
+    /// link over many lines among them, cost its length once. See
+    /// [`LinkTarget::check`] for an example.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OutOfRange`] if the width or height is outside 0.01 to 32767 pt, or the
+    /// page has 8191 links already; [`Error::InvalidPosition`] if a corner of the rectangle
+    /// is outside -32767 to 32767 pt. A link to a name that no page adds makes
+    /// [`Document::write_to`] fail with [`Error::UnknownDestination`]. On error the page is
+    /// unchanged.
+    pub fn add_checked_link(
+        &mut self,
+        x: Pt,
+        y: Pt,
+        width: Pt,
+        height: Pt,
+        target: &CheckedLinkTarget,
+    ) -> Result<()> {
+        let rect = self.link_rect(x, y, width, height)?;
+        self.links.push(Link::checked(rect, target));
+        Ok(())
+    }
+
+    /// The corners of a link's rectangle ([`Link::rect`]), if the page has room for one
+    /// more link.
+    fn link_rect(&self, x: Pt, y: Pt, width: Pt, height: Pt) -> Result<[f64; 4]> {
         let rect = Link::rect(x, y, width, height)?;
         if self.links.len() >= MAX_LINKS {
             return Err(Error::OutOfRange {
@@ -964,9 +1018,7 @@ impl Page {
                 max: MAX_LINKS as f64,
             });
         }
-        let link = Link::new(rect, target, &mut self.link_targets)?;
-        self.links.push(link);
-        Ok(())
+        Ok(rect)
     }
 
     #[cfg_attr(not(feature = "unstable-drawing"), doc(hidden))]
@@ -2344,6 +2396,103 @@ mod tests {
             "{pdf}"
         );
         assert_eq!(pdf.matches("/A ").count(), 2, "{pdf}");
+    }
+
+    #[test]
+    fn links_to_a_checked_target_share_it_and_the_file_finds_it_once() {
+        // 3,000 links over two pages to one checked URI, then one to a URI checked
+        // separately that equals it, and 1,000 to a checked destination.
+        let mut doc = Document::new();
+        doc.set_compression(Compression::None);
+        let site = LinkTarget::Uri("https://example.com/long".to_owned());
+        let checked = site.check().unwrap();
+        let top = LinkTarget::Destination("top".to_owned()).check().unwrap();
+        for _ in 0..2 {
+            let page = doc.add_page(PageSize::A4).unwrap();
+            for line in 0..1_500 {
+                let y = Pt(f64::from(line) / 2.0);
+                page.add_checked_link(Pt(0.0), y, Pt(10.0), Pt(10.0), &checked)
+                    .unwrap();
+            }
+        }
+        let last = doc.page_mut(1).unwrap();
+        last.add_destination("top", Pt(0.0), Pt(800.0)).unwrap();
+        last.add_checked_link(Pt(0.0), Pt(0.0), Pt(10.0), Pt(10.0), &site.check().unwrap())
+            .unwrap();
+        for _ in 0..1_000 {
+            last.add_checked_link(Pt(0.0), Pt(0.0), Pt(10.0), Pt(10.0), &top)
+                .unwrap();
+        }
+        // Every link of the first target keeps that one.
+        let shared: std::collections::HashSet<*const Target> = doc
+            .pages
+            .iter()
+            .flat_map(|page| &page.links)
+            .take(3_000)
+            .map(Link::shared_target)
+            .collect();
+        assert_eq!(shared.len(), 1);
+        // The file writes the URI once, and finds an action by hashing a target only for
+        // the three that the links do not share: the first, the equal URI and "top", whose
+        // name it looks up once among the destinations.
+        let hashed = TARGETS_HASHED.with(std::cell::Cell::get);
+        let looked_up = crate::link::DESTINATIONS_LOOKED_UP.with(std::cell::Cell::get);
+        let pdf = doc.to_bytes().unwrap();
+        assert_eq!(TARGETS_HASHED.with(std::cell::Cell::get) - hashed, 3);
+        assert_eq!(
+            crate::link::DESTINATIONS_LOOKED_UP.with(std::cell::Cell::get) - looked_up,
+            1
+        );
+        assert_xref_is_right(&pdf);
+        let pdf = String::from_utf8_lossy(&pdf);
+        assert_eq!(pdf.matches("/Subtype /Link").count(), 4_001);
+        assert_eq!(pdf.matches("example.com/long").count(), 1);
+        assert_eq!(pdf.matches("<< /S /GoTo /D (top) >>").count(), 1);
+    }
+
+    #[test]
+    fn a_checked_link_is_refused_where_a_link_is() {
+        let mut doc = Document::new();
+        let page = doc.add_page(PageSize::A4).unwrap();
+        let site = LinkTarget::Uri("https://example.com/".to_owned())
+            .check()
+            .unwrap();
+        let narrow = page
+            .add_checked_link(Pt(0.0), Pt(0.0), Pt(0.001), Pt(1.0), &site)
+            .unwrap_err();
+        assert!(
+            matches!(
+                narrow,
+                Error::OutOfRange {
+                    what: "link width",
+                    ..
+                }
+            ),
+            "{narrow}"
+        );
+        let outside = page
+            .add_checked_link(Pt(40000.0), Pt(0.0), Pt(1.0), Pt(1.0), &site)
+            .unwrap_err();
+        assert!(
+            matches!(outside, Error::InvalidPosition { .. }),
+            "{outside}"
+        );
+        for _ in 0..MAX_LINKS {
+            page.add_checked_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &site)
+                .unwrap();
+        }
+        let full = page
+            .add_checked_link(Pt(0.0), Pt(0.0), Pt(1.0), Pt(1.0), &site)
+            .unwrap_err();
+        assert_eq!(
+            full.to_string(),
+            "number of links on the page 8192 is outside the 0 to 8191 range"
+        );
+        assert_eq!(page.links.len(), MAX_LINKS);
+        // A target is refused when it is checked, as add_link refuses it.
+        let long = LinkTarget::Uri("a".repeat(32_768)).check().unwrap_err();
+        assert!(matches!(long, Error::OutOfRange { .. }), "{long}");
+        assert!(LinkTarget::Destination(String::new()).check().is_err());
     }
 
     #[test]

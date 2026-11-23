@@ -1,6 +1,7 @@
 //! Rendering into PDF: a document of the layout IR laid out on pages, and every page
 //! painted with `officewright-pdf`.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
@@ -306,6 +307,13 @@ struct Links {
     waiting: Vec<(usize, Bounds, Arc<LinkTarget>)>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many link targets [`Links::add_to`] has made and checked for the PDF on this
+    /// thread, for the tests that bound that work.
+    static TARGETS_CHECKED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// The most characters of a name that a message of the report quotes.
 const QUOTED_NAME: usize = 64;
 
@@ -315,48 +323,67 @@ impl Links {
     /// those to a bookmark that a page shows, to the first destination of its name. The
     /// others are left out, and noted in `notes`.
     fn add_to(&mut self, pdf: &mut pdf::Document, notes: &mut Notes) {
-        // The boxes of one link share its target: it is made for the PDF once, and the
-        // PDF keeps and writes it once (#581).
-        let mut last: Option<(Arc<LinkTarget>, pdf::LinkTarget)> = None;
+        // Each target is made for the PDF and checked once, and every box of every link to
+        // it takes it as it is: a target many links go to costs its length once (#581,
+        // #621). The map holds each target's `Arc`, so that no other comes to have its
+        // address while the map is kept.
+        let mut made: HashMap<
+            *const LinkTarget,
+            (Arc<LinkTarget>, Option<pdf::CheckedLinkTarget>),
+        > = HashMap::new();
         for (page, (x, y, width, height), target) in std::mem::take(&mut self.waiting) {
-            let same = last
-                .take()
-                .filter(|(previous, _)| Arc::ptr_eq(previous, &target));
-            let made = if let Some((_, made)) = same {
-                made
-            } else {
-                match &*target {
-                    LinkTarget::Uri(uri) => pdf::LinkTarget::Uri(uri.clone()),
-                    LinkTarget::Bookmark(name) if self.bookmarks.contains(name.as_str()) => {
-                        pdf::LinkTarget::Destination(name.clone())
-                    }
-                    LinkTarget::Bookmark(name) => {
-                        let (kind, why) = if self.refused.contains(name.as_str()) {
-                            (ReportKind::ValueClamped, "which a PDF cannot hold")
-                        } else {
-                            (ReportKind::FeatureUnsupported, "which no page shows")
-                        };
-                        let mut quoted: String = name.chars().take(QUOTED_NAME).collect();
-                        if quoted.len() < name.len() {
-                            quoted.push('…');
-                        }
-                        notes.add(
-                            kind,
-                            &Location::default(),
-                            format!("a link to the bookmark {quoted:?}, {why}, is left out"),
-                        );
-                        continue;
-                    }
+            let checked = match made.entry(Arc::as_ptr(&target)) {
+                Entry::Occupied(entry) => entry.get().1.clone(),
+                Entry::Vacant(entry) => {
+                    let checked = self.check(&target, notes);
+                    entry.insert((target, checked.clone()));
+                    checked
                 }
+            };
+            let Some(checked) = checked else {
+                continue;
             };
             if let Some(Err(error)) = pdf
                 .page_mut(page)
-                .map(|pdf_page| pdf_page.add_link(x, y, width, height, &made))
+                .map(|pdf_page| pdf_page.add_checked_link(x, y, width, height, &checked))
             {
                 notes.link_left_out(&error);
             }
-            last = Some((target, made));
         }
+    }
+
+    /// `target` made and checked for the PDF's links: a URI, or the first destination of a
+    /// bookmark's name that a page shows; `None`, noted in `notes`, where a PDF cannot hold
+    /// it or the bookmark is on no page.
+    fn check(&self, target: &LinkTarget, notes: &mut Notes) -> Option<pdf::CheckedLinkTarget> {
+        #[cfg(test)]
+        TARGETS_CHECKED.with(|checked| checked.set(checked.get() + 1));
+        let made = match target {
+            LinkTarget::Uri(uri) => pdf::LinkTarget::Uri(uri.clone()),
+            LinkTarget::Bookmark(name) if self.bookmarks.contains(name.as_str()) => {
+                pdf::LinkTarget::Destination(name.clone())
+            }
+            LinkTarget::Bookmark(name) => {
+                let (kind, why) = if self.refused.contains(name.as_str()) {
+                    (ReportKind::ValueClamped, "which a PDF cannot hold")
+                } else {
+                    (ReportKind::FeatureUnsupported, "which no page shows")
+                };
+                let mut quoted: String = name.chars().take(QUOTED_NAME).collect();
+                if quoted.len() < name.len() {
+                    quoted.push('…');
+                }
+                notes.add(
+                    kind,
+                    &Location::default(),
+                    format!("a link to the bookmark {quoted:?}, {why}, is left out"),
+                );
+                return None;
+            }
+        };
+        made.check()
+            .map_err(|error| notes.link_left_out(&error))
+            .ok()
     }
 }
 
@@ -1151,6 +1178,41 @@ mod tests {
             .into_parts();
         let text = String::from_utf8_lossy(&pdf.to_bytes().expect("the bytes")).into_owned();
         (report, text)
+    }
+
+    #[test]
+    fn each_target_is_checked_once_however_many_links_and_boxes_go_there() {
+        use crate::ir::{Inline, LinkTarget};
+
+        // Links that take turns among three targets, each given one `Arc`: a URI longer
+        // than a PDF may hold and two it holds. Each is made and checked once, the long
+        // one's links are left out with one note, and the others each get their box.
+        let long = Arc::new(LinkTarget::Uri("a".repeat(40_000)));
+        let first = Arc::new(LinkTarget::Uri("https://example.com/a".into()));
+        let second = Arc::new(LinkTarget::Uri("https://example.com/b".into()));
+        let checked = TARGETS_CHECKED.with(std::cell::Cell::get);
+        let (report, text) = paged(|style| {
+            let link = |target: &Arc<LinkTarget>| {
+                [
+                    Inline::link_start(Arc::clone(target)),
+                    Inline::text("A", style),
+                    Inline::link_end(),
+                ]
+            };
+            let inlines = (0..50)
+                .flat_map(|_| [link(&long), link(&first), link(&second)].concat())
+                .collect();
+            vec![(0.0, inlines)]
+        });
+        assert_eq!(TARGETS_CHECKED.with(std::cell::Cell::get) - checked, 3);
+        assert_eq!(text.matches("/Subtype /Link").count(), 100, "{text}");
+        assert_eq!(text.matches("/S /URI").count(), 2);
+        let left_out = report
+            .entries()
+            .iter()
+            .filter(|entry| entry.message().starts_with("a link is left out"))
+            .count();
+        assert_eq!(left_out, 1, "{report:?}");
     }
 
     #[test]
