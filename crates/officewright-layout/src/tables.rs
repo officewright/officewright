@@ -2035,6 +2035,7 @@ impl<'d> Stacked<'d> {
                         // A cell does not place floating objects yet: reported by `stack`.
                         page: None,
                         floats: Vec::new(),
+                        exclusions: None,
                         // Hypothesis: in a cell, as no reference shows it, a bar tab reaches
                         // only through the lines.
                         bar_reach: (0.0, 0.0),
@@ -2157,10 +2158,10 @@ fn stack<'d>(
                         part: stacked.parts.len(),
                         index: line,
                         top: height,
-                        height: laid.height.0,
+                        height: laid.advance(),
                         breaks,
                     });
-                    height += laid.height.0;
+                    height += laid.advance();
                 }
                 stacked.parts.push(Part::Paragraph {
                     paragraph,

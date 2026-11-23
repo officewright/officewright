@@ -18,7 +18,8 @@ pub(crate) const MIN_LINK: f64 = 0.01;
 
 /// Adds to `out` the links and bookmarks of `lines` of a paragraph laid out in `all`,
 /// itemized as `itemized`, the first of `lines` with its top at `origin.y`, in a column
-/// whose start edge is at `origin.x`.
+/// whose start edge is at `origin.x`. A line's top is below the room a floating object it
+/// goes below takes (`Line::above`).
 ///
 /// A link takes one rectangle on each line it spans: across, from where the first of its
 /// pieces on the line starts to where the last ends, the hyphen drawn after the last
@@ -48,6 +49,8 @@ pub(crate) fn paint(
         .map_or(0, |piece| marked_by(itemized, piece));
     let mut top = origin.y.0;
     for (index, line) in all.iter().enumerate().take(lines.end).skip(lines.start) {
+        // The line's own box starts below the room a floating object it goes below takes.
+        top += line.above.0;
         let start = Point {
             x: Pt(origin.x.0 + line.start.0),
             y: Pt(top),

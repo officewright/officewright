@@ -56,6 +56,7 @@ mod tables;
 mod tabs;
 #[cfg(test)]
 mod testing;
+mod wrap;
 
 pub use error::{Error, Result};
 #[cfg(feature = "pdf")]

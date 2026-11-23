@@ -786,18 +786,18 @@
       "text_score": 0.0084
     },
     "tests/corpus/business/letter-dol-cobra-election-notice.docx": {
-      "line_agreement": 0.8831,
+      "line_agreement": 0.9318,
       "page_break_agreement": 0.875,
-      "ssim_mean": 0.8963,
+      "ssim_mean": 0.9005,
       "ssim_min": 0.6745,
-      "text_score": 0.9315
+      "text_score": 0.999
     },
     "tests/corpus/business/letter-dol-cobra-general-notice.docx": {
-      "line_agreement": 0.8415,
+      "line_agreement": 0.8962,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.8422,
-      "ssim_min": 0.5778,
-      "text_score": 0.9578
+      "ssim_mean": 0.8401,
+      "ssim_min": 0.5671,
+      "text_score": 0.9988
     },
     "tests/corpus/business/letter-nara-ibr-request.docx": {
       "line_agreement": 1.0,
@@ -1811,54 +1811,54 @@
     },
     "tests/corpus/word-rules/E-table-autofit-14.docx": {
       "line_agreement": 0.7692,
-      "ssim_mean": 0.9529,
-      "ssim_min": 0.9529,
+      "ssim_mean": 0.9547,
+      "ssim_min": 0.9547,
       "text_score": 0.9675
     },
     "tests/corpus/word-rules/E-table-autofit-15.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9742,
-      "ssim_min": 0.9731,
+      "ssim_mean": 0.9744,
+      "ssim_min": 0.9734,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-autofit-beside-14.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9781,
-      "ssim_min": 0.9753,
+      "ssim_mean": 0.9814,
+      "ssim_min": 0.9776,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-autofit-beside-15.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9824,
-      "ssim_min": 0.9812,
+      "ssim_mean": 0.9857,
+      "ssim_min": 0.9855,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-autofit-beside-constrained-14.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9781,
-      "ssim_min": 0.9753,
+      "ssim_mean": 0.9814,
+      "ssim_min": 0.9776,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-autofit-constrained-14.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9517,
-      "ssim_min": 0.9517,
+      "ssim_mean": 0.9521,
+      "ssim_min": 0.9521,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-autofit-grow-14.docx": {
       "line_agreement": 0.72,
-      "ssim_mean": 0.9409,
-      "ssim_min": 0.9409,
+      "ssim_mean": 0.9405,
+      "ssim_min": 0.9405,
       "text_score": 0.9662
     },
     "tests/corpus/word-rules/E-table-autofit-grow-15.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9678,
-      "ssim_min": 0.9678,
+      "ssim_mean": 0.9681,
+      "ssim_min": 0.9681,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-autofit-shares.docx": {
@@ -2306,52 +2306,52 @@
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-vml-pictures.docx": {
-      "line_agreement": 0.3898,
+      "line_agreement": 0.4068,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.8914,
-      "ssim_min": 0.8891,
+      "ssim_mean": 0.87,
+      "ssim_min": 0.8653,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-wrap-square.docx": {
-      "line_agreement": 0.1124,
+      "line_agreement": 0.858,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.8014,
-      "ssim_min": 0.7046,
+      "ssim_mean": 0.92,
+      "ssim_min": 0.7568,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-wrap-textbox.docx": {
-      "line_agreement": 0.5333,
+      "line_agreement": 0.8815,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.8342,
-      "ssim_min": 0.7098,
-      "text_score": 0.9466
+      "ssim_mean": 0.9536,
+      "ssim_min": 0.8811,
+      "text_score": 0.9941
     },
     "tests/corpus/word-rules/E-wrap-tight.docx": {
-      "line_agreement": 0.1282,
+      "line_agreement": 0.4551,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.772,
-      "ssim_min": 0.7611,
+      "ssim_mean": 0.7953,
+      "ssim_min": 0.7033,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-wrap-top-bottom.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.7396,
-      "ssim_min": 0.6575,
+      "ssim_mean": 0.9524,
+      "ssim_min": 0.8784,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-wrap-vml-textbox.docx": {
-      "line_agreement": 0.6364,
+      "line_agreement": 0.9091,
       "page_break_agreement": 0.5,
-      "ssim_mean": 0.7809,
-      "ssim_min": 0.7123,
-      "text_score": 0.9475
+      "ssim_mean": 0.8862,
+      "ssim_min": 0.7696,
+      "text_score": 0.9684
     },
     "tests/corpus/word-rules/E-wrap-vml.docx": {
-      "line_agreement": 0.2089,
+      "line_agreement": 0.6329,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.791,
-      "ssim_min": 0.6828,
+      "ssim_mean": 0.9001,
+      "ssim_min": 0.8083,
       "text_score": 1.0
     }
   }

@@ -1243,6 +1243,7 @@ pub fn paint(
             leaders: &mut leaders,
             page: None,
             floats: Vec::new(),
+            exclusions: None,
             bar_reach: (0.0, 0.0),
         };
         let origin = Point {
