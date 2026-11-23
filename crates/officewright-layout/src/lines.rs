@@ -2664,7 +2664,23 @@ mod tests {
         exclusions: &[crate::wrap::Exclusion],
         kept: Vec<(Pt, Option<(Pt, Pt)>)>,
     ) -> (ParagraphLayout, Vec<String>) {
-        let book = book(vec![minimal()]);
+        let make = |small, big, _: &mut Document| make(small, big);
+        let paragraph = (minimal(), ParagraphProps::default(), make);
+        lay_around_full(paragraph, exclusions, kept)
+    }
+
+    /// [`lay_around`] in `font`, a copy of the test font, with the paragraph's `props`,
+    /// `make` adding what its inlines need to the document.
+    fn lay_around_full(
+        (font, props, make): (
+            Vec<u8>,
+            ParagraphProps,
+            impl FnOnce(RunStyleId, RunStyleId, &mut Document) -> Vec<Inline>,
+        ),
+        exclusions: &[crate::wrap::Exclusion],
+        kept: Vec<(Pt, Option<(Pt, Pt)>)>,
+    ) -> (ParagraphLayout, Vec<String>) {
+        let book = book(vec![font]);
         let mut document = Document::default();
         let [small, big] = [10.0, 30.0].map(|size| {
             document.add_run_style(
@@ -2673,7 +2689,10 @@ mod tests {
                     .with_size(Pt(size)),
             )
         });
-        let paragraph = Paragraph::new(small).with_inlines(make(small, big));
+        let inlines = make(small, big, &mut document);
+        let paragraph = Paragraph::new(small)
+            .with_props(props)
+            .with_inlines(inlines);
         let mut fonts = Fonts::new(&book);
         let mut shaper = Shaper::new();
         let location = Location::default();
@@ -2797,6 +2816,125 @@ mod tests {
         let rooms: Vec<_> = again.lines.iter().map(|line| line.room).collect();
         assert_eq!(rooms, [None, None, Some((Pt(110.0), Pt(260.0))), None]);
         assert_eq!(widths(&again), [236.0, 236.0, 130.0, 183.0]);
+    }
+
+    #[test]
+    fn a_line_is_fitted_again_until_its_room_settles() {
+        // Two objects at different depths: the second line, from 11.5 down, fitted first
+        // in the whole column as high as the first, ends with `AA` of 30 pt and reaches the
+        // first object, from 26.5; beside it, from 60 to 180, it holds 15 pt text only and
+        // reaches 28.75, past the first object's top but not the second's, from 41.5; so it
+        // is fitted again in the room beside the first object alone, from 60 to 260, where
+        // it is as high and settles, with no report: three rounds.
+        let make = |small, big, document: &mut Document| {
+            let middle = document.add_run_style(
+                RunStyle::default()
+                    .with_fonts(RunFonts::new("Officewright Test"))
+                    .with_size(Pt(15.0)),
+            );
+            vec![
+                Inline::text(words(9) + " ", small),
+                Inline::text("AAAA", middle),
+                Inline::text(" ".to_owned() + &words(6) + " ", small),
+                Inline::text("AA", big),
+                Inline::text(" ".to_owned() + &words(9), small),
+            ]
+        };
+        let band = |(top, left, right): (f64, f64, f64)| crate::wrap::Exclusion {
+            top,
+            bottom: 100.0,
+            left,
+            right,
+            side: Some(crate::ir::WrapSide::BothSides),
+        };
+        let objects = [band((26.5, 0.0, 60.0)), band((41.5, 180.0, 260.0))];
+        let paragraph = (minimal(), ParagraphProps::default(), make);
+        let (layout, messages) = lay_around_full(paragraph, &objects, Vec::new());
+        let second = layout.lines.get(1).expect("a second line");
+        assert_eq!(second.room, Some((Pt(60.0), Pt(260.0))));
+        assert_eq!(second.height, Pt(17.25));
+        assert!(messages.is_empty(), "{messages:?}");
+    }
+
+    #[test]
+    fn the_cut_a_line_given_up_was_shaped_again_at_is_put_back() {
+        // In the test font with a space kerned 1 pt closer to the `A` after it, the second
+        // line is fitted first in the whole column: `AA` of 30 pt and 8 words, its end at
+        // the space before the ninth, where the run is shaped again on each side. Too high
+        // for the room it took, it is fitted again beside the object, `AA` and 4 words, and
+        // the cut after the eighth word is put back: the third line, beside the object too,
+        // holds the 5 words left with each of their 4 spaces kerned, 126 pt, as a line that
+        // never met that cut (127 with the space before the ninth word shaped apart).
+        let make = |_, _, document: &mut Document| {
+            let [small, big] = [10.0, 30.0].map(|size| {
+                document.add_run_style(
+                    RunStyle::default()
+                        .with_fonts(RunFonts::new("Officewright Test"))
+                        .with_size(Pt(size))
+                        .with_kern_min(Some(Pt(1.0))),
+                )
+            });
+            vec![
+                Inline::text(words(9) + " ", small),
+                Inline::text("AA", big),
+                Inline::text(" ".to_owned() + &words(9), small),
+            ]
+        };
+        let font = crate::testing::with_kerned_space(minimal(), -100);
+        let paragraph = (font, ParagraphProps::default(), make);
+        let (layout, messages) = lay_around_full(paragraph, &object_from_30(), Vec::new());
+        // 9 words with 8 kerned spaces; `AA` and 4 words, each after a kerned space; and 5
+        // words with 4.
+        assert_eq!(widths(&layout), [228.0, 138.0, 126.0]);
+        let third = layout.lines.get(2).map(|line| (line.room, line.start));
+        assert_eq!(third, Some((Some((Pt(110.0), Pt(260.0))), Pt(110.0))));
+        assert!(messages.is_empty(), "{messages:?}");
+    }
+
+    #[test]
+    fn the_indents_hold_beside_an_object_where_they_are_past_its_room() {
+        // Indents of 120 at the start and 30 at the end: beside the object, whose room is
+        // from 110 to 260, the lines go from 120 to 230, and take 4 words, not the 5 the
+        // room would.
+        let indented = ParagraphProps::default().with_indent(
+            crate::ir::Indent::default()
+                .with_start(Pt(120.0))
+                .with_end(Pt(30.0)),
+        );
+        let make = |small, _, _: &mut Document| vec![Inline::text(words(12), small)];
+        let paragraph = (minimal(), indented, make);
+        let (layout, _) = lay_around_full(paragraph, &object_from_30(), Vec::new());
+        let lines: Vec<(f64, f64, f64)> = layout
+            .lines
+            .iter()
+            .map(|line| (line.start.0, line.end_edge.0, line.width.0))
+            .collect();
+        assert_eq!(lines, [(120.0, 230.0, 103.5); 3]);
+    }
+
+    #[test]
+    fn the_room_above_a_line_counts_in_the_paragraph_and_stays_with_a_kept_line() {
+        // An object wrapped top and bottom from 30 to 100: the third line, from 23, meets
+        // it and goes below it, 77 pt lower. The paragraph's height counts that room, and
+        // laid out again with its first three lines kept, the third keeps it.
+        let below = [crate::wrap::Exclusion {
+            side: None,
+            ..object_from_30()[0]
+        }];
+        let make = |small, _| vec![Inline::text(words(30), small)];
+        let (layout, _) = lay_around(make, &below, Vec::new());
+        let above: Vec<f64> = layout.lines.iter().map(|line| line.above.0).collect();
+        assert_eq!(above, [0.0, 0.0, 77.0, 0.0]);
+        assert_eq!(layout.height(), Pt(4.0 * 11.5 + 77.0));
+        let kept = layout
+            .lines
+            .iter()
+            .take(3)
+            .map(|line| (line.above, line.room))
+            .collect();
+        let (again, _) = lay_around(make, &[], kept);
+        assert_eq!(again.lines.get(2).map(|line| line.above), Some(Pt(77.0)));
+        assert_eq!(again.height(), layout.height());
     }
 
     #[test]

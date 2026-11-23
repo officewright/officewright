@@ -237,6 +237,40 @@ pub(crate) fn with_multiplied_a(font: Vec<u8>, copies: u16) -> Vec<u8> {
     with_table(font, b"GSUB", &gsub)
 }
 
+/// `font` (the test font) with a `GPOS` table whose `kern` feature moves an `A` (glyph 2)
+/// after a space (glyph 1) `value` design units closer, by one pair adjustment: a script
+/// list of `DFLT`, a feature list of `kern`, and one lookup of type 2. HarfRust marks the
+/// `A` unsafe to break before, so that a line that ends at the space shapes the run on
+/// each side of it again.
+pub(crate) fn with_kerned_space(font: Vec<u8>, value: i16) -> Vec<u8> {
+    let be = |values: &[u16]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+    // Offsets from the start of the table: header 10, script list at 10.
+    let mut gpos = be(&[1, 0, 10, 0, 0]);
+    // Script list: one record, DFLT, its script 8 bytes in; the script: its default
+    // language system 4 bytes in, no others; the language system: feature 0 alone.
+    gpos.extend(be(&[1]));
+    gpos.extend(b"DFLT");
+    gpos.extend(be(&[8, 4, 0, 0, 0xFFFF, 1, 0]));
+    let feature_list = u16::try_from(gpos.len()).expect("small");
+    // Feature list: one record, kern, its feature 8 bytes in; the feature: lookup 0.
+    gpos.extend(be(&[1]));
+    gpos.extend(b"kern");
+    gpos.extend(be(&[8, 0, 1, 0]));
+    let lookup_list = u16::try_from(gpos.len()).expect("small");
+    // Lookup list: one lookup, 4 bytes in; the lookup: type 2, its subtable 8 bytes in;
+    // the subtable: format 1, its coverage 18 bytes in, the first glyph's advance
+    // adjusted, one pair set 12 bytes in, which pairs glyph 2 with the value; the
+    // coverage: glyph 1.
+    gpos.extend(be(&[1, 4, 2, 0, 1, 8]));
+    gpos.extend(be(&[1, 18, 4, 0, 1, 12]));
+    gpos.extend(be(&[1, 2]));
+    gpos.extend(value.to_be_bytes());
+    gpos.extend(be(&[1, 1, 1]));
+    gpos[6..8].copy_from_slice(&feature_list.to_be_bytes());
+    gpos[8..10].copy_from_slice(&lookup_list.to_be_bytes());
+    with_table(font, b"GPOS", &gpos)
+}
+
 /// `font` marked italic in `OS/2` `fsSelection` and `head` `macStyle`.
 pub(crate) fn italic(font: Vec<u8>) -> Vec<u8> {
     let at = table(&font, b"OS/2") + 62;

@@ -897,6 +897,188 @@ fn a_line_whose_object_takes_the_whole_body_goes_below_it_on_the_page_that_draws
     );
 }
 
+/// A picture 60 by 40 at the margin, 25 pt below its paragraph's top, wrapped top and
+/// bottom 5 pt above and below it: its band is from 40 to 90.
+fn below_the_first_line(document: &mut Document) -> Inline {
+    let wrapping = Wrapping {
+        wrap: Wrap::TopAndBottom,
+        side: WrapSide::BothSides,
+        distances: [9.0, 5.0, 9.0, 5.0],
+    };
+    picture(
+        document,
+        (60.0, 40.0),
+        at(0.0),
+        from_paragraph(25.0),
+        wrapping,
+    )
+}
+
+#[test]
+fn a_page_takes_the_lines_that_fit_with_the_room_above_them() {
+    // The second line goes below the band, from 90; with the room it leaves above it, the
+    // page takes five lines, the last from 160 to 180, and the rest go on to page 2.
+    let document = document(|style, document| {
+        let object = below_the_first_line(document);
+        vec![paragraph(style, vec![object], 180)]
+    });
+    let (laid, _) = lay(&document);
+    let baselines: Vec<f64> = lines(&laid.pages[0]).iter().map(|line| line.1).collect();
+    assert_eq!(baselines, [36.0, 106.0, 126.0, 146.0, 166.0]);
+    assert_eq!(words_per_line(&laid.pages[0]), [9; 5]);
+}
+
+#[test]
+fn shading_and_bar_tabs_reach_through_the_room_above_a_line() {
+    use crate::ir::{ColorValue, Shading, TabKind, TabStop};
+    use officewright_core::Color;
+
+    // A shaded paragraph with a bar tab, whose second line goes below the band, from 90:
+    // its lines are from 20 to 130, and so are the shading and the bar, through the room
+    // above the second line too (a hypothesis).
+    let document = document(|style, document| {
+        let object = below_the_first_line(document);
+        let props = exact()
+            .with_shading(Some(
+                Shading::default().with_fill(ColorValue::Rgb(Color::BLACK)),
+            ))
+            .with_tabs([TabStop::default()
+                .with_position(Pt(200.0))
+                .with_kind(TabKind::Bar)]);
+        vec![
+            Paragraph::new(style)
+                .with_props(props)
+                .with_inlines([object, words(20, style)])
+                .into(),
+        ]
+    });
+    let (laid, _) = lay(&document);
+    let page = &laid.pages[0];
+    assert_eq!(lines(page).len(), 3);
+    let shading: Vec<(f64, f64)> = page
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            DisplayItem::Rect { at, height, .. } => Some((at.y.0, at.y.0 + height.0)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shading, [(20.0, 130.0)]);
+    let bars: Vec<(f64, f64)> = page
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            DisplayItem::Line(line) => Some((line.from.y.0, line.to.y.0)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bars, [(20.0, 130.0)]);
+}
+
+#[test]
+fn the_notes_of_a_line_below_an_object_take_the_room_left_under_it() {
+    use crate::ir::{Note, NoteKind};
+
+    // A picture 90 high in its place leaves the second line from 140 to 160, and its note
+    // no room to start under it: in Word 2013 and later, the line goes on to page 2 with
+    // its note.
+    let settings =
+        crate::ir::DocumentSettings::default().with_compat_mode(crate::ir::CompatMode::Word2013);
+    let mut document = Document::new(settings);
+    let style = document.add_run_style(
+        RunStyle::default()
+            .with_fonts(RunFonts::new("Officewright Test"))
+            .with_size(Pt(10.0)),
+    );
+    let wrapping = Wrapping {
+        wrap: Wrap::TopAndBottom,
+        side: WrapSide::BothSides,
+        distances: [9.0, 5.0, 9.0, 5.0],
+    };
+    let object = picture(
+        &mut document,
+        (60.0, 90.0),
+        at(0.0),
+        from_paragraph(25.0),
+        wrapping,
+    );
+    let note = document.add_note(Note::new(
+        NoteKind::Footnote,
+        [Paragraph::new(style)
+            .with_props(exact())
+            .with_inlines([words(18, style)])
+            .into()],
+    ));
+    let block = Paragraph::new(style)
+        .with_props(exact().with_widow_control(false))
+        .with_inlines([
+            object,
+            Inline::text(["AAAA"; 10].join(" "), style),
+            Inline::note_reference(note, false, style),
+            Inline::text(" AAAA", style),
+        ])
+        .into();
+    document.add_section(Section::new(setup()).with_blocks(vec![block]));
+    let (laid, _) = lay(&document);
+    let per_page: Vec<(Vec<f64>, Vec<usize>)> = laid
+        .pages
+        .iter()
+        .map(|page| {
+            let baselines = lines(page).iter().map(|line| line.1).collect();
+            (baselines, words_per_line(page))
+        })
+        .collect();
+    assert_eq!(
+        per_page,
+        [
+            (vec![36.0], vec![9]),
+            (vec![36.0, 156.0, 176.0], vec![2, 9, 9])
+        ]
+    );
+
+    // The second line goes below the band, from 90 to 110, and references a note of four
+    // lines, 80 pt and its separator: the 70 pt between the bottom of that line and of the
+    // body hold its first two lines only, at 140 and 160, and the other two go on at the
+    // foot of page 2, under the rest of the paragraph.
+    let document = self::document(|style, document| {
+        let object = below_the_first_line(document);
+        let note = document.add_note(Note::new(
+            NoteKind::Footnote,
+            [Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines([words(36, style)])
+                .into()],
+        ));
+        vec![
+            Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines([
+                    object,
+                    Inline::text(["AAAA"; 10].join(" "), style),
+                    Inline::note_reference(note, false, style),
+                    Inline::text(" ".to_owned() + &["AAAA"; 20].join(" "), style),
+                ])
+                .into(),
+        ]
+    });
+    let (laid, _) = lay(&document);
+    let per_page: Vec<(Vec<f64>, Vec<usize>)> = laid
+        .pages
+        .iter()
+        .map(|page| {
+            let baselines = lines(page).iter().map(|line| line.1).collect();
+            (baselines, words_per_line(page))
+        })
+        .collect();
+    assert_eq!(
+        per_page,
+        [
+            (vec![36.0, 106.0, 156.0, 176.0], vec![9, 9, 9, 9]),
+            (vec![36.0, 56.0, 156.0, 176.0], vec![9, 3, 9, 9])
+        ]
+    );
+}
+
 #[test]
 fn an_object_that_going_around_it_would_take_to_the_next_page_is_reported() {
     // Seven lines fill page 1 down to 160; the last line there is the first of a paragraph

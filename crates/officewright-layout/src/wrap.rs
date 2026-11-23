@@ -503,6 +503,17 @@ mod tests {
             (0.0, 30.0),
         );
         assert_eq!(room(&[wide], 0.0, 13.0, edges).above, 30.0);
+        // A line that meets two bands at once with room beside neither goes below the one
+        // that ends first, and there takes the room beside the other.
+        let beside_it = square(WrapSide::BothSides, (72.0, 200.0), (0.0, 60.0));
+        assert_eq!(
+            room(&[beside_it, wide], 0.0, 13.0, edges),
+            Room {
+                above: 30.0,
+                span: Some((200.0, 523.0)),
+                sides: false
+            }
+        );
         // Below one band, the line meets another, beside which it has room.
         let lower = square(WrapSide::BothSides, (72.0, 200.0), (25.0, 60.0));
         assert_eq!(
