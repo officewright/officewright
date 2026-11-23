@@ -58,6 +58,8 @@ impl<'a> Translator<'a> {
                     content.separate();
                     stack.push((Box::new(field.inlines()), Some(open)));
                 }
+                // Bookmarks show nothing; the IR's marks for them come with #570.
+                Inline::BookmarkStart(_) | Inline::BookmarkEnd(_) => {}
                 Inline::Other(other) => match other.local_name() {
                     "oMath" | "oMathPara" => {
                         self.leave_out(ReportKind::FeatureUnsupported, || {

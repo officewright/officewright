@@ -426,9 +426,10 @@ fn glyphs(run: &ShapedRun) -> Vec<Glyph> {
 /// characters and at most 4096 bytes; a run that follows another of the same formatting,
 /// face and script, cut for its length, starts where HarfRust starts a cluster (it draws
 /// no dotted circle before it), and one that follows another run does not start with a
-/// mark or joiner; their source text follows in order and covers the paragraph's; every
-/// glyph is one its face has; clusters are character boundaries of the run's text that
-/// never go backwards.
+/// mark, a joiner or a soft hyphen of that run's run style (one of another run style
+/// starts a run of its own); their source text follows in order and covers the
+/// paragraph's; every glyph is one its face has; clusters are character boundaries of the
+/// run's text that never go backwards.
 ///
 /// # Errors
 ///
@@ -483,8 +484,12 @@ pub fn check_paragraph(
                         text.chars().take(8).collect::<String>()
                     ));
                 }
-            } else if text.starts_with(crate::itemize::attaches) {
-                // A mark or joiner stays in the run of the character before it.
+            } else if text.starts_with(crate::itemize::attaches)
+                && !(text.starts_with('\u{00AD}') && before.style != run.style)
+            {
+                // A mark or joiner stays in the run of the character before it, and so does
+                // a soft hyphen of its run style; one of another keeps its own font and
+                // size, which the hyphen drawn at a break there takes.
                 return Err(format!(
                     "item {index} starts with a mark or joiner: {text:?}"
                 ));
@@ -884,7 +889,8 @@ fn piece_item(piece: &crate::lines::Piece) -> usize {
 /// Lays out `paragraph` of `document` in a column `width` points wide with the fonts of
 /// `book`, and checks what pagination relies on: the lines hold the paragraph's text in
 /// order, all of it, each byte once; a line wider than its room is one the breaker
-/// marks as holding a piece too wide for any line, and the report says so; a line
+/// marks as holding a piece too wide for any line, and the report says so, or, before
+/// Word 2013's mode, one with a tab from within its room to a stop past it; a line
 /// starts with a soft hyphen only where a line may end before it; heights and baselines
 /// are numbers, heights and widths not negative, and the room below a line's text that
 /// may reach past the bottom of the body is a part of its height.
@@ -951,7 +957,13 @@ pub fn check_lines(
             }
             + label_room;
         let wide = line.width.0 > room.max(0.0) + 1e-6 && line.width.0 > 0.0;
-        if wide && !(line.overflow && reported) {
+        let beyond = document.settings().compat_mode() < crate::ir::CompatMode::Word2013
+            && line.pieces.iter().any(|piece| {
+                matches!(piece.kind, crate::lines::PieceKind::Tab { .. })
+                    && piece.x.0 <= line.end_edge.0 + 1e-6
+                    && piece.x.0 + piece.width.0 > line.end_edge.0 + 1e-6
+            });
+        if wide && !(line.overflow && reported) && !beyond {
             return Err(format!(
                 "line {index} is {} wide in {room}: {:?}",
                 line.width.0,

@@ -173,6 +173,8 @@ fn outline(document: &Document) -> Vec<String> {
                 Block::Paragraph(p) => format!("p {:?}", p.text()),
                 Block::Table(t) => format!("table {} rows", t.rows().count()),
                 Block::ContentControl(c) => format!("sdt {} blocks", c.blocks().count()),
+                Block::BookmarkStart(b) => format!("bookmark {:?}", b.name()),
+                Block::BookmarkEnd(b) => format!("bookmark end {:?}", b.id()),
                 Block::Other(o) => format!("other {}", o.local_name()),
             });
         }
@@ -327,6 +329,8 @@ fn reads_inline_containers() {
             Inline::Revision(r) => format!("{:?} {:?} {:?}", r.kind(), r.author(), r.date()),
             Inline::SimpleField(f) => format!("field {:?}", f.instruction()),
             Inline::ContentControl(c) => format!("sdt {}", c.inlines().count()),
+            Inline::BookmarkStart(b) => format!("bookmark {:?}", b.name()),
+            Inline::BookmarkEnd(b) => format!("bookmark end {:?}", b.id()),
             Inline::Other(o) => format!("other {}", o.local_name()),
         })
         .collect();
@@ -837,11 +841,11 @@ fn an_id_finds_its_node_only_in_its_own_document() {
 #[test]
 fn keeps_unknown_content_and_reports_stray_text() {
     let document = open(
-        r#"<w:bookmarkStart w:id="0" w:name="a"/><w:p>stray<w:r><w:t>x</w:t><w:drawing/></w:r></w:p>"#,
+        r#"<w:permStart w:id="0" w:edGrp="everyone"/><w:p>stray<w:r><w:t>x</w:t><w:drawing/></w:r></w:p>"#,
     );
     assert_eq!(
         outline(&document),
-        ["section 0", "other bookmarkStart", "p \"x\""]
+        ["section 0", "other permStart", "p \"x\""]
     );
     assert_eq!(document.diagnostics().len(), 1);
     assert_eq!(
@@ -4364,8 +4368,10 @@ fn repairs_a_damaged_theme() {
     assert!(messages[5].ends_with(": a second a:themeElements is ignored"));
 }
 
+mod bookmarks;
 mod drawing;
 mod embedded_fonts;
+mod field;
 mod format;
 #[cfg(feature = "pdf")]
 mod layout;

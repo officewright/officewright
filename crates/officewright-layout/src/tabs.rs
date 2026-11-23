@@ -16,6 +16,8 @@ pub(crate) struct Stop {
     pub(crate) position: Pt,
     pub(crate) kind: TabKind,
     pub(crate) leader: TabLeader,
+    /// Whether it is one of the automatic stops after the paragraph's own.
+    pub(crate) automatic: bool,
 }
 
 /// The tab stops of a paragraph.
@@ -48,6 +50,7 @@ impl TabStops {
                 position: stop.position(),
                 kind: stop.kind(),
                 leader: stop.leader(),
+                automatic: false,
             })
             .collect();
         let indent = props.indent();
@@ -61,6 +64,7 @@ impl TabStops {
                     position,
                     kind: TabKind::Start,
                     leader: TabLeader::None,
+                    automatic: false,
                 });
             }
         }
@@ -101,6 +105,7 @@ impl TabStops {
             position: Pt(position),
             kind: TabKind::Start,
             leader: TabLeader::None,
+            automatic: true,
         })
     }
 }
@@ -158,6 +163,11 @@ mod tests {
             end.map(|stop| (stop.kind, stop.leader)),
             Some((TabKind::End, TabLeader::Dot))
         );
+        // Only the stops after the paragraph's own are automatic.
+        assert_eq!(
+            [0.0, 60.0, 100.0].map(|x| stops.next(Pt(x)).map(|stop| stop.automatic)),
+            [Some(false), Some(false), Some(true)]
+        );
     }
 
     #[test]
@@ -172,6 +182,8 @@ mod tests {
         );
         let stops = TabStops::new(&hanging(100.0, 50.0), &settings, false);
         assert_eq!(positions(&stops, &[63.0]), [Some(100.0)]);
+        // The indent's stop is the paragraph's own, not an automatic one.
+        assert_eq!(stops.next(Pt(63.0)).map(|stop| stop.automatic), Some(false));
         // Case D: a custom stop at 75 pt after the indent's stop at 50 pt.
         let props = hanging(50.0, 50.0).with_tabs([TabStop::default().with_position(Pt(75.0))]);
         let stops = TabStops::new(&props, &settings, false);
