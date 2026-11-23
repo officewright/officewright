@@ -1086,6 +1086,59 @@ fn lays_a_list_level_over_each_table_style_of_its_cell() {
     assert_eq!(found, [Justification::Center, Justification::Right]);
 }
 
+#[test]
+fn gives_a_cell_s_own_top_and_bottom_margins_that_are_no_length_the_style_s_where_it_has_one() {
+    // A cell's own top and bottom margins of type nil, pct or auto take the style's where
+    // the style gives one there (#596), and stay the cell's own where it gives none.
+    let margin = |side: &str, kind: &str, width: u32| {
+        format!(r#"<w:{side} w:w="{width}" w:type="{kind}"/>"#)
+    };
+    let style = |id: &str, margins: &str| {
+        format!(
+            r#"<w:style w:type="table" w:styleId="{id}"><w:name w:val="{id}"/><w:tcPr><w:tcMar>{margins}</w:tcMar></w:tcPr></w:style>"#
+        )
+    };
+    let styles = style(
+        "Both15",
+        &(margin("top", "dxa", 300) + &margin("bottom", "dxa", 300)),
+    ) + &style("Start15", &margin("start", "dxa", 300));
+    let own = format!(
+        "<w:tc><w:tcPr><w:tcMar>{}{}</w:tcMar></w:tcPr><w:p/></w:tc>",
+        margin("top", "nil", 0),
+        margin("bottom", "pct", 500)
+    );
+    let table = |style: &str| {
+        format!(
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="{style}"/></w:tblPr><w:tr>{own}</w:tr></w:tbl><w:p/>"#
+        )
+    };
+    let margins = |style: &str| {
+        let document = open_text(&styles, "", "", &table(style));
+        let mut formats = document.formats();
+        let cell = first_table(&document)
+            .rows()
+            .next()
+            .unwrap()
+            .cells()
+            .next()
+            .unwrap();
+        let properties = formats.cell_properties(cell);
+        let margins = properties.margins().unwrap();
+        (margins.top(), margins.bottom())
+    };
+    assert_eq!(
+        margins("Both15"),
+        (
+            Some(TableWidth::Length(Pt(15.0))),
+            Some(TableWidth::Length(Pt(15.0)))
+        )
+    );
+    assert_eq!(
+        margins("Start15"),
+        (Some(TableWidth::Nil), Some(TableWidth::Percent(10.0)))
+    );
+}
+
 /// A document with these styles, the settings `settings` (none for an empty string), a
 /// numbering part when `numbering` is not empty, and this body.
 fn open_text(styles: &str, settings: &str, numbering: &str, body: &str) -> Document {

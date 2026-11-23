@@ -1,7 +1,7 @@
 //! A cell's own margins of type `nil`, `pct` and `auto` under a table style's cell
-//! margins, as Word's render of `word-rules/E-table-cell-margins-style.docx` shows them. It
-//! reads `tests/corpus` at the root of the repository, so it is left out of the published
-//! crate.
+//! margins, in `word-rules/E-table-cell-margins-style.docx`: the top, start and end as
+//! Word's render shows them, the bottom as the top, our choice. It reads `tests/corpus` at
+//! the root of the repository, so it is left out of the published crate.
 #![cfg(feature = "pdf")]
 
 use std::path::Path;
@@ -11,7 +11,7 @@ use officewright_doc::Document;
 use officewright_layout::ir;
 
 #[test]
-fn gives_a_cell_s_own_top_margin_that_is_no_length_the_style_s_as_words_render_shows() {
+fn gives_a_cell_s_own_top_and_bottom_margins_that_are_no_length_the_style_s() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/corpus/word-rules/E-table-cell-margins-style.docx");
     let document = Document::open(path).unwrap();
@@ -43,6 +43,8 @@ fn gives_a_cell_s_own_top_margin_that_is_no_length_the_style_s_as_words_render_s
     // From the reference's geometry: the first lines of all four cells of case 01 at one
     // height, Word's 15 pt above each; the text of the cells with margins of their own
     // starts and ends at the table's 5 pt, that of the last cell at the style's 15 pt.
+    // The bottom margins, taken as the top, are our choice: the render cannot show them,
+    // the row's height being that of the cell without margins of its own.
     assert_eq!(
         of(tables[0]),
         [
