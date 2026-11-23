@@ -12742,6 +12742,115 @@ mod tests {
     }
 
     #[test]
+    fn a_note_is_weighed_against_the_notes_of_lines_that_end_above_its_line_s_bottom() {
+        use crate::ir::NotePosition;
+        // A row of two cells of five lines without widow control, at the top of the page;
+        // the first cell's paragraph has 10 pt before it, so that its line 2, from 30 to
+        // 50, references a note of one line across the bottom of the second cell's line 2,
+        // from 20 to 40, which references a note of five lines (re-check of #577). A piece
+        // ending under the second cell's line 2 takes neither the first cell's line 2 nor
+        // its note, and leaves the second note room to fit whole: page 1 takes the first
+        // cell's line 1, the second's lines 1 and 2, and the second note whole.
+        for mode in [CompatMode::Word2013, CompatMode::Word2010] {
+            let document = with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                    let long = footnote(document, (style, mark), 5, spacing(0.0, 0.0));
+                    let props = |before| spacing(before, 0.0).with_widow_control(false);
+                    let row = Row::default().with_cells([
+                        Cell::default().with_blocks([referencing(
+                            style,
+                            (1, 3),
+                            &[short],
+                            props(10.0),
+                        )]),
+                        Cell::default().with_blocks([referencing(
+                            style,
+                            (1, 3),
+                            &[long],
+                            props(0.0),
+                        )]),
+                    ]);
+                    vec![table_with(vec![row], 0.0).into()]
+                },
+            );
+            let (pages, _) = noted_pages(&document);
+            assert_eq!(pages.len(), 2, "{mode:?}: {pages:?}");
+            assert_eq!(texts_and_notes(&pages, 0), (3, 5), "{mode:?}: {pages:?}");
+        }
+    }
+
+    #[test]
+    fn a_note_is_weighed_against_the_notes_of_lines_a_piece_ending_under_its_line_takes() {
+        use crate::ir::{CellMargins, NotePosition};
+        // As above, but with the lines of both cells' line 2 from 20 to 40 and a margin of
+        // 10 pt under the first cell: its line 2 needs a piece of 50 pt, more than the 40
+        // under the second cell's line 2, so its note takes no room there either.
+        for mode in [CompatMode::Word2013, CompatMode::Word2010] {
+            let document = with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                    let long = footnote(document, (style, mark), 5, spacing(0.0, 0.0));
+                    let props = || spacing(0.0, 0.0).with_widow_control(false);
+                    let row = Row::default().with_cells([
+                        Cell::default()
+                            .with_margins(Some(CellMargins::default().with_bottom(Pt(10.0))))
+                            .with_blocks([referencing(style, (1, 3), &[short], props())]),
+                        Cell::default().with_blocks([referencing(style, (1, 3), &[long], props())]),
+                    ]);
+                    vec![table_with(vec![row], 0.0).into()]
+                },
+            );
+            let (pages, _) = noted_pages(&document);
+            assert_eq!(pages.len(), 2, "{mode:?}: {pages:?}");
+            assert_eq!(texts_and_notes(&pages, 0), (3, 5), "{mode:?}: {pages:?}");
+        }
+    }
+
+    #[test]
+    fn a_row_word_could_not_hold_goes_whole_with_its_note_cut() {
+        use crate::ir::NotePosition;
+        // A line, then a row of 64 cells, more than Word holds, which no page cuts: its
+        // first cell of four lines, the first referencing a note of five lines, the others
+        // of a line each (re-check of #577). As a row of exact height, it goes whole on
+        // page 1 with two lines of its note, the rest of the note on page 2.
+        let document = with_notes_in(
+            CompatMode::Word2013,
+            setup(),
+            NotePosition::PageBottom,
+            Inline::separator,
+            |document, style, mark| {
+                let note = footnote(document, (style, mark), 5, spacing(0.0, 0.0));
+                let first = Cell::default().with_blocks([referencing(
+                    style,
+                    (0, 3),
+                    &[note],
+                    spacing(0.0, 0.0),
+                )]);
+                let others = (1..64)
+                    .map(|_| Cell::default().with_blocks([lines(style, 1, spacing(0.0, 0.0))]));
+                let row = Row::default().with_cells(std::iter::once(first).chain(others));
+                vec![
+                    lines(style, 1, spacing(0.0, 0.0)),
+                    table_with(vec![row], 0.0).into(),
+                ]
+            },
+        );
+        let (pages, _) = noted_pages(&document);
+        assert_eq!(pages.len(), 2, "{pages:?}");
+        assert_eq!(texts_and_notes(&pages, 0), (68, 2), "{pages:?}");
+        assert_eq!(texts_and_notes(&pages, 1), (0, 3), "{pages:?}");
+    }
+
+    #[test]
     fn a_band_no_page_cuts_goes_whole_with_its_note_cut() {
         use crate::ir::{NotePosition, RowHeight, VerticalMerge};
         // Bands no page cuts under a line, whose note is cut where it does not fit under
