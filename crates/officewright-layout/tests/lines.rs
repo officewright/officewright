@@ -951,7 +951,7 @@ fn before_word_2013_a_justified_line_keeps_its_spaces_after_a_tab_past_the_end()
     // past the end of the line, and the line ends at the next place it may end: a
     // justified line, which narrows its spaces to hold a word from mode 15 on, lays out
     // as a line aligned at its start, also with a space after the tab where the line may
-    // not end, before "!".
+    // not end, before "!", on a line that wraps and on the paragraph's last line.
     let book = book()?;
     for mode in [
         CompatMode::Word2003,
@@ -981,7 +981,7 @@ fn before_word_2013_a_justified_line_keeps_its_spaces_after_a_tab_past_the_end()
                 })
                 .unwrap_or_default()
         };
-        for after in ["Value more", "Value !more"] {
+        for after in ["Value more", "Value !more", "Value !"] {
             let (start, both) = (lay(Alignment::Start, after), lay(Alignment::Both, after));
             let lines = |laid: &LaidOut| -> Vec<String> {
                 laid.lines()
