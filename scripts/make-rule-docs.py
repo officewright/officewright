@@ -478,6 +478,14 @@ class Doc:
     # Whether the settings mirror the margins of facing pages (w:mirrorMargins): the left
     # margin becomes the inside one, on the right of even pages.
     mirror_margins: bool = False
+    # Fonts the theme gives scripts (supplemental fonts, a:font), as (ISO 15924 script,
+    # typeface), in both its major and its minor collection; and the languages of
+    # w:themeFontLang (w:val, w:eastAsia, w:bidi), which select them.
+    theme_scripts: tuple[tuple[str, str], ...] = ()
+    theme_font_lang: tuple[str, str, str] = ("en-US", "en-US", "ar-SA")
+    # The w:compatSetting elements as written, in place of those of mode and compat_values,
+    # for a document about how Word reads their values (#243).
+    compat_settings_written: str = ""
 
 
 def line_fonts_body(fonts: list[str]) -> str:
@@ -1033,7 +1041,9 @@ THEME_COLORS = {
     "hlink": '<a:srgbClr val="0066CC"/>',
     "folHlink": '<a:srgbClr val="663399"/>',
 }
-THEME_FONTS = {"major": "Georgia", "minor": "Verdana", "cs": "Tahoma"}
+THEME_FONTS = {"major": "Georgia", "minor": "Verdana", "cs": "Tahoma",
+               # No East Asian font, as in Word's default theme (theme_xml writes it empty).
+               "ea": ""}
 # The theme font each ST_Theme value of these documents stands for.
 THEME_SLOTS = {
     "majorAscii": "major",
@@ -1042,6 +1052,8 @@ THEME_SLOTS = {
     "minorHAnsi": "minor",
     "majorBidi": "cs",
     "minorBidi": "cs",
+    "majorEastAsia": "ea",
+    "minorEastAsia": "ea",
 }
 
 
@@ -9273,6 +9285,906 @@ def hidden_drawings() -> Doc:
     )
 
 
+# Batch 14, part C: lists, styles, and how Word reads unusual values.
+
+
+# The list rules plan PR 11 leaves as hypotheses (#320). Every list has levels of their own
+# formats, so a label shows the level that drew it.
+def list_header() -> Doc:
+    # Does a list in the header count afresh on each page or go on from the body's items, and
+    # do the body's items count the header's? The header and the body name one instance.
+    numbering = (abstract_num(0, "5C3A0C01", [level(0, "decimal", "%1.", left=720,
+                                                     hanging=360)])
+                 + num(1, 0))
+    header = header_part(
+        "header1.xml",
+        para(run("Header item, the first of two (num 1, level 0)"), list_item=(1, 0))
+        + para(run("Header item, the second of two (num 1, level 0)"), list_item=(1, 0)),
+    )
+    body = (
+        para(run("Case 01: three items of num 1 in the body, two on page 1 and one on page 2; "
+                 "the header holds two items of the same num 1"))
+        + para(run("Body item, the first of three, on page 1"), list_item=(1, 0))
+        + para(run("Body item, the second of three, on page 1"), list_item=(1, 0))
+        + para(run("Body item, the third of three, on page 2"), list_item=(1, 0),
+               page_break_before=True)
+    )
+    return Doc(
+        "E-list-header",
+        "How Word numbers a list in the header (two items) whose instance the body also uses "
+        "(three items, on two pages): whether the header counts afresh on each page or goes "
+        "on from the body, and whether the body counts the header's items",
+        body,
+        numbering=numbering,
+        headers=(header,),
+        last_section=section(refs=(("headerReference", "default", "header1.xml"),)),
+    )
+
+
+def own_levels() -> list[str]:
+    """Three levels each showing only its own number: 1., A. and a)."""
+    return [level(0, "decimal", "%1.", left=720, hanging=360),
+            level(1, "upperLetter", "%2.", left=1440, hanging=360),
+            level(2, "lowerLetter", "%3)", left=2160, hanging=360)]
+
+
+def list_own_level() -> Doc:
+    # Since #292 no reference shows what an item at level 1 shows after one at level 2 when
+    # level 1 has had no item, or an item at level 0 after deeper ones.
+    numbering = (abstract_num(0, "5C3A0C11", own_levels())
+                 + abstract_num(1, "5C3A0C12", own_levels()) + num(1, 0) + num(2, 1))
+    items = [
+        (1, 2, "list A, level 2, its first item"),
+        (1, 1, "list A, level 1, after the item at level 2, none at level 1 before"),
+        (1, 0, "list A, level 0, after items at levels 2 and 1, none at level 0 before"),
+        (1, 1, "list A, level 1, after the item at level 0"),
+        (2, 2, "list B, level 2, its first item"),
+        (2, 0, "list B, level 0, after the item at level 2, none at levels 1 and 0"),
+        (2, 1, "list B, level 1, after the item at level 0"),
+    ]
+    body = "".join(para(run(f"Case {n:02d}: {label}"), list_item=(num_id, ilvl))
+                   for n, (num_id, ilvl, label) in enumerate(items, 1))
+    return Doc(
+        "E-list-own-level",
+        "What the labels of lists whose levels each show only their own number (1., A. and "
+        "a)) count when the first item is at level 2: an item at level 1 and one at level 0 "
+        "that had no item before, in two lists",
+        body,
+        numbering=numbering,
+    )
+
+
+def long_template(length: int) -> str:
+    """A level text of length characters: %1. and then blocks of ten characters, each ending
+    in the number of characters up to its end, so that a label cut short shows where."""
+    template = "%1. --0010"
+    while len(template) < length:
+        template += f" -----{len(template) + 10:04d}"
+    if len(template) != length:
+        raise ValueError(f"a level text of {length} characters is not made of blocks of ten")
+    return template
+
+
+def list_long_template(length: int) -> Doc:
+    # A document per length: a file Word refuses for one costs nothing of the other.
+    numbering = (abstract_num(0, "5C3A0C21", [level(0, "decimal", long_template(length),
+                                                     left=720, hanging=360)])
+                 + num(1, 0))
+    body = para(run(f"Case 01: the text of the item, whose level's w:lvlText has {length} "
+                    "characters"), list_item=(1, 0))
+    body += para(run("Case 02: a paragraph after the list"))
+    return Doc(
+        "E-list-long-template" + ("" if length == 300 else f"-{length}"),
+        f"Whether Word shows a list label whose w:lvlText has {length} characters (%1. and then "
+        "blocks of ten characters, each ending in the count of characters up to its end) "
+        "whole, cuts it, or refuses the document",
+        body,
+        numbering=numbering,
+    )
+
+
+# Characters of #320 in a w:lvlText, as character references (attribute-value normalisation
+# would turn a literal tab or line feed into a space); XML 1.0 cannot hold U+000B at all, even
+# as a reference, so it is written as the escape _x000B_ of ECMA-376's ST_Xstring.
+TEMPLATE_CONTROLS = [
+    ("U+0009, a tab", "&#x9;"),
+    ("U+000A, a line feed", "&#xA;"),
+    ("U+000B, a vertical tab, written as the escape _x000B_", "_x000B_"),
+    ("U+2028, the line separator", "&#x2028;"),
+    ("U+2029, the paragraph separator", "&#x2029;"),
+    ("U+007F, which Word draws as a bullet (to compare)", "&#x7F;"),
+    ("no other character (to compare)", ""),
+]
+
+
+def list_template_controls() -> Doc:
+    definitions, instances, body = "", "", ""
+    for n, (label, character) in enumerate(TEMPLATE_CONTROLS, 1):
+        lvl = level(0, "decimal", "[%1@]", left=720, hanging=360)
+        lvl = lvl.replace('w:val="[%1@]"', f'w:val="[%1{character}]"')
+        definitions += abstract_num(n - 1, f"5C3A0C3{n}", [lvl])
+        instances += num(n, n - 1)
+        body += para(run(f"Case {n:02d}: the label [%1] with {label} before its ]"),
+                     list_item=(n, 0))
+    return Doc(
+        "E-list-template-controls",
+        "What Word draws for a w:lvlText holding a tab, a line feed, U+000B (as _x000B_), "
+        "U+2028 or U+2029 between %1 and ], one list each, beside U+007F and none",
+        body,
+        numbering=definitions + instances,
+    )
+
+
+def list_template_deeper() -> Doc:
+    # #320's comment of 2026-10-15: Word ignores a level's placeholder of a deeper level
+    # (MS-OI29500 2.1.283 c); does such an item still start level 0, which its template
+    # shows? List B's level 1 shows only levels 0 and 1, to compare.
+    numbering = (
+        abstract_num(0, "5C3A0C41", [level(0, "decimal", "%1.", left=720, hanging=360),
+                                     level(1, "lowerLetter", "%1.%3", left=1440, hanging=720),
+                                     level(2, "lowerRoman", "%1.%2.%3", left=2160,
+                                           hanging=720)])
+        + abstract_num(1, "5C3A0C42", [level(0, "decimal", "%1.", left=720, hanging=360),
+                                       level(1, "lowerLetter", "%1.%2", left=1440,
+                                             hanging=720)])
+        + num(1, 0) + num(2, 1)
+    )
+    items = [
+        (1, 1, "list A, level 1 (%1.%3), with no item at level 0 before it"),
+        (1, 0, "list A, level 0 (%1.), after it"),
+        (1, 1, "list A, level 1 (%1.%3), after the item at level 0"),
+        (2, 1, "list B, level 1 (%1.%2), with no item at level 0 before it"),
+        (2, 0, "list B, level 0 (%1.), after it"),
+    ]
+    body = "".join(para(run(f"Case {n:02d}: {label}"), list_item=(num_id, ilvl))
+                   for n, (num_id, ilvl, label) in enumerate(items, 1))
+    return Doc(
+        "E-list-template-deeper",
+        "Whether an item at level 1 whose w:lvlText is %1.%3, a template that shows level 0 "
+        "and the deeper level 2, starts level 0 when no item at level 0 came before it: the "
+        "number of the next item at level 0, beside a level 1 of %1.%2",
+        body,
+        numbering=numbering,
+    )
+
+
+# Questions the references of 2026-10-15 left open (#298).
+EAST_ASIAN_TEXT = "这是一段用来测量缩进的中文文字，它足够长，可以在这一行的末尾换到第二行。"
+
+
+def paragraph_units_normal() -> Doc:
+    # Question 6 (c) and (e) of the comment of 2026-10-19 19:12: Normal is 16 pt and the
+    # document defaults 11 pt, so that a character of 16 pt tells Normal's size from the
+    # defaults'. Each case's label is a paragraph of its own above it, so that an East Asian
+    # case holds East Asian text only; that text is in SimSun (w:eastAsia), the Chinese font
+    # of the corpus's generated Chinese documents, beyond the fonts of the other documents,
+    # so that Word draws it in a font the document names.
+    def sizes(sz: float, sz_cs: float) -> str:
+        return (f'<w:sz w:val="{half_points(sz)}"/>'
+                f'<w:szCs w:val="{half_points(sz_cs)}"/>')
+
+    east_asian_font = '<w:rFonts w:eastAsia="SimSun"/>'
+
+    indent = {"leftChars": 200}
+    cases = [
+        ("Normal 16 pt over document defaults of 11 pt, no other size; leftChars 200",
+         None, UNIT_TEXT),
+        ("East Asian text in SimSun, w:sz 11 pt and w:szCs 20 pt on its run and mark; "
+         "leftChars 200", sizes(11, 20), EAST_ASIAN_TEXT),
+        ("Latin text with the same sizes (to compare); leftChars 200", sizes(11, 20),
+         UNIT_TEXT),
+        ("East Asian text in SimSun, w:sz 20 pt and w:szCs 11 pt on its run and mark; "
+         "leftChars 200", sizes(20, 11), EAST_ASIAN_TEXT),
+        ("Latin text with the same sizes (to compare); leftChars 200", sizes(20, 11),
+         UNIT_TEXT),
+    ]
+    body = ""
+    for n, (label, props, sample) in enumerate(cases, 1):
+        font = east_asian_font if sample == EAST_ASIAN_TEXT else ""
+        body += para(run(f"Case {n:02d}: {label}:"))
+        body += para(styled_run(sample, font + (props or "")), shading=GREY, ind=indent,
+                     mark=props)
+    return Doc(
+        "E-paragraph-units-normal",
+        "Which size a character unit (w:leftChars) takes when only Normal gives a size, 16 pt "
+        "over document defaults of 11 pt, and in East Asian text in SimSun whose w:sz and "
+        "w:szCs differ, beside Latin text of the same sizes",
+        body,
+        normal_props=f"<w:rPr>{size_props(16)}</w:rPr>",
+    )
+
+
+GRID_TYPES = ["lines", "linesAndChars", "snapToChars", "default"]
+
+
+def paragraph_units_grids() -> Doc:
+    # Question 7: E-paragraph-units-line-grid asks it on a grid of lines of 24 pt; here the
+    # four types of grid share the pitch of 18 pt (w:linePitch 360), one section and page each.
+    body, n = "", 0
+    for k, grid in enumerate(GRID_TYPES):
+        cases = [("beforeLines 100 beside 6 pt before", spacing(before=6, before_lines=100)),
+                 ("6 pt before only (to compare)", spacing(before=6))]
+        for label, space in cases:
+            n += 1
+            body += para(run(f"Case {n:02d}: grid {grid}, pitch 18 pt; {label}: {UNIT_TEXT}"),
+                         shading=GREY, space=space)
+            body += para(run("Between the cases."))
+        properties = section(grid=f'<w:docGrid w:type="{grid}" w:linePitch="360"/>')
+        if k < len(GRID_TYPES) - 1:
+            body += para(run("End of the section."), sect=properties)
+        else:
+            body += para(run("End of the document."))
+            last = properties
+    return Doc(
+        "E-paragraph-units-grids",
+        "What a line unit (w:beforeLines) is on document grids of type lines, linesAndChars, "
+        "snapToChars and default with a pitch of 18 pt, a section each, beside 6 pt before",
+        body,
+        last_section=last,
+    )
+
+
+def list_label_mark_style() -> Doc:
+    # Question 8 (comment of 2026-10-19 21:03): E-list-label-format's case 05 shows the label
+    # taking the size of the mark's character style but not its underline. Case 04's list
+    # counts in letters, so that capitals show. The highlight is in E-list-label-mark-highlight.
+    char_styles = [
+        ("MarkRed", '<w:color w:val="FF0000"/>', "colour FF0000"),
+        ("MarkBold", BOLD, "bold"),
+        ("MarkItalic", ITALIC, "italic"),
+        ("MarkCaps", "<w:caps/>", "capitals"),
+        ("MarkStrike", "<w:strike/>", "struck through"),
+        ("MarkFont", '<w:rFonts w:ascii="Times New Roman"/>', "w:rFonts w:ascii Times New Roman"),
+        ("MarkUnderline", '<w:u w:val="single"/>', "single underline"),
+    ]
+    styles = "".join(style("character", style_id, props)
+                     for style_id, props, _ in char_styles)
+    styles += style("paragraph", "ParaUnderline", '<w:u w:val="single"/>', "Normal")
+    cases = []
+    for style_id, _, said in char_styles[:-1]:
+        definition = label_level()
+        if style_id == "MarkCaps":
+            definition = level(0, "lowerLetter", "%1.", left=720, hanging=360)
+        cases.append((f"mark style {style_id} ({said})",
+                      {"mark": f'<w:rStyle w:val="{style_id}"/>'}, definition, ""))
+    cases += [
+        ("mark style MarkUnderline (single underline) and a double underline on the mark",
+         {"mark": '<w:rStyle w:val="MarkUnderline"/><w:u w:val="double"/>'}, label_level(), ""),
+        ("paragraph style ParaUnderline (single underline), mark style MarkRed",
+         {"p_style": "ParaUnderline", "mark": '<w:rStyle w:val="MarkRed"/>'}, label_level(),
+         ""),
+        ("paragraph style ParaUnderline (single underline), no mark style",
+         {"p_style": "ParaUnderline"}, label_level(), ""),
+    ]
+    numbering, body = label_lists(cases)
+    return Doc(
+        "E-list-label-mark-style",
+        "Which properties of the paragraph mark's character style reach a list label: "
+        "colour, bold, italic, capitals, strike and a font, one each; the style's underline "
+        "with a direct one on the mark; and a paragraph style that underlines",
+        body,
+        numbering=numbering,
+        styles=styles,
+    )
+
+
+def list_label_mark_highlight() -> Doc:
+    # Question 8's highlight: Open XML SDK's schema leaves w:highlight out of a style's run
+    # properties and reports it (as Word leaves it out of a level's, E-list-label-rstyle), so
+    # a document of its own costs no other case if Word refuses it.
+    cases = [
+        ("mark style MarkHighlight (highlight yellow)",
+         {"mark": '<w:rStyle w:val="MarkHighlight"/>'}, label_level(), ""),
+        ("a highlight yellow on the mark itself (to compare)",
+         {"mark": '<w:highlight w:val="yellow"/>'}, label_level(), ""),
+    ]
+    numbering, body = label_lists(cases)
+    return Doc(
+        "E-list-label-mark-highlight",
+        "Whether Word opens a character style that highlights, which its schema leaves out "
+        "of a style, and whether a list label takes the highlight of the paragraph mark's "
+        "character style, beside a highlight on the mark itself",
+        body,
+        numbering=numbering,
+        styles=style("character", "MarkHighlight", '<w:highlight w:val="yellow"/>'),
+    )
+
+
+BIG_TABLE_STYLE_WHOLE = ('<w:pPr><w:jc w:val="center"/></w:pPr>'
+                         '<w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr>')
+
+
+def table_style_based_on_normal_14() -> Doc:
+    # #360's question 2 (comment of 2026-10-19 15:20): in mode 14, E-table-style-size-12pt-14
+    # shows Normal's 12 pt giving way to the table style's 14 pt; does a style based on Normal
+    # that inherits the 12 pt, or gives it of its own, give way too?
+    big = table_style("Big", [], whole=BIG_TABLE_STYLE_WHOLE)
+    styles = big + style("paragraph", "BasedInherit", "", "Normal") + style(
+        "paragraph", "BasedOwn", size_props(12), "Normal")
+    cells = [[para(run("r1c1: Normal")), para(run("r1c2: BasedInherit"), p_style="BasedInherit")],
+             [para(run("r2c1: BasedOwn"), p_style="BasedOwn"), para(run("r2c2: Normal"))]]
+    body = table_case(
+        1, "a table in the style Big (14 pt, centred); Normal 12 pt, left; BasedInherit "
+        "inherits Normal's 12 pt, BasedOwn gives 12 pt of its own",
+        styled_table("Big", cells, widths=[TEXT_W // 2] * 2),
+    ) + para(run("Case 02: a paragraph after the table, in Normal"))
+    return Doc(
+        "E-table-style-based-on-normal-14",
+        "Whether paragraph styles based on a Normal of 12 pt, justified left, give way to the "
+        "14 pt and the centring of a table style as Normal does, inheriting the 12 pt or "
+        "giving it of their own, in compatibility mode 14",
+        body,
+        styles=styles,
+        normal_props=f'<w:pPr><w:jc w:val="left"/></w:pPr><w:rPr>{size_props(12)}</w:rPr>',
+        mode=14,
+    )
+
+
+def table_style_no_defaults() -> Doc:
+    # #360's question 4 (comment of 2026-10-19 18:17): a Normal equal to the size text takes
+    # when the document defaults give no run properties. In Word that is 11 pt, not
+    # ECMA-376's 10 pt: E-defaults-empty's reference draws its case 01 in Calibri 11, and its
+    # re-saved copy, which the reference is exported from, writes w:sz 22 into the defaults.
+    # So Normal is w:sz 22; a Normal that differs from the defaults is
+    # E-table-style-defaults-size's question.
+    body = table_case(
+        1, "a table in the style Big (14 pt, centred); no run properties in the document "
+        "defaults, Normal w:sz 22 (11 pt, the size Word gives text without them)",
+        styled_table("Big", named_cells(2, 2), widths=[TEXT_W // 2] * 2),
+    ) + para(run("Case 02: a paragraph after the table, in Normal"))
+    return Doc(
+        "E-table-style-no-defaults",
+        "Whether a Normal style of 11 pt (w:sz 22) gives way to the 14 pt of a table style "
+        "when the document defaults give no run properties, where Word gives text 11 pt "
+        "(E-defaults-empty), with the setting overrideTableStyleFontSizeAndJustification on",
+        body,
+        styles=table_style("Big", [], whole=BIG_TABLE_STYLE_WHOLE),
+        normal_props=f"<w:rPr>{size_props(11)}</w:rPr>",
+        run_defaults=False,
+    )
+
+
+def table_style_normal_both() -> Doc:
+    # #298's table-style item: a Normal justified both, which differs from what it inherits
+    # (the document defaults give no justification). Justification shows only in lines that
+    # are not the last of their paragraph, so every cell wraps.
+    cells = [[para(run(f"r{r}c{c}: {WRAPPING}")) for c in (1, 2)] for r in (1, 2)]
+    body = table_case(
+        1, "a table in the style Big (14 pt, centred); document defaults 12 pt, Normal 11 pt "
+        "and justified both",
+        styled_table("Big", cells, widths=[TEXT_W // 2] * 2),
+    ) + para(run(f"Case 02: a paragraph after the table, in Normal: {UNIT_TEXT}"))
+    return Doc(
+        "E-table-style-normal-both",
+        "Whether a Normal style of 11 pt, justified both, overrides the 14 pt and the "
+        "centring of a table style when the document defaults are 12 pt and give no "
+        "justification, with the setting overrideTableStyleFontSizeAndJustification on",
+        body,
+        styles=table_style("Big", [], whole=BIG_TABLE_STYLE_WHOLE),
+        normal_props=f'<w:pPr><w:jc w:val="both"/></w:pPr><w:rPr>{size_props(11)}</w:rPr>',
+        run_default_size=12,
+    )
+
+
+# A character scale of 0 (#59): MS-OI29500 2.1.560 a says Word takes 1 to 600 %. The schema's
+# minimum is 1 too, which Open XML SDK reports.
+SCALE_SAMPLE = "Hamburgefontsiv Hamburgefontsiv"
+
+
+def char_scale_zero() -> Doc:
+    body = "".join(
+        para(run(f"Case {n:02d}: w:w {scale}, between the bars: |")
+             + styled_run(SCALE_SAMPLE, f'<w:w w:val="{scale}"/>') + run("|"))
+        for n, scale in enumerate((0, 100, 1), 1)
+    )
+    return Doc(
+        "E-char-scale-zero",
+        "How wide Word sets text of a character scale (w:w) of 0, beside 100 % and 1 %, "
+        "between two bars",
+        body,
+    )
+
+
+# Paragraph values outside the schema or the range of its prose (#41), one document per row
+# of the issue's table, so that a document Word refuses costs no other row.
+VALUE_TEXT = ("text long enough to run onto a third line, so that the spacing between the "
+              "lines of the paragraph shows in its lines and its shading; " * 2)
+
+
+def value_line_negative() -> Doc:
+    # [MS-DOC]'s LSPD tells exact from at-least spacing by the sign of dyaLine; ECMA-376 types
+    # w:line as ST_SignedTwipsMeasure.
+    cases = [(-240, "auto"), (-480, "auto"), (-480, "exact"), (-480, "atLeast")]
+    body = ""
+    for n, (value, rule) in enumerate(cases, 1):
+        body += para(run(f"Case {n:02d}: w:spacing w:line {value} w:lineRule {rule}: "
+                         f"{VALUE_TEXT}"),
+                     shading=GREY, space=f'<w:spacing w:line="{value}" w:lineRule="{rule}"/>')
+        body += para(run("Between the cases."))
+    return Doc(
+        "E-value-line-negative",
+        "How Word spaces the lines of paragraphs with a negative w:line: -240 and -480 with "
+        "w:lineRule auto, and -480 with exact and atLeast",
+        body,
+    )
+
+
+def value_ilvl_high() -> Doc:
+    # E-list-level-linked-no-level has level 9 from a style; here a paragraph's own w:ilvl.
+    levels = [level(k, "decimal", f"L{k}-%{k + 1}", left=720 * (k + 1), hanging=360)
+              for k in range(9)]
+    numbering = abstract_num(0, "5C3A0C51", levels) + num(1, 0)
+    items = [(0, "level 0 (to compare)"),
+             (9, "a direct w:ilvl of 9, past the last of the nine levels"),
+             (12, "a direct w:ilvl of 12"),
+             (8, "level 8, the last level (to compare)"),
+             (0, "level 0, after the others")]
+    body = "".join(para(run(f"Case {n:02d}: {label}"), list_item=(1, ilvl))
+                   for n, (ilvl, label) in enumerate(items, 1))
+    return Doc(
+        "E-value-ilvl-high",
+        "Which level and label Word gives a list item whose own w:ilvl is 9 or 12, past the "
+        "last of the nine levels (each labelled L<level>-<number>), among items at levels 0 "
+        "and 8",
+        body,
+        numbering=numbering,
+    )
+
+
+def value_outline_level() -> Doc:
+    # Nothing in the render shows an outline level (the export writes no bookmarks): the
+    # re-saved copy shows the level Word keeps of each. Open XML SDK reports 25, above the
+    # maximum of 9 it checks, but not the negative ones.
+    cases = [0, -3, -2, 25, 9]
+    body = "".join(
+        f'<w:p><w:pPr><w:outlineLvl w:val="{value}"/></w:pPr>'
+        f"{run(f'Case {n:02d}: w:outlineLvl {value}')}</w:p>"
+        for n, value in enumerate(cases, 1)
+    )
+    return Doc(
+        "E-value-outline-level",
+        "Which outline level Word keeps of a w:outlineLvl of -3, -2 and 25, outside 0 to 9, "
+        "beside 0 and 9: its re-saved copy shows it, since the render does not",
+        body,
+    )
+
+
+def value_hanging_negative() -> Doc:
+    # w:hanging is ST_TwipsMeasure, which has no sign: outside the schema, which Open XML SDK
+    # reports.
+    cases = [("left 72 pt, w:hanging -18 pt", {"left": 1440, "hanging": -360}),
+             ("left 72 pt, w:hanging 18 pt (to compare)", {"left": 1440, "hanging": 360}),
+             ("left 72 pt, w:firstLine 18 pt (to compare)", {"left": 1440, "firstLine": 360})]
+    body = ""
+    for n, (label, indent) in enumerate(cases, 1):
+        body += para(run(f"Case {n:02d}: {label}: {VALUE_TEXT}"), shading=GREY, ind=indent)
+        body += para(run("Between the cases."))
+    return Doc(
+        "E-value-hanging-negative",
+        "Where Word puts the lines of a paragraph indented 72 pt with a w:hanging of -18 pt, "
+        "outside the schema, beside a hanging indent and a first-line indent of 18 pt",
+        body,
+    )
+
+
+def value_spacing_minus_one() -> Doc:
+    # w:before and w:after are ST_TwipsMeasure: -1 is outside the schema (Open XML SDK reports
+    # each of the four). The style gives 24 pt before and after, so that a value read as 0 and
+    # one left out differ.
+    cases = [("w:before -1", '<w:spacing w:before="-1"/>'),
+             ("w:after -1", '<w:spacing w:after="-1"/>'),
+             ("w:before -1 and w:after -1", '<w:spacing w:before="-1" w:after="-1"/>'),
+             ("w:before 0 and w:after 0 (to compare)", '<w:spacing w:before="0" w:after="0"/>'),
+             ("no spacing of its own (to compare)", None)]
+    body = para(run("Before the cases."))
+    for n, (label, space) in enumerate(cases, 1):
+        body += para(run(f"Case {n:02d}: style Spaced (24 pt before and after); {label}"),
+                     p_style="Spaced", shading=GREY, space=space)
+        body += para(run("Between the cases."))
+    return Doc(
+        "E-value-spacing-minus-one",
+        "How much space Word puts before and after a paragraph whose w:before or w:after is "
+        "-1, outside the schema, over a style that gives 24 pt before and after",
+        body,
+        styles=para_style("Spaced", '<w:spacing w:before="480" w:after="480"/>'),
+    )
+
+
+def value_theme_tint_short() -> Doc:
+    # ST_UcharHexNumber is two hexadecimal digits: one is outside the schema, though Open XML
+    # SDK does not report it. The text and fill under the theme colour are black, so that a
+    # theme colour Word leaves out shows.
+    def color(extra: str) -> str:
+        return f'<w:color w:val="000000" w:themeColor="accent1" {extra}/>'
+
+    def fill(extra: str) -> str:
+        return (f'<w:shd w:val="clear" w:color="auto" w:fill="000000" w:themeFill="accent1" '
+                f"{extra}/>")
+
+    cases = [
+        ('text in accent1 (336699), w:themeTint "4"', color('w:themeTint="4"')),
+        ('text in accent1, w:themeTint "40" (to compare)', color('w:themeTint="40"')),
+        ('text in accent1, w:themeShade "8"', color('w:themeShade="8"')),
+        ('text in accent1, w:themeShade "80" (to compare)', color('w:themeShade="80"')),
+        ('run shading in accent1, w:themeFillTint "4"', fill('w:themeFillTint="4"')),
+        ('run shading in accent1, w:themeFillTint "40" (to compare)',
+         fill('w:themeFillTint="40"')),
+    ]
+    body = "".join(para(run(f"Case {n:02d}: {label}: ") + styled_run("sample text", props))
+                   for n, (label, props) in enumerate(cases, 1))
+    return Doc(
+        "E-value-theme-tint-short",
+        "How Word colours text and run shading in a theme colour whose w:themeTint, "
+        "w:themeShade or w:themeFillTint has one hexadecimal digit, outside the schema, "
+        "beside two",
+        body,
+        theme=True,
+    )
+
+
+# How Word matches style ids (#40). In E-style-id-case no style's name is its id or a value
+# that names it, with or without spaces, so that a match by name does not pass for one by
+# id; E-style-id-missing names a name on purpose.
+def id_style(kind: str, style_id: str | None, name: str, content: str) -> str:
+    """A style of w:type kind with this id (None writes no w:styleId) and name, and content
+    after its w:name (in the order of CT_Style)."""
+    ident = "" if style_id is None else f' w:styleId="{style_id}"'
+    return (f'<w:style w:type="{kind}" w:customStyle="1"{ident}>'
+            f'<w:name w:val="{name}"/>{content}</w:style>')
+
+
+CENTRED_BOLD = '<w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:b/><w:bCs/></w:rPr>'
+NORMAL_BASE = '<w:basedOn w:val="Normal"/>'
+
+
+def style_id_case() -> Doc:
+    styles = (
+        id_style("paragraph", "MixedCase", "Case Test Style", NORMAL_BASE + CENTRED_BOLD)
+        + id_style("paragraph", "BasedOnLower", "Italic Based Style",
+                   '<w:basedOn w:val="mixedcase"/><w:rPr><w:i/><w:iCs/></w:rPr>')
+        + id_style("paragraph", "LinkedPara", "Right Linked Style",
+                   NORMAL_BASE + '<w:link w:val="linkedchar"/><w:pPr><w:jc w:val="right"/>'
+                   "</w:pPr>")
+        + id_style("character", "LinkedChar", "Underline Linked Style",
+                   '<w:link w:val="linkedpara"/><w:rPr><w:u w:val="single"/></w:rPr>')
+    )
+    cases = [
+        ('w:pStyle "mixedcase", the id MixedCase (centred, bold) in lower case', "mixedcase",
+         None),
+        ('w:pStyle "MIXEDCASE", the id MixedCase in capitals', "MIXEDCASE", None),
+        ('w:pStyle "MixedCase", the id as written (to compare)', "MixedCase", None),
+        ('w:pStyle "BasedOnLower" (italic), whose w:basedOn is "mixedcase"', "BasedOnLower",
+         None),
+        ('a run of w:rStyle "linkedchar", the id LinkedChar (underlined) in lower case', None,
+         "linkedchar"),
+        ('w:pStyle "LinkedPara" (right-aligned), whose w:link is "linkedchar"', "LinkedPara",
+         None),
+    ]
+    body = "".join(styled_para(f"Case {n:02d}: {label}", p_style, r_style, "")
+                   for n, (label, p_style, r_style) in enumerate(cases, 1))
+    return Doc(
+        "E-style-id-case",
+        "Whether Word matches a style id without regard to case: a w:pStyle, a w:basedOn and "
+        "a w:rStyle naming an id in another case, and w:link values in lower case, which the "
+        "re-saved copy shows",
+        body,
+        styles=styles,
+    )
+
+
+def style_id_repeated() -> Doc:
+    # Open XML SDK reports the repeated id Twice.
+    styles = (
+        id_style("paragraph", "Twice", "Twice first", NORMAL_BASE + CENTRED_BOLD)
+        + id_style("paragraph", "Twice", "Twice second",
+                   NORMAL_BASE + '<w:pPr><w:jc w:val="right"/></w:pPr>'
+                   "<w:rPr><w:i/><w:iCs/></w:rPr>")
+        + id_style("paragraph", "", "Empty id first",
+                   NORMAL_BASE + '<w:pPr><w:spacing w:before="240"/></w:pPr>'
+                   '<w:rPr><w:u w:val="single"/></w:rPr>')
+        + id_style("paragraph", "", "Empty id second",
+                   NORMAL_BASE + '<w:pPr><w:spacing w:before="480"/></w:pPr>'
+                   "<w:rPr><w:strike/></w:rPr>")
+    )
+    cases = [
+        ('w:pStyle "Twice": the first style of that id is centred and bold, the second '
+         "right-aligned and italic", "Twice"),
+        ('w:pStyle "": the first style of an empty id has 12 pt before and underlines, the '
+         "second 24 pt before and strikes through", ""),
+        ("no w:pStyle (Normal, to compare)", None),
+    ]
+    body = "".join(styled_para(f"Case {n:02d}: {label}", p_style, None, "")
+                   if p_style is None else
+                   f'<w:p><w:pPr><w:pStyle w:val="{p_style}"/></w:pPr>'
+                   f"{run(f'Case {n:02d}: {label}')}</w:p>"
+                   for n, (label, p_style) in enumerate(cases, 1))
+    return Doc(
+        "E-style-id-repeated",
+        "Which style Word gives a paragraph naming a style id that two styles have, and one "
+        "naming the empty id, which two styles have too",
+        body,
+        styles=styles,
+    )
+
+
+def style_id_missing() -> Doc:
+    styles = id_style("paragraph", None, "No Id Style", NORMAL_BASE + CENTRED_BOLD)
+    cases = [
+        ('w:pStyle "NoIdStyle", the name of the style without an id (centred, bold) without '
+         "its spaces", "NoIdStyle"),
+        ('w:pStyle "No Id Style", its name as written', "No Id Style"),
+        ("no w:pStyle (Normal, to compare)", None),
+    ]
+    body = "".join(styled_para(f"Case {n:02d}: {label}", p_style, None, "")
+                   for n, (label, p_style) in enumerate(cases, 1))
+    return Doc(
+        "E-style-id-missing",
+        "What Word does with a paragraph style that has no w:styleId: whether a paragraph "
+        "naming its name, with or without the spaces, takes it",
+        body,
+        styles=styles,
+    )
+
+
+def style_type_unknown() -> Doc:
+    # ST_StyleType has paragraph, character, table and numbering: outside the schema, which
+    # Open XML SDK reports.
+    styles = id_style("unknown", "UnknownType", "Unknown Type", CENTRED_BOLD)
+    cases = [
+        ('a paragraph of w:pStyle "UnknownType", a style of w:type "unknown" (centred, bold)',
+         "UnknownType", None),
+        ('a run of w:rStyle "UnknownType" in Normal', None, "UnknownType"),
+        ("no style (Normal, to compare)", None, None),
+    ]
+    body = "".join(styled_para(f"Case {n:02d}: {label}", p_style, r_style, "")
+                   for n, (label, p_style, r_style) in enumerate(cases, 1))
+    return Doc(
+        "E-style-type-unknown",
+        "What Word does with a style whose w:type is none of ST_StyleType's: whether a "
+        "paragraph or a run naming it takes its centring and bold",
+        body,
+        styles=styles,
+    )
+
+
+def color_hash() -> Doc:
+    # #37: ST_HexColor is six hexadecimal digits or auto, so #RRGGBB is outside the schema;
+    # Open XML SDK reports each of the four.
+    cases = [
+        ('w:color "#FF0000" on the text', '<w:color w:val="#FF0000"/>', None),
+        ('w:color "FF0000" (to compare)', '<w:color w:val="FF0000"/>', None),
+        ('w:u single, w:color "#FF0000", on black text', '<w:u w:val="single" w:color="#FF0000"/>',
+         None),
+        ('run shading w:shd w:fill "#808080"',
+         '<w:shd w:val="clear" w:color="auto" w:fill="#808080"/>', None),
+        ('paragraph shading w:shd w:fill "#BFBFBF"', "", "#BFBFBF"),
+    ]
+    body = "".join(para(run(f"Case {n:02d}: {label}: ") + styled_run("sample text", props),
+                        shading=shading)
+                   for n, (label, props, shading) in enumerate(cases, 1))
+    return Doc(
+        "E-color-hash",
+        "What Word does with colours written as #RRGGBB, outside the schema, in w:color, "
+        "w:u w:color and the w:fill of run and paragraph shading",
+        body,
+    )
+
+
+def sectpr_in_cell() -> Doc:
+    # #33: Word never writes a w:sectPr in a cell; the cell's section is Letter in landscape,
+    # so that a page of that size shows that Word took it.
+    landscape = section(size=(LETTER[1], LETTER[0]))
+    rows = [
+        [cell(para(run("Row 1, cell 1: its paragraph holds a w:sectPr of a page 792 x 612 pt"),
+                   sect=landscape)),
+         cell(para(run("Row 1, cell 2")))],
+        [cell(para(run("Row 2, cell 1"))), cell(para(run("Row 2, cell 2")))],
+    ]
+    body = (para(run("Case 01: the paragraph before the table, whose first cell ends a section "
+                     "of Letter in landscape (792 x 612 pt); the last section is A4 portrait"))
+            + rule_table(rows, [TEXT_W // 2] * 2, tbl_w=(TEXT_W, "dxa"), fixed=True)
+            + para(run("Case 02: the paragraph after the table, in the last section")))
+    return Doc(
+        "E-sectpr-in-cell",
+        "What Word does with a section break (w:sectPr) in a table cell's paragraph that "
+        "ends a section of Letter in landscape before the last section, A4 portrait: the "
+        "page sizes show whether Word takes it",
+        body,
+    )
+
+
+# Whitespace around atomic values (#243; [MS-OI29500] 2.1.1 a: Office accepts only atomic
+# content with its white space already normalised), written from ECMA-376's markup.
+WHITESPACE_PICTURE = ("image1.png", grey_png(72, 72))
+
+
+def placed_picture(n: int, across: tuple[str, float | str], down: tuple[str, float | str],
+                   *replacements: tuple[str, str]) -> str:
+    """A 72 pt picture in front of the text, placed across and down, its markup with each
+    (old, new) of replacements made once."""
+    drawing = anchored_drawing(n, 72, 72, drawing_picture("image1.png", 72, 72),
+                               across=across, down=down)
+    for old, new in replacements:
+        if drawing.count(old) != 1:
+            raise ValueError(f"{old!r} is not in the drawing once")
+        drawing = drawing.replace(old, new)
+    return picture_run(drawing)
+
+
+def offset(points: float) -> str:
+    return f"<wp:posOffset>{emu(points)}</wp:posOffset>"
+
+
+def whitespace_pos_offset() -> Doc:
+    lf = (offset(144), f"<wp:posOffset>\n{emu(144)}</wp:posOffset>"), (
+        offset(216), f"<wp:posOffset>\n{emu(216)}</wp:posOffset>")
+    body = para(run("Case 01: a 72 pt picture 144 pt from the page's left edge and 216 pt from "
+                    "its top, a line feed before each number of wp:posOffset")
+                + placed_picture(1, ("page", 144), ("page", 216), *lf))
+    body += para(run("Case 02: the same picture with no whitespace in wp:posOffset (to "
+                     "compare)") + placed_picture(2, ("page", 144), ("page", 216)),
+                 page_break_before=True)
+    return Doc(
+        "E-whitespace-pos-offset",
+        "Whether Word opens a document whose picture offsets (wp:posOffset) have a line feed "
+        "before the number, and where it puts the picture, beside the same offsets without",
+        body,
+        media=(WHITESPACE_PICTURE,),
+    )
+
+
+def whitespace_align() -> Doc:
+    # Open XML SDK reports both values with line feeds as outside ST_AlignH and ST_AlignV;
+    # wp:posOffset's xsd:int collapses whitespace, so it reports nothing there.
+    body = para(run("Case 01: a 72 pt picture centred across the margins, wp:align with a "
+                    "line feed before and after center; 216 pt from the page's top")
+                + placed_picture(1, ("margin", "center"), ("page", 216),
+                                 ("<wp:align>center</wp:align>",
+                                  "<wp:align>\ncenter\n</wp:align>")))
+    body += para(run("Case 02: a 72 pt picture at the bottom of the margins, wp:align with a "
+                     "line feed before and after bottom; 144 pt from the page's left edge")
+                 + placed_picture(2, ("page", 144), ("margin", "bottom"),
+                                  ("<wp:align>bottom</wp:align>",
+                                   "<wp:align>\nbottom\n</wp:align>")),
+                 page_break_before=True)
+    body += para(run("Case 03: a 72 pt picture centred across the margins and at their bottom, "
+                     "no whitespace in wp:align (to compare)")
+                 + placed_picture(3, ("margin", "center"), ("margin", "bottom")),
+                 page_break_before=True)
+    return Doc(
+        "E-whitespace-align",
+        "Whether Word opens a document whose picture alignments (wp:align) have a line feed "
+        "before and after the value, and where it puts the pictures, beside the same "
+        "alignments without",
+        body,
+        media=(WHITESPACE_PICTURE,),
+    )
+
+
+def whitespace_compat() -> Doc:
+    # #243's comment of 2026-10-19: w:compatSetting's w:val is ST_String, which keeps the
+    # whitespace, so [MS-OI29500] 2.1.1 a does not say Word refuses it; Open XML SDK reports
+    # compatibilityMode, which it expects to be 11, 12, 14 or 15. Each setting is written
+    # " 15 " or " 1 ". The re-saved copy shows what Word made of each; the cases
+    # show the mode (E-tab-hanging-noindenttab: Word drops the flag in mode 15 and applies it
+    # in mode 14), enableOpenTypeFeatures (E-opentype-*) and
+    # overrideTableStyleFontSizeAndJustification (E-table-style-defaults-size).
+    written = "".join(
+        f'<w:compatSetting w:name="{name}" w:uri="{WORD_URI}" w:val=" {value} "/>'
+        for name, value in [("compatibilityMode", 15), *((s, 1) for s in MODE_15_SETTINGS)]
+    )
+    numbering = (abstract_num(0, "5C3A0C61", [level(0, "decimal", "%1.", left=1000,
+                                                     hanging=1000, suffix="tab")])
+                 + num(1, 0))
+    body = para(run("Case 01: list label with a tab suffix, level indent left 50 pt, hanging "
+                    "50 pt; the flag doNotUseIndentAsNumberingTabStop. The text after the tab "
+                    "shows where the tab ended, and the wrapped second line shows where the "
+                    "hanging indent puts the following lines."), list_item=(1, 0))
+    body += para(run("Case 02: standard ligatures (w14:ligatures) in Calibri 11 pt:"))
+    body += para(f"<w:r><w:rPr>{LIGATURES}</w:rPr>{text(OPEN_TYPE_TEXT)}</w:r>")
+    body += table_case(
+        3, "a table in the style Big (14 pt, centred); document defaults 12 pt and "
+        "right-aligned, Normal 11 pt and left-aligned",
+        styled_table("Big", named_cells(2, 2), widths=[TEXT_W // 2] * 2),
+    )
+    return Doc(
+        "E-whitespace-compat",
+        "How Word reads w:compatSetting values with a space before and after them: "
+        "compatibilityMode \" 15 \" and the four settings of mode 15 \" 1 \", shown by a list "
+        "tab with doNotUseIndentAsNumberingTabStop, ligatures and a table style's size",
+        body,
+        compat_flags=("doNotUseIndentAsNumberingTabStop",),
+        numbering=numbering,
+        styles=table_style("Big", [], whole=BIG_TABLE_STYLE_WHOLE),
+        normal_props=f'<w:pPr><w:jc w:val="left"/></w:pPr><w:rPr>{size_props(11)}</w:rPr>',
+        run_default_size=12,
+        paragraph_defaults_extra='<w:jc w:val="right"/>',
+        compat_settings_written=written,
+    )
+
+
+# Tab leaders in a font whose character map has no U+005F (#356): Officewright Test Symbol
+# maps only the codes U+F020 to U+F0FF (U+F05F is its underscore), as a symbol font does.
+NO_UNDERSCORE_LEADERS = [
+    ("underscore", SYMBOL_FONT, ""),
+    ("heavy", SYMBOL_FONT, ""),
+    ("dot", SYMBOL_FONT, " (to compare)"),
+    ("hyphen", SYMBOL_FONT, " (to compare)"),
+    ("middleDot", SYMBOL_FONT, " (to compare)"),
+    ("underscore", "Calibri", " (to compare)"),
+    ("heavy", "Calibri", " (to compare)"),
+]
+
+
+def tab_leader_no_underscore() -> Doc:
+    body = ""
+    for n, (leader, font, compare) in enumerate(NO_UNDERSCORE_LEADERS, 1):
+        fonts = f'<w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:eastAsia="{font}" w:cs="{font}"/>'
+        body += para(run(f"Case {n:02d}: {leader} leader to a left stop at 216 pt, the tab "
+                         f"in {font}{compare}:"))
+        body += para(tab_run(fonts) + styled_run("x", ""), tabs=[("left", 4320, leader)])
+    return Doc(
+        "E-tab-leader-no-underscore",
+        "How Word draws underscore and heavy tab leaders when the tab is in Officewright "
+        "Test Symbol, whose character map has no U+005F (only the symbol code F05F), beside "
+        "dot, hyphen and middle dot leaders in it, and underscore and heavy leaders in Calibri",
+        body,
+    )
+
+
+# The theme font languages whose primary language names no script of the theme (#358): each
+# document gives all three slots of w:themeFontLang one language, and the theme a font of
+# its own to each of these scripts, so the font of each case names the script Word took.
+# The theme's East Asian font is empty, so a slot whose script Word does not take may fall
+# back to a font of Word's choice: no script's font is one Word commonly falls back to (Times
+# New Roman, Arial, Courier New, Calibri, Segoe UI). Constantia, Consolas, Trebuchet MS and
+# the theme's own fonts (Verdana, Tahoma) are Windows fonts beyond the ones the other
+# documents use, since the question is which font Word takes; each has Greek and Cyrillic.
+THEME_LANG_SCRIPTS = (("Mymr", "Constantia"), ("Java", "Cambria"), ("Nkoo", "Consolas"),
+                      ("Olck", "Trebuchet MS"), ("Tfng", "Noto Sans"))
+THEME_LANGUAGES = [("my", "my-MM", "Burmese"), ("jv", "jv-ID", "Javanese"),
+                   ("nqo", "nqo", "N'Ko"), ("sat", "sat", "Santali"),
+                   ("zgh", "zgh-Tfng", "Standard Moroccan Tamazight in Tifinagh")]
+THEME_LANG_LATIN = "Hamburgefontsiv"
+THEME_LANG_GREEK_CYRILLIC = "Ελληνικά Кириллица"
+
+
+def theme_font_lang(short: str, tag: str, language: str) -> Doc:
+    def sample(fonts: str, toggles: str, value: str) -> str:
+        return styled_run(value, f"<w:rFonts {fonts}/>{toggles}")
+
+    slots = [
+        ("Latin text in minorHAnsi, the theme's Latin font Verdana or a script's",
+         'w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"', "", THEME_LANG_LATIN),
+        ("Greek and Cyrillic with w:hint eastAsia in minorEastAsia (empty) or a script's",
+         'w:eastAsiaTheme="minorEastAsia" w:hint="eastAsia"', "", THEME_LANG_GREEK_CYRILLIC),
+        ("Latin text with w:cs in minorBidi, the theme's complex script font Tahoma or a "
+         "script's", 'w:cstheme="minorBidi"', "<w:cs/>", THEME_LANG_LATIN),
+    ]
+    # Cases 04 to 06 give the runs the language too, in case Word takes a run's language
+    # rather than w:themeFontLang (w:lang goes after w:cs, in the schema's order).
+    language_of_run = f'<w:lang w:val="{tag}" w:eastAsia="{tag}" w:bidi="{tag}"/>'
+    cases = [(label, sample(fonts, toggles, value)) for label, fonts, toggles, value in slots]
+    cases += [(f"case 0{k}'s text with w:lang {tag} on the run",
+               sample(fonts, toggles + language_of_run, value))
+              for k, (_, fonts, toggles, value) in enumerate(slots, 1)]
+    body = "".join(para(run(f"Case {n:02d}: {label}:")) + para(content)
+                   for n, (label, content) in enumerate(cases, 1))
+    fonts = ", ".join(f"{script} {typeface}" for script, typeface in THEME_LANG_SCRIPTS)
+    return Doc(
+        f"E-theme-font-lang-{short}",
+        f"Which theme font Word takes in the theme's Latin, East Asian and complex script "
+        f"slots when w:themeFontLang gives {tag} ({language}) for all three, with a theme whose "
+        f"minor "
+        f"fonts are Verdana, none and Tahoma and which gives {fonts}; also with the runs in "
+        f"{tag}",
+        body,
+        theme=True,
+        theme_scripts=THEME_LANG_SCRIPTS,
+        theme_font_lang=(tag, tag, tag),
+    )
+
+
 def documents() -> list[Doc]:
     return [
         line_fonts(),
@@ -9524,6 +10436,37 @@ def documents() -> list[Doc]:
         vml_px_effects(),
         textbox_vml_inline_shapes(),
         hidden_drawings(),
+        list_header(),
+        list_own_level(),
+        list_long_template(300),
+        list_long_template(600),
+        list_template_controls(),
+        list_template_deeper(),
+        paragraph_units_normal(),
+        paragraph_units_grids(),
+        list_label_mark_style(),
+        list_label_mark_highlight(),
+        table_style_based_on_normal_14(),
+        table_style_no_defaults(),
+        table_style_normal_both(),
+        char_scale_zero(),
+        value_line_negative(),
+        value_ilvl_high(),
+        value_outline_level(),
+        value_hanging_negative(),
+        value_spacing_minus_one(),
+        value_theme_tint_short(),
+        style_id_case(),
+        style_id_repeated(),
+        style_id_missing(),
+        style_type_unknown(),
+        color_hash(),
+        sectpr_in_cell(),
+        whitespace_pos_offset(),
+        whitespace_align(),
+        whitespace_compat(),
+        tab_leader_no_underscore(),
+        *(theme_font_lang(*language) for language in THEME_LANGUAGES),
     ]
 
 
@@ -9595,19 +10538,23 @@ def note_styles() -> str:
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
 
-def theme_xml(overrides: tuple[tuple[str, str], ...] = ()) -> str:
+def theme_xml(overrides: tuple[tuple[str, str], ...] = (),
+              scripts: tuple[tuple[str, str], ...] = ()) -> str:
     """A theme of this repository: the colours and fonts of THEME_COLORS and THEME_FONTS,
-    but for the RGB colours of overrides, and the smallest format scheme the schema allows
-    (three styles in each list)."""
+    but for the RGB colours of overrides, the fonts of scripts (Doc.theme_scripts) after
+    them in each collection, as CT_FontCollection orders them, and the smallest format
+    scheme the schema allows (three styles in each list)."""
     scheme = dict(THEME_COLORS)
     scheme.update((name, f'<a:srgbClr val="{rgb}"/>') for name, rgb in overrides)
     colors = "".join(f"<a:{name}>{color}</a:{name}>" for name, color in scheme.items())
+    supplemental = "".join(f'<a:font script="{script}" typeface="{attr(typeface)}"/>'
+                           for script, typeface in scripts)
 
     def collection(kind: str) -> str:
         latin = THEME_FONTS[kind]
         return (
-            f'<a:{kind}Font><a:latin typeface="{latin}"/><a:ea typeface=""/>'
-            f'<a:cs typeface="{THEME_FONTS["cs"]}"/></a:{kind}Font>'
+            f'<a:{kind}Font><a:latin typeface="{latin}"/><a:ea typeface="{THEME_FONTS["ea"]}"/>'
+            f'<a:cs typeface="{THEME_FONTS["cs"]}"/>{supplemental}</a:{kind}Font>'
         )
 
     fill = '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
@@ -9688,6 +10635,8 @@ def settings_xml(doc: Doc) -> str:
         value = values.get(name, 1) if doc.mode == 15 else values.get(name)
         if value is not None:
             settings += compat_setting(name, value)
+    settings = doc.compat_settings_written or settings
+    latin, east_asia, bidi = (attr(tag) for tag in doc.theme_font_lang)
     return (
         f'<w:settings xmlns:w="{W_NS}">'
         '<w:zoom w:percent="100"/>'
@@ -9699,7 +10648,7 @@ def settings_xml(doc: Doc) -> str:
         f"<w:compat>{flags}{settings}</w:compat>"
         # The languages and number format are set, so that a re-saved copy that names the
         # language or locale of the machine Word ran on stands out (corpus-import.py).
-        '<w:themeFontLang w:val="en-US" w:eastAsia="en-US" w:bidi="ar-SA"/>'
+        f'<w:themeFontLang w:val="{latin}" w:eastAsia="{east_asia}" w:bidi="{bidi}"/>'
         f"{mapping}"
         '<w:decimalSymbol w:val="."/>'
         '<w:listSeparator w:val=","/>'
@@ -9786,8 +10735,12 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
     fonts = set()
     for attributes in re.findall(r"<w:rFonts ([^>]*)/>", used):
         fonts.update(re.findall(r'w:(?:ascii|hAnsi|eastAsia|cs)="([^"]+)"', attributes))
-        for value in re.findall(r'w:(?:ascii|hAnsi|eastAsia|cs)Theme="([^"]+)"', attributes):
-            fonts.add(THEME_FONTS[THEME_SLOTS[value]])
+        # CT_Fonts spells the complex script one w:cstheme.
+        for value in re.findall(r'w:(?:asciiTheme|hAnsiTheme|eastAsiaTheme|cstheme)="([^"]+)"',
+                                attributes):
+            # A slot the theme gives no font names none.
+            if THEME_FONTS[THEME_SLOTS[value]]:
+                fonts.add(THEME_FONTS[THEME_SLOTS[value]])
     fonts = sorted(fonts)
 
     word_rels = [
@@ -9848,7 +10801,8 @@ def parts(doc: Doc) -> list[tuple[str, bytes]]:
     if numbering:
         result.append(("word/numbering.xml", xml_part(numbering)))
     if doc.theme:
-        result.append(("word/theme/theme1.xml", xml_part(theme_xml(doc.theme_overrides))))
+        result.append(("word/theme/theme1.xml",
+                       xml_part(theme_xml(doc.theme_overrides, doc.theme_scripts))))
     for name, root in doc.headers:
         result.append((f"word/{name}", xml_part(root)))
     for name, root in notes:
