@@ -68,8 +68,9 @@ impl<'a> Translator<'a> {
     ///
     /// Every link to one address gets the same target, made once. The budget is checked
     /// before the target is made, so that an address past it costs nothing; such an
-    /// address is left out even where links of another kind (a hyperlink and a field) made
-    /// the same target before.
+    /// address is left out even where a link with another key made the same target before,
+    /// such as a field, or a hyperlink whose relationship target holds the `#` and anchor
+    /// another hyperlink gives on its own.
     fn shared_target(&mut self, target: &str, anchor: &str) -> Option<Arc<ir::LinkTarget>> {
         let length = match (target, anchor) {
             ("", "") => return None,

@@ -521,35 +521,41 @@ fn counts_what_text_boxes_in_headers_hold_against_the_copies_of_headers() {
     // A header whose text box holds a long bookmark name, in many sections: the copies
     // weigh what the box holds (MAX_COPIED is 1 MiB in tests).
     let name = "n".repeat(300_000);
-    let boxed = super::text_box_layout::inline(&super::text_box_layout::shape(
+    let shape = super::text_box_layout::shape(
         "",
         &format!(r#"<w:p><w:bookmarkStart w:id="1" w:name="{name}"/></w:p>"#),
         "",
-    ));
-    let header = format!(
-        r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:p>{boxed}</w:p></w:hdr>"#
     );
-    let reference = r#"<w:headerReference w:type="default" r:id="rIdH"/>"#;
-    let body: String = (0..12)
-        .map(|_| format!(r#"<w:p><w:pPr><w:sectPr>{reference}</w:sectPr></w:pPr></w:p>"#))
-        .collect::<String>()
-        + &format!("<w:sectPr>{reference}</w:sectPr>");
-    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#;
-    let document = Document::from_bytes(package(
-        DOCUMENT,
-        &document_xml(&body),
-        &[
-            ("word/_rels/document.xml.rels", rels),
-            ("word/header1.xml", &header),
-        ],
-    ))
-    .unwrap();
-    let translation = translate(&document);
-    let with_header = translation
-        .document()
-        .sections()
-        .iter()
-        .filter(|section| !section.headers().primary().is_empty())
-        .count();
-    assert!((1..=4).contains(&with_header), "{with_header}");
+    // The box in the line and floating.
+    for boxed in [
+        super::text_box_layout::inline(&shape),
+        super::text_box_layout::floating(&shape),
+    ] {
+        let header = format!(
+            r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:p>{boxed}</w:p></w:hdr>"#
+        );
+        let reference = r#"<w:headerReference w:type="default" r:id="rIdH"/>"#;
+        let body: String = (0..12)
+            .map(|_| format!(r#"<w:p><w:pPr><w:sectPr>{reference}</w:sectPr></w:pPr></w:p>"#))
+            .collect::<String>()
+            + &format!("<w:sectPr>{reference}</w:sectPr>");
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#;
+        let document = Document::from_bytes(package(
+            DOCUMENT,
+            &document_xml(&body),
+            &[
+                ("word/_rels/document.xml.rels", rels),
+                ("word/header1.xml", &header),
+            ],
+        ))
+        .unwrap();
+        let translation = translate(&document);
+        let with_header = translation
+            .document()
+            .sections()
+            .iter()
+            .filter(|section| !section.headers().primary().is_empty())
+            .count();
+        assert!((1..=4).contains(&with_header), "{with_header}");
+    }
 }
