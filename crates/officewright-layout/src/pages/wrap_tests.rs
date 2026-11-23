@@ -1698,3 +1698,214 @@ fn wrapping_walks_the_lines_of_each_page_only() {
         assert!(long.1 <= short.1 * 5 / 2, "{wrap:?}: {short:?} {long:?}");
     }
 }
+
+/// The pages of `document`: each page's lines by where they start, their words, and the
+/// pictures it draws.
+fn drawn(document: &Document) -> Vec<Drawn> {
+    let (laid, _) = lay(document);
+    laid.pages
+        .iter()
+        .map(|page| {
+            let starts = lines(page).iter().map(|line| line.0).collect();
+            let pictures = page
+                .items
+                .iter()
+                .filter(|item| matches!(item, DisplayItem::Image(_)))
+                .count();
+            (starts, words_per_line(page), pictures)
+        })
+        .collect()
+}
+
+/// A picture of 100 by 50 at the margin, at its paragraph's top, wrapped square 10 pt from
+/// the text.
+fn small(document: &mut Document) -> Inline {
+    let wrapping = Wrapping::square([10.0, 0.0, 10.0, 0.0]);
+    picture(
+        document,
+        (100.0, 50.0),
+        at(0.0),
+        from_paragraph(0.0),
+        wrapping,
+    )
+}
+
+#[test]
+fn a_line_that_went_below_an_object_on_the_page_before_is_laid_out_again() {
+    // A picture 200 high wrapped top and bottom, 65 pt below the paragraph's top: its band
+    // is from 85 to 285. Lines 0 to 2 stay above it; line 3 goes below it, past the body,
+    // and widow control moves line 2 on with it. On page 2, line 3 keeps the gap it took on
+    // page 1 until it is laid out again there, where nothing is in its way: page 2 takes
+    // both, 9 and 3 words.
+    let document = document(|style, document| {
+        let wrapping = Wrapping {
+            wrap: Wrap::TopAndBottom,
+            side: WrapSide::BothSides,
+            distances: [0.0; 4],
+        };
+        let object = picture(
+            document,
+            (100.0, 200.0),
+            at(0.0),
+            from_paragraph(65.0),
+            wrapping,
+        );
+        vec![paragraph(style, vec![object], 30)]
+    });
+    assert_eq!(
+        drawn(&document),
+        [
+            (vec![20.0; 2], vec![9, 9], 1),
+            (vec![20.0; 2], vec![9, 3], 0)
+        ]
+    );
+}
+
+#[test]
+fn a_page_measures_the_lines_it_lays_out_again_not_those_of_the_page_before() {
+    // A picture 200 high wrapped top and bottom, 25 pt below the paragraph's top, its band
+    // from 45 to 245: the paragraph's second line goes below it, past the body, and starts
+    // page 2 with that gap; and one 100 wide wrapped square 10 pt from the text, after the
+    // 48th word, on page 2. Laid out again for page 2, its lines take the whole body, and
+    // the first three go around the second picture: 5, 5 and 5 words, then 9.
+    let document = document(|style, document| {
+        let wrapping = Wrapping {
+            wrap: Wrap::TopAndBottom,
+            side: WrapSide::BothSides,
+            distances: [0.0; 4],
+        };
+        let tall = picture(
+            document,
+            (100.0, 200.0),
+            at(0.0),
+            from_paragraph(25.0),
+            wrapping,
+        );
+        let small = small(document);
+        vec![
+            Paragraph::new(style)
+                .with_props(exact().with_widow_control(false))
+                .with_inlines([
+                    tall,
+                    words(48, style),
+                    small,
+                    Inline::text(" ".to_owned() + &["AAAA"; 60].join(" "), style),
+                ])
+                .into(),
+        ]
+    });
+    let pages = drawn(&document);
+    assert_eq!(
+        pages.get(1),
+        Some(&(
+            vec![130.0, 130.0, 130.0, 20.0, 20.0, 20.0, 20.0, 20.0],
+            vec![5, 5, 5, 9, 9, 9, 9, 9],
+            1
+        ))
+    );
+    assert_eq!(pages.get(2), Some(&(vec![20.0; 5], vec![9, 9, 9, 9, 3], 0)));
+
+    // A picture 400 high wrapped square at the paragraph's top: its lines take 5 words down
+    // to 420, so page 2 starts with lines 5 words wide. Laid out again for page 2, beside
+    // nothing, they take 9 words, and the second picture's lines go around it.
+    let document = self::document(|style, document| {
+        let wrapping = Wrapping::square([10.0, 0.0, 10.0, 0.0]);
+        let tall = picture(
+            document,
+            (100.0, 400.0),
+            at(0.0),
+            from_paragraph(0.0),
+            wrapping,
+        );
+        let small = small(document);
+        vec![
+            Paragraph::new(style)
+                .with_props(exact().with_widow_control(false))
+                .with_inlines([
+                    tall,
+                    words(86, style),
+                    small,
+                    Inline::text(" ".to_owned() + &["AAAA"; 60].join(" "), style),
+                ])
+                .into(),
+        ]
+    });
+    let pages = drawn(&document);
+    assert_eq!(
+        pages.get(1),
+        Some(&(
+            vec![130.0, 130.0, 130.0, 20.0, 20.0, 20.0, 20.0, 20.0],
+            vec![5, 5, 5, 9, 9, 9, 9, 9],
+            1
+        ))
+    );
+}
+
+#[test]
+fn a_picture_mid_way_in_the_last_line_is_left_out_where_its_page_does_not_draw_it() {
+    // 73 words, each an inline of its own, and the picture after the 71st. In the column
+    // the 73rd starts the ninth line, at 180; laid out around the picture, the text after it
+    // is mid-way in the tenth line. The picture goes on to page 2 with its line: page 1
+    // takes 7 lines of 9 words around nothing, and page 2 draws the picture, beside it the
+    // 10 words left.
+    let document = document(|style, document| {
+        let small = small(document);
+        let mut inlines: Vec<Inline> = Vec::new();
+        for word in 0..73 {
+            inlines.push(Inline::text("AAAA ", style));
+            if word == 70 {
+                inlines.push(small.clone());
+            }
+        }
+        vec![
+            Paragraph::new(style)
+                .with_props(exact().with_widow_control(false))
+                .with_inlines(inlines)
+                .into(),
+        ]
+    });
+    assert_eq!(
+        drawn(&document),
+        [
+            (vec![20.0; 7], vec![9; 7], 0),
+            (vec![130.0; 2], vec![5, 5], 1)
+        ]
+    );
+}
+
+#[test]
+fn wrapping_walks_no_line_past_a_page_break() {
+    // A paragraph of `count` words, each followed by a page break, in exact lines of
+    // 0.05 pt, 3,200 of which the body holds: each page takes one line, and the wrapping
+    // walks no line past its break, so that twice the words walk about twice the lines.
+    let walked = |count: usize| {
+        let document = document(|style, _| {
+            let props = ParagraphProps::default().with_spacing(
+                Spacing::default()
+                    .with_line(LineSpacing::Exact(Pt(0.05)))
+                    .with_before(Pt(0.0))
+                    .with_after(Pt(0.0)),
+            );
+            let inlines =
+                (0..count).flat_map(|_| [Inline::text("AAAA", style), Inline::page_break(style)]);
+            vec![
+                Paragraph::new(style)
+                    .with_props(props)
+                    .with_inlines(inlines)
+                    .into(),
+            ]
+        });
+        super::WRAP_WALKED.with(|walked| walked.set(0));
+        let book = book(vec![minimal()]);
+        let mut fonts = Fonts::new(&book);
+        let mut shaper = Shaper::new();
+        let laid = paginate(&document, &mut fonts, &mut shaper, 10_000).expect("pages");
+        (
+            laid.pages.len(),
+            super::WRAP_WALKED.with(std::cell::Cell::get),
+        )
+    };
+    let (short, long) = (walked(300), walked(600));
+    assert_eq!((short.0, long.0), (300, 600));
+    assert!(long.1 <= short.1 * 5 / 2, "{short:?} {long:?}");
+}

@@ -1668,8 +1668,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             // Each round leaves out an object more, so the rounds end. The objects of the lines
             // that cannot be on the page, as they stand, are left out from the first round
             // on, so that each round walks the lines of a page, whatever the paragraph's
-            // length: those from the first whose top is at or below the bottom of the body.
-            let mut limit = beyond(layout, first, top, self.body()?.bottom.0);
+            // length (`beyond`). The lines stand as they were laid out where they went
+            // before, which may take more room than the page gives them laid out again: where
+            // those laid out again for it hold an object left out so, the rounds start over
+            // with no object left out, once.
+            let mut guess = beyond(layout, first, top, self.body()?.bottom.0);
+            let mut limit = guess;
             let (fit, breaks, rest, taken) = loop {
                 self.wrap(
                     flowed,
@@ -1696,6 +1700,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                         .map(|(line, _)| line)
                 });
                 if let Some(line) = left_out {
+                    if guess.is_some() && limit == guess {
+                        (guess, limit) = (None, None);
+                        continue;
+                    }
                     (fit, breaks) = (line - first, false);
                 }
                 let taken = lines_taken(
@@ -1865,21 +1873,26 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             }
         }
         // Whether the lines from `first` on, as they are, meet an object, or went around one
-        // where they were laid out before, as far as they can be on the page: those after,
-        // laid out again where they go, are measured there.
+        // where they were laid out before: those that can be on the page, up to a page or
+        // column break, and the first that cannot, which a gap or a room from where it was
+        // laid out before may keep off the page only until it is laid out again for it. The
+        // lines after it are measured where they go.
         let mut y = top;
         let mut stale = false;
         let mut meets = false;
         for line in layout.lines.iter().skip(first) {
+            count_walked();
+            stale |= line.above.0 != 0.0 || !line.parts.is_empty();
             let line_top = y + line.above.0;
             if line_top >= body.bottom.0 - EPSILON && y > top {
                 break;
             }
-            count_walked();
-            stale |= line.above.0 != 0.0 || !line.parts.is_empty();
             meets |= exclusions
                 .iter()
                 .any(|exclusion| exclusion.meets(line_top, line_top + line.height.0));
+            if ends_page(line) {
+                break;
+            }
             y += line.advance();
         }
         if !meets && !stale {
@@ -3397,17 +3410,28 @@ fn wrapping_objects<'a>(
 
 /// The first item of the first line of `layout` from line `first` on, `top` its top down
 /// the page, that cannot be on a page whose body ends at `bottom`, as the lines stand: the
-/// first after line `first` whose top is at or below that bottom; `None` where all can be.
+/// first after line `first` whose top is at or below that bottom, or after a line that ends
+/// in a page or column break; `None` where all can be.
 fn beyond(layout: &ParagraphLayout, first: usize, top: f64, bottom: f64) -> Option<usize> {
     let mut y = top;
-    for line in layout.lines.iter().skip(first) {
+    for (index, line) in layout.lines.iter().enumerate().skip(first) {
         count_walked();
         if y + line.above.0 >= bottom - EPSILON && y > top {
             return line.pieces.first().map(item_of);
         }
+        if ends_page(line) {
+            let next = layout.lines.get(index + 1);
+            return next.and_then(|next| next.pieces.first()).map(item_of);
+        }
         y += line.advance();
     }
     None
+}
+
+/// Whether `line` ends in a page or column break, after which the next line starts the
+/// next page.
+fn ends_page(line: &crate::lines::Line) -> bool {
+    matches!(line.end, LineEnd::PageBreak | LineEnd::ColumnBreak)
 }
 
 /// The index of the first line of `layout` from line `from` on that starts at item `item`
