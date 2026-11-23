@@ -1906,9 +1906,9 @@ impl Cursor {
     /// reaches the end only after nothing of that kind (spaces, floating objects and a
     /// list label are not), as at the start of a line, where Word's render of
     /// `E-tab-margin-alone.docx` draws its dot leader alone on a line, from the line's
-    /// start to the margin. That the tabs to
-    /// centre and decimal stops past the end reach it too, in every mode, is a hypothesis
-    /// until a Word render. Two stops past the end are taken all the same:
+    /// start to the margin. That the tabs to centre and decimal stops past the end reach
+    /// it too, in every mode, is a hypothesis until a Word render. Two stops past the end
+    /// are taken all the same:
     ///
     /// - in mode 15, an end stop, at the end of the line: Word's render of
     ///   `E-tab-margin.docx` ends the text after a tab to an end stop 18 pt into the

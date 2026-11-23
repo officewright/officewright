@@ -873,8 +873,7 @@ fn a_list_label_keeps_its_tab_past_the_end_in_every_mode() -> TestResult {
     };
 
     // A label "1." and its tab, whose stop is past the end: no render shows it, so the
-    // label keeps its tab, which reaches the end, as before Word's renders of tabs past
-    // the margin were taken in (a hypothesis).
+    // label's tab reaches the end in every mode (a hypothesis).
     let book = book()?;
     let labelled = |mode, stop: Option<TabStop>| {
         let (mut document, style) = eleven_points_in(mode, "Liberation Sans");
@@ -913,6 +912,19 @@ fn a_list_label_keeps_its_tab_past_the_end_in_every_mode() -> TestResult {
         let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
         assert_eq!(lines, ["1.\t", "Item text more"], "{mode:?}");
     }
+    // Before mode 15 a tab of the item's own text right after the label takes the
+    // paragraph's own stop past the end, and the text after it goes there.
+    let (document, style, item) = labelled(CompatMode::Word2007, Some(own));
+    let inlines = vec![Inline::tab(style), Inline::text("Value more", style)];
+    let laid = fuzzing::lay_out(&book, &document, &item(inlines), 200.0);
+    let lines: Vec<&str> = laid.lines().iter().map(|line| line.text()).collect();
+    assert_eq!(lines, ["1.\t\tValue ", "more"]);
+    let ends: Vec<f64> = laid
+        .lines()
+        .first()
+        .map(|line| line.tabs().iter().map(|tab| tab.1).collect())
+        .unwrap_or_default();
+    assert_eq!(ends, [200.0, 300.0]);
     // In mode 15 the line does not end before it, in a column 30 pt wide.
     let (document, style, item) = labelled(CompatMode::Word2013, None);
     let laid = fuzzing::lay_out(
