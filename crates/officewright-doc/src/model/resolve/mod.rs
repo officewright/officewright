@@ -564,20 +564,21 @@ impl Formats<'_> {
     /// What the setting `overrideTableStyleFontSizeAndJustification` gives, once worked
     /// out: on or off. Written, it is on with an on value and off with any other; of
     /// several, the last counts. Not written, it is on from compatibility mode 15 and off
-    /// below.
+    /// below. Written without the value it requires, it counts as not written: our choice,
+    /// no render shows one.
     ///
-    /// Word writes a compatibility setting only when it is on, and writes this one on
-    /// when it saves a document of mode 15 that does not write it
-    /// (word-rules/E-table-style-size-12pt-none.docx and the copy Word saved of it). It
-    /// left the setting written 0 out of the copies it saved of
+    /// Word writes this setting, like the other settings of its group
+    /// (`enableOpenTypeFeatures`, `doNotFlipMirrorIndents`,
+    /// `differentiateMultirowTableHeaders`), only as 1: no copy Word saved in
+    /// tests/corpus/resaved writes one of them 0, and Word left written 0s of
+    /// `enableOpenTypeFeatures` and `differentiateMultirowTableHeaders` out of its copies
+    /// too (#344). It writes this one on when it saves a document of mode 15 that does not
+    /// write it (word-rules/E-table-style-size-12pt-none.docx and the copy Word saved of
+    /// it), and it left the setting written 0 out of the copies it saved of
     /// E-table-style-override-off-11pt.docx and -12pt.docx, also of mode 15: Word reads
-    /// the 0 as off, not as not written (#595). Those copies, and so Word's renders of the
-    /// two documents, which are exported from them, read as on, so they do not show how
-    /// Word lays out a setting written off from mode 15. LibreOffice's
-    /// tdf118947_tableStyle.docx (sw/qa/extras/ooxmlexport/data), of mode 15 with the
-    /// setting written 0 last, says that it shows the defaults' size and the table
-    /// style's right alignment over Normal's 12 pt and left, in Word's compatibility
-    /// mode.
+    /// the 0 as off, not as not written (#595). Those copies, and so Word's references of
+    /// the two documents, which are exported from them, read as on, so they do not show
+    /// how Word lays out a setting written off from mode 15.
     fn table_style_override(&mut self) -> TableStyleWins {
         if let Some(wins) = self.table_style_wins {
             return wins;
@@ -587,11 +588,10 @@ impl Formats<'_> {
             .compatibility_settings()
             .iter()
             .rev()
-            .find(|setting| setting.name() == "overrideTableStyleFontSizeAndJustification");
+            .find(|setting| setting.name() == "overrideTableStyleFontSizeAndJustification")
+            .and_then(|setting| setting.value());
         let on = match written {
-            Some(setting) => setting
-                .value()
-                .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on")),
+            Some(value) => matches!(value.trim(), "1" | "true" | "on"),
             None => settings.effective_compatibility_mode() >= super::CompatibilityMode::WORD_2013,
         };
         let wins = if on {

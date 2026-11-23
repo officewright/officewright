@@ -1344,6 +1344,8 @@ fn lets_the_table_style_win_over_the_default_style_s_size_and_left_when_the_sett
     // document defaults give 11 pt, as in those documents, so Normal's 11 pt is not its
     // own: lets_only_12_pt_give_way_in_mode_14_when_the_setting_is_not_written tests a
     // Normal of 11 pt that is.
+    // A setting written without its w:val.
+    const NO_VALUE: &str = "\u{0}";
     let case = |normal: &str, mode: u32, setting: &[&str], style: &str| {
         let styles = format!(
             r#"<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>{normal}</w:style><w:style w:type="paragraph" w:styleId="Child"><w:name w:val="Child"/><w:basedOn w:val="Normal"/></w:style><w:style w:type="table" w:styleId="Big"><w:name w:val="Big"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>"#
@@ -1351,8 +1353,13 @@ fn lets_the_table_style_win_over_the_default_style_s_size_and_left_when_the_sett
         let setting: String = setting
             .iter()
             .map(|value| {
+                let value = if *value == NO_VALUE {
+                    String::new()
+                } else {
+                    format!(r#" w:val="{value}""#)
+                };
                 format!(
-                    r#"<w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word" w:val="{value}"/>"#
+                    r#"<w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word"{value}/>"#
                 )
             })
             .collect();
@@ -1421,6 +1428,12 @@ fn lets_the_table_style_win_over_the_default_style_s_size_and_left_when_the_sett
         assert_eq!(case(left_12, mode, &["0", "1"], ""), normal_12, "{mode}");
         assert_eq!(case(left_12, mode, &["1", "0"], ""), table_wins, "{mode}");
     }
+    // Written without its value, as not written, also after a value: our choice, no render
+    // shows it.
+    assert_eq!(case(left_12, 15, &[NO_VALUE], ""), normal_12);
+    assert_eq!(case(left_12, 15, &["0", NO_VALUE], ""), normal_12);
+    assert_eq!(case(left_12, 14, &[NO_VALUE], ""), table_wins);
+    assert_eq!(case(left_12, 14, &["1", NO_VALUE], ""), table_wins);
     // Strict documents write `start` for `left`.
     let start_12 = r#"<w:pPr><w:jc w:val="start"/></w:pPr><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>"#;
     assert_eq!(case(start_12, 14, &[], ""), table_wins);
