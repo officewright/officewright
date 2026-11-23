@@ -1390,6 +1390,58 @@ mod tests {
     }
 
     #[test]
+    fn links_given_one_target_reach_the_pdf_s_links_as_that_very_target() {
+        use crate::ir::{Inline, PageSetup, Paragraph, RunFonts, RunStyle, Section};
+
+        // Two links to one URI, the second over lines and pages, given one `Arc`:
+        // rendering clones the document, itemizes and paints it, and every box it keeps
+        // for the PDF's links holds that `Arc`, so the URI is not copied per link or per
+        // box (#612).
+        let target = Arc::new(LinkTarget::Uri("https://example.com/".into()));
+        let book = crate::testing::book(vec![crate::testing::minimal()]);
+        let mut document = Document::default();
+        let style = document
+            .add_run_style(RunStyle::default().with_fonts(RunFonts::new("Officewright Test")));
+        let words = "AAAA ".repeat(3_000);
+        let paragraph = Paragraph::new(style).with_inlines([
+            Inline::link_start(Arc::clone(&target)),
+            Inline::text("A", style),
+            Inline::link_end(),
+            Inline::text(" ", style),
+            Inline::link_start(Arc::clone(&target)),
+            Inline::text(words, style),
+            Inline::link_end(),
+        ]);
+        document.add_section(
+            Section::new(PageSetup::new(PageSize::A4)).with_blocks([paragraph.into()]),
+        );
+        let copy = document.clone();
+        let mut fonts = Fonts::new(&book);
+        let painted = pages::paginate_into(
+            &copy,
+            &mut fonts,
+            &mut Shaper::new(),
+            DEFAULT_MAX_PAGES,
+            || PdfPages::new(&copy, pdf::Compression::None),
+        )
+        .expect("the pages");
+        let pages: HashSet<usize> = painted
+            .links
+            .waiting
+            .iter()
+            .map(|(page, ..)| *page)
+            .collect();
+        assert!(pages.len() > 1, "{pages:?}");
+        assert!(
+            painted
+                .links
+                .waiting
+                .iter()
+                .all(|(_, _, kept)| Arc::ptr_eq(kept, &target))
+        );
+    }
+
+    #[test]
     fn links_and_bookmarks_are_kept_to_the_page_and_the_clips_they_are_in() {
         let target = Arc::new(LinkTarget::Uri("u".into()));
         let link = |x: f64, y: f64, width: f64, height: f64| DisplayItem::Link {
