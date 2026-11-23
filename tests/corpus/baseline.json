@@ -1820,8 +1820,8 @@
     },
     "tests/corpus/word-rules/E-table-cell-margins-style.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9299,
-      "ssim_min": 0.9299,
+      "ssim_mean": 0.9835,
+      "ssim_min": 0.9835,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-cell-margins.docx": {
