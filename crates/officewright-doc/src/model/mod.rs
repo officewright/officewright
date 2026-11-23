@@ -3,6 +3,7 @@
 
 pub(crate) mod color;
 pub(crate) mod drawing;
+mod field;
 pub(crate) mod fonts;
 pub(crate) mod format;
 pub(crate) mod numbering;
@@ -28,6 +29,7 @@ pub use drawing::{
     Anchor, AnchorHorizontalAlign, AnchorVerticalAlign, Crop, Drawing, HorizontalReference, Image,
     Offsets, Picture, VerticalReference, WrapKind,
 };
+pub use field::{FieldInstruction, FieldToken, HyperlinkField};
 pub use fonts::{
     EmbeddedFontReference, EmbeddedFontStyle, FontDeclaration, FontFamily, FontPitch, FontSignature,
 };
@@ -69,9 +71,9 @@ pub use text_box::{
 pub use theme::{ColorScheme, FontCollection, FontScheme, SchemeColor, SystemColor, Theme};
 pub(crate) use views::kind_index;
 pub use views::{
-    Block, Break, BreakClear, BreakKind, ContentControl, FieldCharKind, HeaderFooter, Hyperlink,
-    Inline, Note, Opaque, Paragraph, Revision, RevisionKind, Run, RunContent, Section, SimpleField,
-    Table, TableCell, TableRow,
+    Block, BookmarkEnd, BookmarkStart, Break, BreakClear, BreakKind, ContentControl, FieldCharKind,
+    HeaderFooter, Hyperlink, Inline, Note, Opaque, Paragraph, Revision, RevisionKind, RowContent,
+    Run, RunContent, Section, SimpleField, Table, TableCell, TableContent, TableRow,
 };
 pub use vml::{EmbeddedObject, VmlDrawing, VmlPicture};
 use xml::{Element, Span, Strings, Token};
@@ -554,6 +556,11 @@ pub(crate) enum Kind {
     SimpleField {
         instruction: Box<str>,
     },
+    /// The start of a bookmark (`w:bookmarkStart`), kept as read: its view reads the
+    /// attributes when asked, so a bookmark costs no copy of its name.
+    BookmarkStart(Span),
+    /// The end of a bookmark (`w:bookmarkEnd`), kept as read.
+    BookmarkEnd(Span),
     /// A container the model sees through, such as `w:customXml` or `w:smartTag`: its
     /// children belong to its parent.
     Wrapper,
@@ -565,6 +572,10 @@ pub(crate) struct HyperlinkData {
     /// Interned: a target comes from the relationships part, and many links may name it.
     pub(crate) target: Option<xml::Sym>,
     pub(crate) anchor: Option<Box<str>>,
+    pub(crate) doc_location: Option<Box<str>>,
+    pub(crate) target_frame: Option<Box<str>>,
+    pub(crate) tooltip: Option<Box<str>>,
+    pub(crate) history: Option<bool>,
 }
 
 /// Where a content control sits, and so what it contains.
