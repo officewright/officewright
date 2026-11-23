@@ -887,17 +887,23 @@ def package_relationships(
             continue
         base = folder.rpartition("/")[0]
         source = posixpath.join(base, file[: -len(".rels")]) if base else file[: -len(".rels")]
+        # The source's folder as the entry writes it, for naming a target that is missing.
+        written_base = posixpath.dirname(posixpath.dirname(name.replace("\\", "/").lstrip("/")))
         entries = {}
         for rel in ElementTree.fromstring(data):
             if local_name(rel.tag) != "Relationship":
                 continue
             target, part = rel.get("Target", ""), None
             if rel.get("TargetMode") != "External":
-                path = target if target.startswith("/") else posixpath.join(base, target)
-                # Part names compare as part_key() compares them; a target the package does
-                # not have keeps its name, to be reported.
-                resolved = posixpath.normpath(part_key(path))
-                part = names.get(resolved, resolved)
+                # The target is resolved against the folder of its source as officewright-opc
+                # resolves it, each decoded once: base is already part_key()'s, so only the
+                # target goes through part_key() here. A target the package does not have is
+                # named as written, to be reported.
+                key = part_key(target)
+                absolute = target.replace("\\", "/").startswith("/")
+                resolved = posixpath.normpath(key if absolute else posixpath.join(base, key))
+                written = target.lstrip("/") if absolute else posixpath.join(written_base, target)
+                part = names.get(resolved, posixpath.normpath(written))
             entries[rel.get("Id", "")] = (rel.get("Type", ""), part)
         out[source] = entries
     return out

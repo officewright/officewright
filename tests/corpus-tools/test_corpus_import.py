@@ -980,7 +980,7 @@ class Import(unittest.TestCase):
         resaved = self.results / record["resaved_file"]
         font = "word/fonts/font1.odttf"
         spellings = (font, "%77ord/fonts/font1.odtt%66", "word\\fonts\\font1.odtt%66",
-                     "/word/fonts/font1.odtt%66")
+                     "/word/fonts/font1.odtt%66", "word%5Cfonts%5Cfont1.odtt%66")
         for spelling in spellings:
             for order in ("foreign first", "foreign last"):
                 with self.subTest(spelling=spelling, order=order):
@@ -3960,13 +3960,19 @@ class EmbeddedFonts(unittest.TestCase):
             b'<Relationship Id="rId99" Type="http://schemas.openxmlformats.org/officeDocument/'
             b'2006/relationships/font" Target="Media/%62.bin"/></Relationships>')
         related_encoded["word/media/b.bin"] = self.FOREIGN
-        # And an entry spelled otherwise than the part name [Content_Types].xml types.
+        # And an entry spelled otherwise than the part name [Content_Types].xml types, and a
+        # Default whose extension is percent-encoded.
         entry_encoded = dict(typed)
         entry_encoded["word/media/%61.bin"] = entry_encoded.pop("word/media/a.bin")
+        default_encoded = self.replaced("[Content_Types].xml", b"</Types>",
+                                        b'<Default Extension="F%4Ft" ContentType="font/ttf"/>'
+                                        b"</Types>")
+        default_encoded["word/media/c.fot"] = self.FOREIGN
         for parts, name in ((typed, "word/media/a.bin"), (related, "word/media/b.bin"),
                             (typed_encoded, "word/media/a.bin"),
                             (related_encoded, "word/media/b.bin"),
-                            (entry_encoded, "word/media/%61.bin")):
+                            (entry_encoded, "word/media/%61.bin"),
+                            (default_encoded, "word/media/c.fot")):
             self.assertEqual(self.check(parts)[0],
                              [f"{name} is an embedded font that no font table entry names"], name)
 
@@ -3980,6 +3986,11 @@ class EmbeddedFonts(unittest.TestCase):
              f"{entry} names no font relationship of its part"),
             (self.replaced(rels, b'Target="fonts/font1.odttf"', b'Target="fonts/gone.odttf"'),
              f"{entry} is in word/fonts/gone.odttf, which the package does not have"),
+            # A missing target is named as the package writes it.
+            (self.replaced(rels, b'Target="fonts/font1.odttf"', b'Target="Fonts/Gone.odttf"'),
+             f"{entry} is in word/Fonts/Gone.odttf, which the package does not have"),
+            (self.replaced(rels, b'Target="fonts/font1.odttf"', b'Target="/Fonts/G%6Fne.odttf"'),
+             f"{entry} is in Fonts/G%6Fne.odttf, which the package does not have"),
             (self.replaced(rels, b'Target="fonts/font1.odttf"',
                            b'Target="file:///font.ttf" TargetMode="External"'),
              f"{entry} is in a file outside the package, which the package does not have"),
@@ -3989,6 +4000,53 @@ class EmbeddedFonts(unittest.TestCase):
                 problems, fonts = self.check(parts)
                 self.assertIn(problem, problems)
                 self.assertEqual(fonts, [])
+
+    def test_a_target_is_resolved_against_its_folder_as_written(self):
+        # The font table in a folder whose name holds a percent-encoded "%" (%25), its font at
+        # f.bin beside it: a reader decodes the folder and the target once, so the font is
+        # <folder>/f.bin, which holds a synthetic foreign font. Decoding the folder twice
+        # would take the test font in the decoy folder for it.
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder)
+        foreign = rules.obfuscated(self.FOREIGN, self.key)
+        for written, decoy in (("d%2577", "dw"), ("word%252F", "word"), ("w%256Frd", "word")):
+            with self.subTest(written):
+                parts = {}
+                for name, data in self.parts.items():
+                    if name == "word/_rels/document.xml.rels":
+                        data = data.replace(b'Target="fontTable.xml"',
+                                            f'Target="../{written}/fontTable.xml"'.encode())
+                    elif name == "[Content_Types].xml":
+                        data = data.replace(b'"/word/fontTable.xml"',
+                                            f'"/{written}/fontTable.xml"'.encode())
+                    elif name == "word/_rels/fontTable.xml.rels":
+                        name = f"{written}/_rels/fontTable.xml.rels"
+                        data = data.replace(b'Target="fonts/font1.odttf"', b'Target="f.bin"')
+                    elif name == "word/fontTable.xml":
+                        name = f"{written}/fontTable.xml"
+                    elif name == self.PART:
+                        continue
+                    parts[name] = data
+                parts[f"{written}/f.bin"] = foreign
+                parts[f"{decoy}/f.bin"] = self.parts[self.PART]
+                path = folder / "copy.docx"
+                with zipfile.ZipFile(path, "w") as archive:
+                    for name, data in parts.items():
+                        archive.writestr(name, data)
+                self.assertEqual(self.check(importer.read_parts(path)), ([
+                    f"{written}/f.bin, the embedRegular of 'Liberation Mono', is not one of the "
+                    f"OFL test fonts THIRD-PARTY-NOTICES.md names (SHA-256 "
+                    f"{sha256(self.FOREIGN)})"], []))
+        # With the test font in that folder, the copy is accepted, the font found where the
+        # folder's name says.
+        parts[f"{written}/f.bin"] = self.parts[self.PART]
+        self.assertEqual(self.check(parts)[1], [importer.EmbeddedFont(
+            f"{written}/f.bin", "Liberation Mono", self.MONO, self.MONO_SHA256)])
+        # A target missing there is named in the folder as written.
+        rels = f"{written}/_rels/fontTable.xml.rels"
+        parts[rels] = parts[rels].replace(b'Target="f.bin"', b'Target="Gone.bin"')
+        self.assertIn(f"{written}/fontTable.xml: the embedRegular of 'Liberation Mono' is in "
+                      f"{written}/Gone.bin, which the package does not have", self.check(parts)[0])
 
 
 if __name__ == "__main__":
