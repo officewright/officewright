@@ -2406,6 +2406,21 @@ mod tests {
         let cut = word("AA \u{2060}AAAAAAAAAA", 38.3);
         assert_eq!(widths(&cut).first().copied(), Some(38.3));
         assert_eq!(cut.lines.len(), 2);
+        // A line too wide for want of a place to end keeps its spaces: no line may start
+        // with "!" (UAX #14 LB13), so the three spaces before it cannot end a line, and
+        // "   !", the font's missing glyph 5 pt wide, is 12.5 pt in 10 pt, more than a
+        // fifth of the spaces, 1.5 pt, makes up.
+        let held = word("   !AAAA", 10.0);
+        let line = held.lines.first().expect("a line");
+        assert!(line.overflow);
+        assert_eq!(widths(&held).first().copied(), Some(12.5));
+        let advances: Vec<f64> = line
+            .pieces
+            .iter()
+            .flat_map(|piece| piece.glyphs(&held.itemized))
+            .map(|glyph| glyph.advance.0)
+            .collect();
+        assert_eq!(advances, [2.5, 2.5, 2.5, 5.0]);
     }
 
     #[test]
