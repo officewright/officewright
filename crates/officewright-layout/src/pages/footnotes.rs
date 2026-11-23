@@ -916,26 +916,27 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// of the lines it takes start on the page; a note is cut only where it does not fit
     /// whole under the line that references it, after the notes of the lines of its cell
     /// down to that line, as in the body, and of those that a piece ending right under that
-    /// line takes in the other cells: those that need no more room, their cells' margins
-    /// and the borders below included, where a page may end in their paragraphs (widow
-    /// control, lines kept together); a band no page cuts under a line (of several rows, a
-    /// row of exact height or a row Word could not hold, `Prepared::cuts`) goes whole, its
-    /// notes cut where they do not fit under it; and then the piece takes nothing of that
-    /// note's cell after its paragraph (a later paragraph or a nested table), nor, in Word
-    /// 2013 and later, a line below the cut note's line that references a note after it,
-    /// which goes wholly to the next page; the line of the cut note, and the lines of other
-    /// cells beside it, keep the notes they reference after it, which go wholly to the next
-    /// page. Where that leaves out a line whose note cannot start even right under it, Word
-    /// 2013 and later cut the row above it, and older modes keep it, and the lines after it
-    /// as far as they fit above the notes before, but nothing of its cell after its
-    /// paragraph, and their notes go wholly to the next page. Word's render of
-    /// `E-footnote-table.docx` (mode 15) shows a row cut three lines higher for a note of
-    /// its third line. Hypotheses until a Word render: the older modes' rule in a table;
-    /// that with notes in more cells of a row the cut comes as high as their notes need in
-    /// every cell; that a note cut keeps nothing of the other cells from the page but, in
-    /// Word 2013 and later, a line below the cut note's line that references a later note,
-    /// as a later line of its own cell; and that a row's least height is filled only as far
-    /// as the room its notes leave.
+    /// line on a page of its own takes in the other cells: those that need no more room,
+    /// their cells' margins and the borders below included, down to where a page may end in
+    /// their paragraphs (widow control, lines kept together), or, where no cell can end
+    /// there, as many lines of each cell as fit, at least one, whatever widow control says;
+    /// a band no page cuts under a line (of several rows, a row of exact height or a row
+    /// Word could not hold, `Prepared::cuts`) goes whole, its notes cut where they do not
+    /// fit under it; and then the piece takes nothing of that note's cell after its
+    /// paragraph (a later paragraph or a nested table), nor, in Word 2013 and later, a line
+    /// below the cut note's line that references a note after it, which goes wholly to the
+    /// next page; the line of the cut note, and the lines of other cells beside it, keep
+    /// the notes they reference after it, which go wholly to the next page. Where that
+    /// leaves out a line whose note cannot start even right under it, Word 2013 and later
+    /// cut the row above it, and older modes keep it, and the lines after it as far as they
+    /// fit above the notes before, but nothing of its cell after its paragraph, and their
+    /// notes go wholly to the next page. Word's render of `E-footnote-table.docx` (mode 15)
+    /// shows a row cut three lines higher for a note of its third line. Hypotheses until a
+    /// Word render: the older modes' rule in a table; that with notes in more cells of a
+    /// row the cut comes as high as their notes need in every cell; that a note cut keeps
+    /// nothing of the other cells from the page but, in Word 2013 and later, a line below
+    /// the cut note's line that references a later note, as a later line of its own cell;
+    /// and that a row's least height is filled only as far as the room its notes leave.
     /// On a page that holds nothing else, where not even the least piece leaves its notes
     /// room to start, the least piece goes on and its notes wholly to the next page. The
     /// room found is the least that puts the piece found, so that a piece filled to a
@@ -1148,8 +1149,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 // takes: in the cut note's cell, those of every line down to that line, as
                 // the body weighs the lines of a paragraph above a note's; in the other
                 // cells, those of the lines that the piece of that room on a page of its
-                // own takes, which takes a cell's lines only where a page may end in its
-                // paragraphs (widow control, lines kept together).
+                // own takes: a cell's lines down to where a page may end in its paragraphs
+                // (widow control, lines kept together), or, where no cell can end there, as
+                // many lines of each cell as fit, at least one, whatever widow control
+                // says, as a page that holds nothing else puts them.
                 let beside: HashSet<NoteId> = prepared
                     .trial(laid, Some(under), (true, true))
                     .map(|piece| {

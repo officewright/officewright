@@ -13027,6 +13027,116 @@ mod tests {
     }
 
     #[test]
+    fn the_lines_of_other_cells_are_weighed_as_a_page_that_holds_nothing_else_puts_them() {
+        use crate::ir::{LineSpacing, NotePosition, RowHeight, Spacing};
+        // Re-check of #577. A line, then a row of at least 70 pt of two cells without widow
+        // control: the first of two lines, line 1 referencing a note of one line; the
+        // second of three, line 3 referencing one of three. Under line 3 the row's least
+        // height does not fit, so the piece of that room on this page puts nothing; on a
+        // page of its own it takes the first cell's lines, whose note is weighed: page 1
+        // takes the row whole, the first note and a line of the second.
+        let least = |mode: CompatMode| {
+            with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let off = || spacing(0.0, 0.0).with_widow_control(false);
+                    let a = footnote(document, (style, mark), 1, off());
+                    let b = footnote(document, (style, mark), 3, off());
+                    let row = Row::default()
+                        .with_height(RowHeight::AtLeast(Pt(70.0)))
+                        .with_cells([
+                            Cell::default().with_blocks([referencing(style, (0, 1), &[a], off())]),
+                            Cell::default().with_blocks([referencing(style, (2, 0), &[b], off())]),
+                        ]);
+                    vec![lines(style, 1, off()), table_with(vec![row], 0.0).into()]
+                },
+            )
+        };
+        // A line (or none), then a row of two cells of three lines with widow control:
+        // line 1 of the first references a note of one line, line 2 of the second one of
+        // `long` lines. No cell can end under line 2, so the piece on a page of its own
+        // takes a line of each cell, and the first note is weighed: page 1 takes the row
+        // whole, the first note and as much of the second as fits.
+        let widow = |mode: CompatMode, text: usize, long: usize| {
+            with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let a = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                    let b = footnote(document, (style, mark), long, spacing(0.0, 0.0));
+                    let row = Row::default().with_cells([
+                        Cell::default().with_blocks([referencing(
+                            style,
+                            (0, 2),
+                            &[a],
+                            spacing(0.0, 0.0),
+                        )]),
+                        Cell::default().with_blocks([referencing(
+                            style,
+                            (1, 1),
+                            &[b],
+                            spacing(0.0, 0.0),
+                        )]),
+                    ]);
+                    let mut blocks = Vec::new();
+                    if text > 0 {
+                        blocks.push(lines(style, text, spacing(0.0, 0.0)));
+                    }
+                    blocks.push(table_with(vec![row], 0.0).into());
+                    blocks
+                },
+            )
+        };
+        // At the top of the page: a cell of one exact 40.5 pt line referencing a note of one
+        // line, beside one of five lines without widow control, its line 2 referencing a note
+        // of five. The 40.5 pt line ends below line 2, so a piece ending under line 2 does
+        // not take it, and its note is not weighed: page 1 takes lines 1 and 2 of the
+        // second cell and its note whole.
+        let tall = |mode: CompatMode| {
+            with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let a = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                    let b = footnote(document, (style, mark), 5, spacing(0.0, 0.0));
+                    let exact = ParagraphProps::default()
+                        .with_spacing(Spacing::default().with_line(LineSpacing::Exact(Pt(40.5))));
+                    let row = Row::default().with_cells([
+                        Cell::default().with_blocks([referencing(style, (0, 0), &[a], exact)]),
+                        Cell::default().with_blocks([referencing(
+                            style,
+                            (1, 3),
+                            &[b],
+                            spacing(0.0, 0.0).with_widow_control(false),
+                        )]),
+                    ]);
+                    vec![table_with(vec![row], 0.0).into()]
+                },
+            )
+        };
+        for mode in [CompatMode::Word2013, CompatMode::Word2010] {
+            let (pages, _) = noted_pages(&least(mode));
+            assert_eq!(pages.len(), 2, "{mode:?}: {pages:?}");
+            assert_eq!(texts_and_notes(&pages, 0), (6, 2), "{mode:?}: {pages:?}");
+            let (pages, _) = noted_pages(&widow(mode, 1, 4));
+            assert_eq!(pages.len(), 2, "{mode:?}: {pages:?}");
+            assert_eq!(texts_and_notes(&pages, 0), (7, 3), "{mode:?}: {pages:?}");
+            let (pages, _) = noted_pages(&widow(mode, 0, 5));
+            assert_eq!(texts_and_notes(&pages, 0), (6, 4), "{mode:?}: {pages:?}");
+            let (pages, _) = noted_pages(&tall(mode));
+            assert_eq!(texts_and_notes(&pages, 0), (2, 5), "{mode:?}: {pages:?}");
+            assert_eq!(texts_and_notes(&pages, 1), (4, 1), "{mode:?}: {pages:?}");
+        }
+    }
+
+    #[test]
     fn a_row_word_could_not_hold_goes_whole_with_its_note_cut() {
         use crate::ir::NotePosition;
         // A line, then a row of 64 cells, more than Word holds, which no page cuts: its
