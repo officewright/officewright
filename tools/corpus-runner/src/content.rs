@@ -56,11 +56,16 @@ pub const KINDS: [(&str, &[&str]); 21] = [
         &["floating tables are laid out in the text"],
     ),
     ("vertical alignment", &["whatever its vertical alignment"]),
-    // An entry may say instead that the object is not drawn at all.
+    // Text wrapping the layout does not lay out: around the floating objects of headers,
+    // footers, notes, table cells and text boxes, tight or through, and around a floating
+    // object the translation leaves out. An entry may say instead that the object is not
+    // drawn at all.
     (
         "text wrapping",
         &[
             "text does not wrap around floating objects",
+            "text does not wrap around the floating objects of headers, footers and notes",
+            "text wrapped tight or through a floating object",
             "floating objects in table cells are not drawn",
             "floating objects in text boxes are not drawn",
         ],
@@ -306,6 +311,10 @@ const DIAGRAMS: [&str; 2] = [
     "http://schemas.openxmlformats.org/drawingml/2006/diagram",
     "http://purl.oclc.org/ooxml/drawingml/diagram",
 ];
+const PICTURES: [&str; 2] = [
+    "http://schemas.openxmlformats.org/drawingml/2006/picture",
+    "http://purl.oclc.org/ooxml/drawingml/picture",
+];
 
 /// The VML elements that draw a shape.
 const VML_SHAPES: [&str; 8] = [
@@ -397,11 +406,20 @@ enum Open {
         turned: bool,
         /// Its `id` and `o:spid`, which a box that is in no chain names as its next.
         names: [Option<String>; 2],
+        /// Whether the body's text wraps around it square or top and bottom, which the
+        /// layout lays out where it draws the shape.
+        wraps: bool,
     },
+    /// A floating DrawingML object: whether the body's text wraps around it square or top
+    /// and bottom, which the layout lays out where it draws the object, and whether it does:
+    /// a picture or a text box.
+    Anchor { wraps: bool, drawn: bool },
     /// An embedded object: whether it shows a VML preview picture or a drawing.
     Object { preview: bool, drawing: bool },
     /// The paragraphs of a text box.
     TextBox,
+    /// A table cell.
+    Cell,
     /// A section's properties.
     Section,
     /// The columns of a section, with the w:col elements counted.
@@ -540,6 +558,12 @@ fn start(
         .iter()
         .any(|element| matches!(element, Open::Object { .. }));
     let in_text_box = open.iter().any(|element| matches!(element, Open::TextBox));
+    // The layout lays out text wrapped square or top and bottom around the floating
+    // objects of the body (the main part, the only one read with its sections), but not
+    // around those of table cells and text boxes.
+    let wrap_laid_out = sections.is_some()
+        && !in_text_box
+        && !open.iter().any(|element| matches!(element, Open::Cell));
     if names.is_w(&name) {
         let parent_section = matches!(open.last(), Some(Open::Section));
         match local {
@@ -658,6 +682,7 @@ fn start(
             "tbl" if in_text_box => {
                 found.insert("text box content");
             }
+            "tc" => return Step::Open(Open::Cell),
             _ => {}
         }
     } else if in_any(&name, &names.a) {
@@ -669,6 +694,7 @@ fn start(
                 Some(uri) if DIAGRAMS.contains(&uri) => {
                     found.insert("SmartArt");
                 }
+                Some(uri) if PICTURES.contains(&uri) => drawn(open),
                 _ => {}
             },
             "blip" => {
@@ -706,6 +732,7 @@ fn start(
                 {
                     *text = true;
                 }
+                drawn(open);
             }
             "bodyPr" if !matches!(tag.attribute(None, "vert"), Some("horz") | None) => {
                 found.insert("vertical text");
@@ -719,19 +746,43 @@ fn start(
     } else if in_any(&name, &names.wp) {
         match local {
             "wrapSquare" | "wrapTight" | "wrapThrough" | "wrapTopAndBottom" => {
-                found.insert("text wrapping");
+                let laid_out = wrap_laid_out && matches!(local, "wrapSquare" | "wrapTopAndBottom");
+                match open
+                    .iter_mut()
+                    .rev()
+                    .find(|e| matches!(e, Open::Anchor { .. }))
+                {
+                    Some(Open::Anchor { wraps, .. }) if laid_out => *wraps = true,
+                    _ => {
+                        found.insert("text wrapping");
+                    }
+                }
             }
-            "anchor" if in_text_box => {
-                found.insert("text box content");
+            "anchor" => {
+                if in_text_box {
+                    found.insert("text box content");
+                }
+                return Step::Open(Open::Anchor {
+                    wraps: false,
+                    drawn: false,
+                });
             }
             _ => {}
         }
     } else if name.is(names.w10, "wrap") {
-        if matches!(
-            tag.attribute(None, "type"),
-            Some("square" | "tight" | "through" | "topAndBottom")
-        ) {
-            found.insert("text wrapping");
+        let kind = tag.attribute(None, "type");
+        if matches!(kind, Some("square" | "tight" | "through" | "topAndBottom")) {
+            let laid_out = wrap_laid_out && matches!(kind, Some("square" | "topAndBottom"));
+            match open
+                .iter_mut()
+                .rev()
+                .find(|e| matches!(e, Open::Vml { .. }))
+            {
+                Some(Open::Vml { wraps, .. }) if laid_out => *wraps = true,
+                _ => {
+                    found.insert("text wrapping");
+                }
+            }
         }
     } else if in_any(&name, &names.m) {
         if matches!(local, "oMath" | "oMathPara") {
@@ -754,6 +805,7 @@ fn start(
                     tag.attribute(None, "id").map(str::to_owned),
                     tag.attribute(Some(names.o), "spid").map(str::to_owned),
                 ],
+                wraps: false,
             });
         } else if local == "textbox" {
             let style = tag.attribute(None, "style").unwrap_or_default();
@@ -818,13 +870,24 @@ fn end(element: Open, found: &mut BTreeSet<&'static str>) {
             text,
             picture,
             turned,
+            wraps,
             ..
         } => {
             if text && turned {
                 found.insert("rotated text box");
             } else if !text && !picture {
                 found.insert("shape");
+                // The translation leaves the shape out, so the text does not go around it.
+                if wraps {
+                    found.insert("text wrapping");
+                }
             }
+        }
+        Open::Anchor {
+            wraps: true,
+            drawn: false,
+        } => {
+            found.insert("text wrapping");
         }
         Open::Object { preview, drawing } => {
             if drawing || !preview {
@@ -835,6 +898,17 @@ fn end(element: Open, found: &mut BTreeSet<&'static str>) {
             found.insert("columns");
         }
         _ => {}
+    }
+}
+
+/// Marks the floating DrawingML object being read, if any, as one the layout draws.
+fn drawn(open: &mut [Open]) {
+    if let Some(Open::Anchor { drawn, .. }) = open
+        .iter_mut()
+        .rev()
+        .find(|e| matches!(e, Open::Anchor { .. }))
+    {
+        *drawn = true;
     }
 }
 
@@ -1002,6 +1076,12 @@ mod tests {
         )
     }
 
+    fn anchored_text_box(wrap: &str) -> String {
+        format!(
+            r#"<w:p><w:r><w:drawing><wp:anchor>{wrap}<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp>{TEXT}</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#
+        )
+    }
+
     fn shape(content: &str) -> String {
         graphic(
             "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
@@ -1077,9 +1157,13 @@ mod tests {
                 r#"<w:tbl><w:tblPr><w:tblpPr w:tblpY="10"/></w:tblPr></w:tbl>"#.to_owned(),
                 "floating table",
             ),
-            (anchored("<wp:wrapSquare/>"), "text wrapping"),
-            (anchored("<wp:wrapTopAndBottom/>"), "text wrapping"),
-            (pict(r#"<v:rect><v:textbox/><w10:wrap type="square"/></v:rect>"#), "text wrapping"),
+            (anchored("<wp:wrapTight/>"), "text wrapping"),
+            (anchored("<wp:wrapThrough/>"), "text wrapping"),
+            (pict(r#"<v:rect><v:textbox/><w10:wrap type="tight"/></v:rect>"#), "text wrapping"),
+            (
+                format!("<w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>", anchored("<wp:wrapSquare/>")),
+                "text wrapping",
+            ),
             (
                 r#"<w:tbl><w:tr><w:tc><w:tcPr><w:textDirection w:val="btLr"/></w:tcPr></w:tc></w:tr></w:tbl>"#
                     .to_owned(),
@@ -1151,6 +1235,13 @@ mod tests {
                 r#"<a:blip r:embed="rId2"/>"#,
             ),
             anchored("<wp:wrapNone/>"),
+            // Text wrapped square or top and bottom around a picture or a text box of the
+            // body.
+            anchored("<wp:wrapSquare/>"),
+            anchored("<wp:wrapTopAndBottom/>"),
+            anchored_text_box("<wp:wrapSquare/>"),
+            pict(r#"<v:rect><v:textbox/><w10:wrap type="square"/></v:rect>"#),
+            pict(r#"<v:shape><v:imagedata r:id="rId2"/><w10:wrap type="topAndBottom"/></v:shape>"#),
             shape(TEXT),
             shape(&format!(r#"<wps:bodyPr vert="horz"/><wps:spPr><a:xfrm rot="0"/></wps:spPr>{TEXT}"#)),
             pict(r#"<v:rect style="rotation:0"><v:textbox style="layout-flow:horizontal"/></v:rect>"#),
@@ -1211,6 +1302,41 @@ mod tests {
         // Kinds come in the order of KINDS, each once.
         let both = format!("{}{}{}", section(r#"<w:cols w:num="3"/>"#), chart, chart);
         assert_eq!(kinds(&both), ["chart", "columns"]);
+    }
+
+    /// Text wrapped around a floating object is found where the layout does not lay it out:
+    /// in a header, a table cell or a text box, tight or through, and around an object the
+    /// translation leaves out; not around a picture or a text box of the body.
+    #[test]
+    fn text_wrapping_is_found_where_the_layout_does_not_lay_it_out() {
+        let square = anchored("<wp:wrapSquare/>");
+        assert_eq!(
+            scan_bytes(document("<w:p/>", &square, "")).unwrap().kinds,
+            ["text wrapping"]
+        );
+        assert!(kinds(&square).is_empty());
+        let in_box = shape(&format!(
+            "<wps:txbx><w:txbxContent>{square}</w:txbxContent></wps:txbx>"
+        ));
+        assert_eq!(kinds(&in_box), ["text wrapping", "text box content"]);
+        // A chart and a shape without text, which the translation leaves out.
+        let chart = r#"<w:p><w:r><w:drawing><wp:anchor><wp:wrapTopAndBottom/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"/></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#;
+        assert_eq!(kinds(chart), ["chart", "text wrapping"]);
+        let wsp = r#"<w:p><w:r><w:drawing><wp:anchor><wp:wrapSquare/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp/></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#;
+        assert_eq!(kinds(wsp), ["shape", "text wrapping"]);
+        assert_eq!(
+            kinds(&pict(r#"<v:rect><w10:wrap type="square"/></v:rect>"#)),
+            ["shape", "text wrapping"]
+        );
+        // Wrapping not inside an object the scan keeps counts too.
+        assert_eq!(
+            kinds(&pict(r#"<w10:wrap type="topAndBottom"/>"#)),
+            ["text wrapping"]
+        );
+        // A picture and a text box of the body, after a cell that wraps text around its own.
+        let cell = format!("<w:tbl><w:tr><w:tc>{square}</w:tc></w:tr></w:tbl>");
+        assert_eq!(kinds(&format!("{cell}{square}")), ["text wrapping"]);
+        assert!(kinds(&format!("<w:tbl><w:tr><w:tc/></w:tr></w:tbl>{square}")).is_empty());
     }
 
     /// Headers of a type Word does not show are not read: first-page ones without a title
@@ -1480,6 +1606,14 @@ mod tests {
                 "floating objects in table cells are not drawn yet",
             ),
             (
+                "text wrapping",
+                "text does not wrap around the floating objects of headers, footers and notes yet: it runs over or under them",
+            ),
+            (
+                "text wrapping",
+                "text wrapped tight or through a floating object goes around its frame, not its outline",
+            ),
+            (
                 "vertical text",
                 "vertical text in table cells is laid out horizontally",
             ),
@@ -1546,6 +1680,20 @@ mod tests {
                 "a text box shaped other than as a rectangle (a:prstGeom other than rect) is drawn as a rectangle",
             ),
             ("text wrapping", "paragraph borders are not drawn yet"),
+            // What the layout reports where the body's text goes around an object as Word's
+            // does not: the scan does not find that content, so these name none.
+            (
+                "text wrapping",
+                "text with room on both sides of a floating object goes on the side with more room only",
+            ),
+            (
+                "text wrapping",
+                "text above the paragraph that anchors a floating object does not wrap around it yet: it runs over or under it",
+            ),
+            (
+                "text wrapping",
+                "tables do not wrap around floating objects yet: a table that reaches one runs over or under it",
+            ),
             (
                 "shape",
                 "a text box shaped other than as a rectangle (a:prstGeom other than rect) is drawn as a rectangle",

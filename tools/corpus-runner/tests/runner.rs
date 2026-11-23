@@ -1119,8 +1119,9 @@ fn memory_is_measured_after_the_rendering() -> io::Result<()> {
 #[test]
 fn the_content_of_a_rendered_document_is_checked_against_its_report() -> io::Result<()> {
     let corpus = Corpus::new("content")?;
+    // Text wrapped tight, which the layout wraps around the frame and reports.
     let wrapped = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/corpus/word-rules/E-wrap-square.docx");
+        .join("../../tests/corpus/word-rules/E-wrap-tight.docx");
     std::fs::copy(wrapped, corpus.dir.join("docs/wrapped.docx"))?;
     let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fonts");
     let (code, output) = corpus.run(

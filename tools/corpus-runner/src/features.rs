@@ -28,7 +28,7 @@ pub enum Class {
 /// Words of the messages of `feature-unsupported` entries, each with the required feature
 /// it degrades, or `None` for an entry that degrades none. The first line whose words the
 /// message contains classes it.
-pub const MESSAGES: [(&str, Option<&str>); 123] = [
+pub const MESSAGES: [(&str, Option<&str>); 130] = [
     // Paragraphs: borders and shading (phase 1).
     ("paragraph borders are not drawn", Some("paragraph borders")),
     ("a shading pattern of stripes or crosses", Some("shading")),
@@ -102,6 +102,19 @@ pub const MESSAGES: [(&str, Option<&str>); 123] = [
     ),
     // Not required: what the plan leaves for later, or for after the first release.
     ("text does not wrap around floating objects", None),
+    (
+        "text does not wrap around the floating objects of headers",
+        None,
+    ),
+    ("text wrapped tight or through a floating object", None),
+    ("text with room on both sides of a floating object", None),
+    (
+        "text above the paragraph that anchors a floating object",
+        None,
+    ),
+    ("tables do not wrap around floating objects", None),
+    ("a line beside a floating object whose room changes", None),
+    ("go around a floating object it positions from a line", None),
     ("text in columns is laid out in one column", None),
     ("a continuous section with another page size", None),
     ("the document grid", None),
@@ -268,6 +281,48 @@ mod tests {
             ),
             (
                 "text does not wrap around floating objects yet: it runs over or under them",
+                Class::NotRequired,
+            ),
+            (
+                "text does not wrap around the floating objects of headers, footers and notes \
+                 yet: it runs over or under them",
+                Class::NotRequired,
+            ),
+            (
+                "text wrapped tight or through a floating object goes around its frame, not its \
+                 outline",
+                Class::NotRequired,
+            ),
+            (
+                "text with room on both sides of a floating object goes on the side with more \
+                 room only",
+                Class::NotRequired,
+            ),
+            (
+                "text above the paragraph that anchors a floating object does not wrap around \
+                 it yet: it runs over or under it",
+                Class::NotRequired,
+            ),
+            (
+                "tables do not wrap around floating objects yet: a table that reaches one runs \
+                 over or under it",
+                Class::NotRequired,
+            ),
+            (
+                "a line beside a floating object whose room changes its height is fitted to the \
+                 room of the tallest it took",
+                Class::NotRequired,
+            ),
+            (
+                "the lines of a paragraph go around a floating object it positions from a line \
+                 or a character as if it were positioned from its first line and the column's \
+                 start",
+                Class::NotRequired,
+            ),
+            (
+                "text does not wrap around floating objects yet: where a shape or drawing that \
+                 is left out floats with text wrapping around it, the text stands as if it were \
+                 not there, here and wherever else the document has one",
                 Class::NotRequired,
             ),
             (
