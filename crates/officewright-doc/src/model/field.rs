@@ -15,7 +15,9 @@ use std::fmt;
 /// - A switch is a backslash and `!` or one or two Latin letters, such as `\l` or EQ's
 ///   `\co`, or a formatting switch: `\*`, `\#` or `\@`. Its letters are read in any case
 ///   (§17.16.1: `\b` and `\B` are the same switch). A backslash before anything else
-///   starts an argument.
+///   starts an argument. A letter right after a switch's first letter is its second, so
+///   `\lIntro` is the switch `\lI` and the argument `ntro`: what Word reads there is not
+///   known, and no instruction of the corpora writes a switch against a word.
 /// - Word requires white space after the field's name (MS-OI29500 §17.16.1(a)), which
 ///   the name therefore ends at.
 /// - Word allows at most 10 formatting and 10 other switches in a field, and one picture
