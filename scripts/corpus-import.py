@@ -1925,8 +1925,9 @@ def top_left(box: list[float], x: float, y: float) -> tuple[float, float]:
 
 def destination(objects: PdfObjects, value: object, page_numbers: dict[str, int],
                 boxes: dict[str, list[float]]) -> dict | None:
-    """A destination: an explicit one ([page /XYZ left top zoom] and the other fits), as its
-    page, fit and the place it names in points from the top left, or a named one."""
+    """A destination: an explicit one ([page /XYZ left top zoom] and the other fits) on one of
+    the PDF's pages, as its page, fit and the place it names in points from the top left, or a
+    named one; None for anything else."""
     found = objects.get(value)
     if isinstance(found, dict) and "/D" in found:
         found = objects.get(found["/D"])
@@ -1944,8 +1945,8 @@ def destination(objects: PdfObjects, value: object, page_numbers: dict[str, int]
         return None
     fit = objects.get(found[1]) if len(found) > 1 else None
     out: dict = {"page": page, "fit": fit[1:] if isinstance(fit, str) else None}
-    box = boxes.get(page_ref) if isinstance(page_ref, str) else None
-    if fit == "/XYZ" and box is not None:
+    box = boxes[page_ref]
+    if fit == "/XYZ":
         left = objects.number(found[2]) if len(found) > 2 else None
         top = objects.number(found[3]) if len(found) > 3 else None
         x, y = top_left(box, left if left is not None else box[0],
@@ -1985,7 +1986,8 @@ def named_destinations(objects: PdfObjects, page_numbers: dict[str, int],
                        boxes: dict[str, list[float]]) -> list[dict]:
     """The named destinations of the catalog's /Dests dictionary and of the /Dests name
     tree of its /Names, in name order. A value that is no destination array or dictionary
-    (ISO 32000-1 12.3.2.3), such as another name, is refused."""
+    (ISO 32000-1 12.3.2.3), such as another name, and one whose page is none of the PDF's
+    pages, are refused."""
     trailer = objects.objects.get("trailer", {}).get("value", {})
     catalog = objects.dict(trailer.get("/Root") if isinstance(trailer, dict) else None)
     found: dict[str, object] = {}
