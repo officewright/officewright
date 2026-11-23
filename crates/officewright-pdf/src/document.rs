@@ -2446,6 +2446,10 @@ mod tests {
             format!("{checked:?}"),
             "CheckedLinkTarget { kind: \"uri\", bytes: 24 }"
         );
+        assert_eq!(
+            format!("{top:?}"),
+            "CheckedLinkTarget { kind: \"destination\", bytes: 3 }"
+        );
         // The file writes the URI once, and finds an action by hashing a target only for
         // the three that the links do not share: the first, the equal URI and "top", whose
         // name it looks up once among the destinations.
