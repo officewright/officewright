@@ -1681,3 +1681,88 @@ fn the_text_after_a_page_break_is_what_its_page_leaves_out() {
         [(vec![130.0], vec![5], 1), (vec![20.0], vec![5], 0)]
     );
 }
+
+#[test]
+fn a_page_whose_first_line_does_not_fit_goes_around_an_object_it_takes_in() {
+    // Lines of 170 pt, taller than the body, beside a picture 150 wide, where they take 3
+    // words: no line fits a page, which takes one all the same. Laid out again for page 2,
+    // beside nothing, its line takes in `small`, which it draws: the line goes around it, 5
+    // words from 130, and nothing is reported.
+    let document = document(|style, document| {
+        let wrapping = Wrapping::square([10.0, 0.0, 10.0, 0.0]);
+        let a = picture(
+            document,
+            (150.0, 400.0),
+            at(0.0),
+            from_paragraph(0.0),
+            wrapping,
+        );
+        let small = small(document);
+        let props = ParagraphProps::default()
+            .with_spacing(
+                Spacing::default()
+                    .with_line(LineSpacing::Exact(Pt(170.0)))
+                    .with_before(Pt(0.0))
+                    .with_after(Pt(0.0)),
+            )
+            .with_widow_control(false);
+        vec![
+            Paragraph::new(style)
+                .with_props(props)
+                .with_inlines([
+                    a,
+                    words(8, style),
+                    small,
+                    Inline::text(" ".to_owned() + &["AAAA"; 20].join(" "), style),
+                ])
+                .into(),
+        ]
+    });
+    let (_, report) = lay(&document);
+    let messages = messages(&report);
+    assert!(
+        !messages.iter().any(|m| m.contains("does not go around")),
+        "{messages:?}"
+    );
+    let pages = drawn(&document);
+    assert_eq!(pages.get(1), Some(&(vec![130.0], vec![5], 1)));
+}
+
+#[test]
+fn a_page_goes_around_an_object_at_the_first_item_it_left_out() {
+    // A picture 200 high wrapped top and bottom 65 pt below the paragraph's top, 36 words
+    // and a line break, then `small` and 5 words: page 2's first limit is `small`'s item,
+    // which the page's lines take in laid out again; they go around it, 5, 4 and 5 words.
+    let document = document(|style, document| {
+        let wrapping = Wrapping {
+            wrap: Wrap::TopAndBottom,
+            side: WrapSide::BothSides,
+            distances: [0.0; 4],
+        };
+        let t = picture(
+            document,
+            (100.0, 200.0),
+            at(0.0),
+            from_paragraph(65.0),
+            wrapping,
+        );
+        let small = small(document);
+        vec![
+            Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines([
+                    t,
+                    words(36, style),
+                    Inline::line_break(crate::ir::BreakClear::None, style),
+                    small,
+                    words(5, style),
+                ])
+                .into(),
+        ]
+    });
+    let pages = drawn(&document);
+    assert_eq!(
+        pages.get(1).map(|page| (&page.1, page.2)),
+        Some((&vec![5, 4, 5], 1))
+    );
+}
