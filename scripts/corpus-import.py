@@ -14,10 +14,10 @@ under WSL). For every <name>.json there the script checks that
     (a second check, independent of the one on Windows);
   - the re-saved copy names no language and no number format the input did not have
     (they would say where Word ran), unless --allow-locale accepts them;
-  - the re-saved copy names no ZIP entry twice, and embeds no font but the OFL test fonts
-    that THIRD-PARTY-NOTICES.md names with their SHA-256: every font part is reached by a
-    font table entry and is such a font de-obfuscated with the entry's key or as stored
-    (embedded_fonts, #145);
+  - the re-saved copy names no part twice (its entry names compared as OPC compares part
+    names, part_key), and embeds no font but the OFL test fonts that THIRD-PARTY-NOTICES.md
+    names with their SHA-256: every font part is reached by a font table entry and is such a
+    font de-obfuscated with the entry's key or as stored (embedded_fonts, #145);
   - Word kept the compatibility mode of the input, and pdfinfo and pdftotext count the pages
     Word counted.
 
@@ -75,8 +75,10 @@ import shutil
 import struct
 import subprocess
 import sys
+import string
 import tempfile
 import unicodedata
+import urllib.parse
 import zipfile
 import zlib
 from dataclasses import dataclass
@@ -337,21 +339,32 @@ def docx_privacy_problems(path: Path) -> list[str]:
     return problems
 
 
+ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def part_key(name: str) -> str:
+    """An entry name as OPC compares part names (ECMA-376 Part 2), and as a lenient reader
+    (officewright-opc, ZIP tools on Windows) reads it: percent-decoded, a backslash read as a
+    slash, without a leading slash, and without regard to ASCII case. Two entries with one
+    key are one part to such a reader."""
+    decoded = urllib.parse.unquote(name.replace("\\", "/")).replace("\\", "/")
+    return decoded.lstrip("/").translate(ASCII_LOWER)
+
+
 def read_parts(path: Path) -> dict[str, bytes]:
-    """The parts of a package by name. A package whose ZIP names an entry twice, the names
-    compared without case as OPC compares part names (ECMA-376 Part 2), is refused
-    (ValueError): only one of the entries would be checked, and the file is committed with
-    both."""
+    """The parts of a package by name. A package whose ZIP names a part twice, the names
+    compared as part_key() compares them, is refused (ValueError): only one of the entries
+    would be checked, while the file is committed with both."""
     parts: dict[str, bytes] = {}
     seen: dict[str, str] = {}
     with zipfile.ZipFile(path) as archive:
         for info in archive.infolist():
             name = info.filename
-            first = seen.get(name.casefold())
+            first = seen.get(part_key(name))
             if first is not None:
                 also = "" if first == name else f", also as {name}"
                 raise ValueError(f"{path.name} names the entry {first} twice{also}")
-            seen[name.casefold()] = name
+            seen[part_key(name)] = name
             parts[name] = archive.read(info)
     return parts
 
@@ -863,13 +876,14 @@ def font_program(data: bytes, key: bytes) -> bytes:
 def package_relationships(
     parts: dict[str, bytes],
 ) -> dict[str, dict[str, tuple[str, str | None]]]:
-    """The relationships of every part that has some ("" for the package), by id: the type
-    and the part it leads to, as named in the package, or None for a target outside it."""
-    names = {name.casefold(): name for name in parts}
+    """The relationships of every part that has some, by the part_key() of its name ("" for
+    the package), and by id: the type and the part it leads to, as named in the package, or
+    None for a target outside it."""
+    names = {part_key(name): name for name in parts}
     out: dict[str, dict[str, tuple[str, str | None]]] = {}
     for name, data in parts.items():
-        folder, _, file = name.rpartition("/")
-        if not (file.casefold().endswith(".rels") and folder.rpartition("/")[2] == "_rels"):
+        folder, _, file = part_key(name).rpartition("/")
+        if not (file.endswith(".rels") and folder.rpartition("/")[2] == "_rels"):
             continue
         base = folder.rpartition("/")[0]
         source = posixpath.join(base, file[: -len(".rels")]) if base else file[: -len(".rels")]
@@ -879,11 +893,11 @@ def package_relationships(
                 continue
             target, part = rel.get("Target", ""), None
             if rel.get("TargetMode") != "External":
-                path = target[1:] if target.startswith("/") else posixpath.join(base, target)
-                # Part names match without case (ECMA-376 Part 2); a target the package does
+                path = target if target.startswith("/") else posixpath.join(base, target)
+                # Part names compare as part_key() compares them; a target the package does
                 # not have keeps its name, to be reported.
-                resolved = posixpath.normpath(path)
-                part = resolved if resolved in parts else names.get(resolved.casefold(), resolved)
+                resolved = posixpath.normpath(part_key(path))
+                part = names.get(resolved, resolved)
             entries[rel.get("Id", "")] = (rel.get("Type", ""), part)
         out[source] = entries
     return out
@@ -892,23 +906,23 @@ def package_relationships(
 def font_typed_parts(parts: dict[str, bytes]) -> set[str]:
     """The parts that [Content_Types].xml gives a font's content type (one that names a
     font and is not XML: obfuscatedFont, x-fontdata, x-font-ttf, font/ttf ...)."""
-    data = next((d for n, d in parts.items() if n.casefold() == "[content_types].xml"), None)
+    data = next((d for n, d in parts.items() if part_key(n) == "[content_types].xml"), None)
     if data is None:
         return set()
     defaults, overrides = {}, {}
     for entry in ElementTree.fromstring(data):
         kind = entry.get("ContentType", "").casefold()
         if local_name(entry.tag) == "Default":
-            defaults[entry.get("Extension", "").casefold()] = kind
+            defaults[part_key(entry.get("Extension", ""))] = kind
         elif local_name(entry.tag) == "Override":
-            overrides[entry.get("PartName", "").lstrip("/").casefold()] = kind
+            overrides[part_key(entry.get("PartName", ""))] = kind
 
     def font_type(kind: str) -> bool:
         return "font" in kind and not kind.endswith("xml")
 
     def kind_of(name: str) -> str:
-        default = defaults.get(name.rpartition(".")[2].casefold(), "")
-        return overrides.get(name.casefold(), default)
+        key = part_key(name)
+        return overrides.get(key, defaults.get(key.rpartition(".")[2], ""))
 
     return {name for name in parts if font_type(kind_of(name))}
 
@@ -922,12 +936,12 @@ def embedded_fonts(
     through a font relationship of its part to a part of the package, and that part's bytes,
     de-obfuscated with its w:fontKey (or as they are, for a part stored plain), must be an
     allowed font. A part that holds a font otherwise (under word/fonts/, the target of a
-    font relationship, or of a font content type) that no such element names is refused,
-    since nothing says how to read it."""
+    font relationship, or of a font content type, its name read as part_key() reads it) that
+    no such element names is refused, since nothing says how to read it."""
     problems: list[str] = []
     fonts: list[EmbeddedFont] = []
     relationships = package_relationships(parts)
-    holding = {name for name in parts if name.casefold().startswith("word/fonts/")}
+    holding = {name for name in parts if part_key(name).startswith("word/fonts/")}
     holding |= font_typed_parts(parts)
     for entries in relationships.values():
         for kind, target in entries.values():
@@ -935,7 +949,7 @@ def embedded_fonts(
                 holding.add(target)
     named = set()
     for name, data in parts.items():
-        if not name.casefold().endswith(".xml"):
+        if not part_key(name).endswith(".xml"):
             continue
         for font in ElementTree.fromstring(data).iter():
             if local_name(font.tag) != "font":
@@ -947,7 +961,7 @@ def embedded_fonts(
                     continue
                 what = f"{name}: the {face} of {family!r}"
                 attributes = {local_name(k): v for k, v in element.attrib.items()}
-                rel = relationships.get(name, {}).get(attributes.get("id", ""))
+                rel = relationships.get(part_key(name), {}).get(attributes.get("id", ""))
                 if rel is None or rel[0] not in FONT_RELATIONSHIPS:
                     problems.append(f"{what} names no font relationship of its part")
                     continue

@@ -971,33 +971,44 @@ class Import(unittest.TestCase):
     def test_refuses_a_copy_that_names_a_font_part_twice(self):
         # A dict of the parts would keep one entry of a repeated name and check only it,
         # while the copy is committed with both: a synthetic foreign font, obfuscated with the
-        # document's key, beside the test font, in either order.
+        # document's key, beside the test font, in either order, under Word's name or under
+        # one that a reader takes for it (percent-encoded, with backslashes, with a leading
+        # slash), which changes both the folder and the extension.
         doc, record = self.embedded_font_result()
         key = rules.EMBEDDED_MONO.key
         foreign = rules.obfuscated(sfnt("ForeignSans", "Foreign Sans"), key)
         resaved = self.results / record["resaved_file"]
         font = "word/fonts/font1.odttf"
-        for order in ("foreign first", "foreign last"):
-            with self.subTest(order):
-                entries = []
-                for name, data in rules.parts(doc):
-                    if name == font and order == "foreign first":
-                        entries += [(name, foreign), (name, data)]
-                    elif name == font:
-                        entries += [(name, data), (name, foreign)]
-                    else:
-                        entries.append((name, data))
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")  # zipfile warns of the repeated name
-                    with zipfile.ZipFile(resaved, "w") as archive:
-                        for name, data in entries:
-                            archive.writestr(name, data)
-                record["resaved_sha256"] = sha256(resaved.read_bytes())
-                self.save_record(record)
-                message = self.refused()
-                self.assertIn(f"{doc.name}.docx: cannot read a package: {resaved.name} names "
-                              f"the entry {font} twice", message)
-                self.assertFalse((self.corpus / "resaved").exists())
+        spellings = (font, "%77ord/fonts/font1.odtt%66", "word\\fonts\\font1.odtt%66",
+                     "/word/fonts/font1.odtt%66")
+        for spelling in spellings:
+            for order in ("foreign first", "foreign last"):
+                with self.subTest(spelling=spelling, order=order):
+                    entries = []
+                    for name, data in rules.parts(doc):
+                        if name == font and order == "foreign first":
+                            entries += [(spelling, foreign), (name, data)]
+                        elif name == font:
+                            entries += [(name, data), (spelling, foreign)]
+                        else:
+                            entries.append((name, data))
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")  # zipfile warns of a repeated name
+                        with zipfile.ZipFile(resaved, "w") as archive:
+                            for name, data in entries:
+                                archive.writestr(name, data)
+                    # The names as the ZIP holds them (zipfile on Windows writes a backslash
+                    # as a slash).
+                    with zipfile.ZipFile(resaved) as archive:
+                        first, second = [n for n in archive.namelist()
+                                         if importer.part_key(n) == font]
+                    also = "" if first == second else f", also as {second}"
+                    record["resaved_sha256"] = sha256(resaved.read_bytes())
+                    self.save_record(record)
+                    message = self.refused()
+                    self.assertIn(f"{doc.name}.docx: cannot read a package: {resaved.name} "
+                                  f"names the entry {first} twice{also}", message)
+                    self.assertFalse((self.corpus / "resaved").exists())
 
     def test_refuses_a_page_count_pdftotext_does_not_find(self):
         self.bbox = BBOX.replace('<page width="595.320000" height="841.920000"></page>', "", 1)
@@ -3887,7 +3898,29 @@ class EmbeddedFonts(unittest.TestCase):
                     importer.read_parts(path)
                 self.assertEqual(str(caught.exception),
                                  f"copy.docx names the entry {first} twice{also}")
-        # Names that differ otherwise are read.
+        # A repeated part that holds no font is refused as well: a repeated relationships
+        # part could lead the font table's entry to one font while the other leads it to a
+        # foreign one.
+        types, rels = "[Content_Types].xml", "word/_rels/fontTable.xml.rels"
+        for original, name in ((types, types), (rels, rels), (types, "[content_types].XML"),
+                               (rels, "word/_rels/fontTable.xml.rel%73")):
+            with self.subTest(name):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")  # zipfile warns of the repeated name
+                    with zipfile.ZipFile(path, "w") as archive:
+                        for part, data in self.parts.items():
+                            archive.writestr(part, data)
+                        archive.writestr(name, self.parts[original])
+                with self.assertRaises(ValueError) as caught:
+                    importer.read_parts(path)
+                also = "" if name == original else f", also as {name}"
+                self.assertEqual(str(caught.exception),
+                                 f"copy.docx names the entry {original} twice{also}")
+        # Names that differ otherwise are read, and Word's names of the rule document.
+        with zipfile.ZipFile(path, "w") as archive:
+            for part, data in self.parts.items():
+                archive.writestr(part, data)
+        self.assertEqual(importer.read_parts(path), self.parts)
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr(self.PART, foreign)
             archive.writestr("word/fonts/font2.odttf", foreign)
@@ -3895,11 +3928,13 @@ class EmbeddedFonts(unittest.TestCase):
                          {self.PART: foreign, "word/fonts/font2.odttf": foreign})
 
     def test_a_font_part_no_entry_names_is_refused_wherever_it_is(self):
-        # Even the test font: nothing says how to read a part no entry names.
-        for name in ("word/fonts/font2.odttf", "word/Fonts/font1.odttf", "word/FONTS/font2.dat"):
+        # Even the test font: nothing says how to read a part no entry names. A name read as
+        # OPC reads part names (part_key) is under word/fonts/, also when its content type is
+        # not a font's.
+        for name in ("word/fonts/font2.odttf", "word/Fonts/font9.odttf", "word/FONTS/font2.dat",
+                     "%77ord/fonts/font2.dat", "word\\fonts\\font2.dat", "/word/fonts/font2.dat"):
             parts = dict(self.parts)
             parts[name] = self.parts[self.PART]
-            # A part of word/fonts/ in any case, also when its content type is not a font's.
             parts["[Content_Types].xml"] = parts["[Content_Types].xml"].replace(
                 b"</Types>", b'<Override PartName="/word/FONTS/font2.dat" '
                 b'ContentType="application/octet-stream"/></Types>')
@@ -3915,7 +3950,23 @@ class EmbeddedFonts(unittest.TestCase):
             b'<Relationship Id="rId99" Type="http://schemas.openxmlformats.org/officeDocument/'
             b'2006/relationships/font" Target="media/b.bin"/></Relationships>')
         related["word/media/b.bin"] = self.FOREIGN
-        for parts, name in ((typed, "word/media/a.bin"), (related, "word/media/b.bin")):
+        # The same with the names spelled otherwise in [Content_Types].xml and the target.
+        typed_encoded = self.replaced("[Content_Types].xml", b"</Types>",
+                                      b'<Override PartName="/WORD/media/%61.bin" ContentType='
+                                      b'"application/x-font-ttf"/></Types>')
+        typed_encoded["word/media/a.bin"] = self.FOREIGN
+        related_encoded = self.replaced(
+            "word/_rels/document.xml.rels", b"</Relationships>",
+            b'<Relationship Id="rId99" Type="http://schemas.openxmlformats.org/officeDocument/'
+            b'2006/relationships/font" Target="Media/%62.bin"/></Relationships>')
+        related_encoded["word/media/b.bin"] = self.FOREIGN
+        # And an entry spelled otherwise than the part name [Content_Types].xml types.
+        entry_encoded = dict(typed)
+        entry_encoded["word/media/%61.bin"] = entry_encoded.pop("word/media/a.bin")
+        for parts, name in ((typed, "word/media/a.bin"), (related, "word/media/b.bin"),
+                            (typed_encoded, "word/media/a.bin"),
+                            (related_encoded, "word/media/b.bin"),
+                            (entry_encoded, "word/media/%61.bin")):
             self.assertEqual(self.check(parts)[0],
                              [f"{name} is an embedded font that no font table entry names"], name)
 
