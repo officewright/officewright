@@ -393,6 +393,7 @@
     "tests/corpus/word-rules/E-default-paragraph-style.docx": "opened",
     "tests/corpus/word-rules/E-defaults-empty.docx": "opened",
     "tests/corpus/word-rules/E-dmap-font.docx": "opened",
+    "tests/corpus/word-rules/E-embedded-font.docx": "opened",
     "tests/corpus/word-rules/E-endnote-doc-end-full.docx": "opened",
     "tests/corpus/word-rules/E-endnote-doc-end.docx": "opened",
     "tests/corpus/word-rules/E-endnote-numbering-settings.docx": "opened",
