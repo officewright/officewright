@@ -1710,26 +1710,26 @@
     },
     "tests/corpus/word-rules/E-tab-margin-alone-12.docx": {
       "line_agreement": 0.8571,
-      "ssim_mean": 0.9499,
-      "ssim_min": 0.9499,
-      "text_score": 0.5961
+      "ssim_mean": 0.9846,
+      "ssim_min": 0.9846,
+      "text_score": 0.9951
     },
     "tests/corpus/word-rules/E-tab-margin-alone-14.docx": {
       "line_agreement": 0.8571,
-      "ssim_mean": 0.9499,
-      "ssim_min": 0.9499,
-      "text_score": 0.5961
+      "ssim_mean": 0.9846,
+      "ssim_min": 0.9846,
+      "text_score": 0.9951
     },
     "tests/corpus/word-rules/E-tab-margin-alone.docx": {
-      "line_agreement": 0.9,
-      "ssim_mean": 0.9419,
-      "ssim_min": 0.9419,
-      "text_score": 0.6119
+      "line_agreement": 1.0,
+      "ssim_mean": 0.982,
+      "ssim_min": 0.982,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-tab-margin.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.864,
-      "ssim_min": 0.864,
+      "ssim_mean": 0.9891,
+      "ssim_min": 0.9891,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-autofit-14.docx": {
