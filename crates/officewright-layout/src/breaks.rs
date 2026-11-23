@@ -53,13 +53,20 @@ impl BreakMap {
                 (at, opportunity)
             })
             .collect();
-        // Word ends no line right after a solidus, where UAX #14 lets a line end before a
-        // letter: no line of the Word references of tests/corpus ends there, though 507 of
-        // their words hold one (contract-ec-data-processing-clauses-el takes «της/των» to
-        // the next line whole, form-ec-state-aid-notification-de its URLs).
+        // Word ends no line right after a solidus before a character of a script that
+        // separates words by spaces, where UAX #14 lets a line end before a letter: no line
+        // of the Word references of tests/corpus ends there, though 507 of their words hold
+        // one (contract-ec-data-processing-clauses-el takes «της/των» to the next line
+        // whole, form-ec-state-aid-notification-de its URLs). Before Chinese, Japanese and
+        // the other scripts `spaced` leaves out, UAX #14's breaks stay, as no reference shows
+        // them. That no line ends after a solidus before an inline object or a dash either,
+        // nor with word wrap off, is a hypothesis until a Word render (#616).
         breaks.retain(|&(at, opportunity)| {
+            let after_solidus = text.get(..at).is_some_and(|before| before.ends_with('/'));
+            let next = text.get(at..).and_then(|after| after.chars().next());
             opportunity == Opportunity::Mandatory
-                || !text.get(..at).is_some_and(|before| before.ends_with('/'))
+                || !after_solidus
+                || next.is_some_and(|ch| !spaced(ch))
         });
         if !word_wrap {
             let mut extra = Vec::new();
@@ -189,8 +196,9 @@ mod tests {
         let text = "της/των and/or http://a.b/c 2016/679/EU x";
         let spaces: Vec<usize> = text.match_indices(' ').map(|(at, _)| at + 1).collect();
         assert_eq!(allowed(&BreakMap::new(text, true)), spaces);
-        // A line still ends after the space after one.
+        // A line still ends after the space after one, and between Chinese characters.
         assert_eq!(allowed(&BreakMap::new("a/ b", true)), [3]);
+        assert_eq!(allowed(&BreakMap::new("東/京", true)), [4]);
     }
 
     #[test]

@@ -1074,7 +1074,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     // paragraph after its cover's next-page section break sits at the
                     // top margin). Modes 11 and 12 as mode 14: a hypothesis until Word
                     // renders them.
-                    kept_top = self.document.settings().compat_mode() == CompatMode::Word2013;
+                    kept_top = self.document.settings().compat_mode() >= CompatMode::Word2013;
                     broke_page = true;
                     pending_break = false;
                 }
