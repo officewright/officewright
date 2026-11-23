@@ -650,8 +650,8 @@
     "tests/corpus/business/form-ec-state-aid-notification-bg.docx": {
       "line_agreement": 0.9257,
       "page_break_agreement": 0.3889,
-      "ssim_mean": 0.7291,
-      "ssim_min": 0.578,
+      "ssim_mean": 0.7289,
+      "ssim_min": 0.5775,
       "text_score": 0.9049
     },
     "tests/corpus/business/form-ec-state-aid-notification-de.docx": {
@@ -664,7 +664,7 @@
     "tests/corpus/business/form-ec-state-aid-notification-el.docx": {
       "line_agreement": 0.8105,
       "page_break_agreement": 0.1053,
-      "ssim_mean": 0.612,
+      "ssim_mean": 0.6115,
       "ssim_min": 0.0,
       "text_score": 0.5925
     },
@@ -676,16 +676,16 @@
       "text_score": 0.9362
     },
     "tests/corpus/business/form-gsa-pacs-series-form.docx": {
-      "line_agreement": 0.9516,
+      "line_agreement": 0.9543,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.7498,
+      "ssim_mean": 0.7735,
       "ssim_min": 0.0,
-      "text_score": 0.8106
+      "text_score": 0.8115
     },
     "tests/corpus/business/form-gsa-reseller-form.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.8359,
+      "ssim_mean": 0.8385,
       "ssim_min": 0.7233,
       "text_score": 1.0
     },
@@ -759,46 +759,46 @@
     "tests/corpus/generated/contract-de-open.docx": {
       "line_agreement": 0.86,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.9948,
+      "ssim_mean": 0.9959,
       "ssim_min": 0.992,
       "text_score": 0.995
     },
     "tests/corpus/generated/contract-de.docx": {
       "line_agreement": 0.86,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.9897,
+      "ssim_mean": 0.9908,
       "ssim_min": 0.9818,
       "text_score": 0.995
     },
     "tests/corpus/generated/contract-ru-open.docx": {
       "line_agreement": 0.92,
-      "ssim_mean": 0.9643,
-      "ssim_min": 0.9643,
+      "ssim_mean": 0.9661,
+      "ssim_min": 0.9661,
       "text_score": 0.999
     },
     "tests/corpus/generated/contract-ru.docx": {
       "line_agreement": 0.92,
-      "ssim_mean": 0.9411,
-      "ssim_min": 0.9411,
+      "ssim_mean": 0.9427,
+      "ssim_min": 0.9427,
       "text_score": 0.999
     },
     "tests/corpus/generated/contract-uk-open.docx": {
       "line_agreement": 0.9167,
-      "ssim_mean": 0.9672,
-      "ssim_min": 0.9672,
+      "ssim_mean": 0.9688,
+      "ssim_min": 0.9688,
       "text_score": 0.999
     },
     "tests/corpus/generated/contract-uk.docx": {
       "line_agreement": 0.9167,
-      "ssim_mean": 0.9436,
-      "ssim_min": 0.9436,
+      "ssim_mean": 0.9451,
+      "ssim_min": 0.9451,
       "text_score": 0.999
     },
     "tests/corpus/generated/contract-zh.docx": {
       "line_agreement": 0.2703,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.8476,
-      "ssim_min": 0.7303,
+      "ssim_mean": 0.8477,
+      "ssim_min": 0.7304,
       "text_score": 0.5575
     },
     "tests/corpus/generated/cv-en-academic-open.docx": {
@@ -827,14 +827,14 @@
     },
     "tests/corpus/generated/cv-en-compact-open.docx": {
       "line_agreement": 0.9677,
-      "ssim_mean": 0.9089,
-      "ssim_min": 0.9089,
+      "ssim_mean": 0.8977,
+      "ssim_min": 0.8977,
       "text_score": 0.9972
     },
     "tests/corpus/generated/cv-en-compact.docx": {
       "line_agreement": 0.9677,
-      "ssim_mean": 0.9082,
-      "ssim_min": 0.9082,
+      "ssim_mean": 0.896,
+      "ssim_min": 0.896,
       "text_score": 0.9972
     },
     "tests/corpus/generated/cv-en-leaders-open.docx": {
@@ -853,26 +853,26 @@
     },
     "tests/corpus/generated/cv-en-sidebar-open.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.8664,
-      "ssim_min": 0.8664,
+      "ssim_mean": 0.8722,
+      "ssim_min": 0.8722,
       "text_score": 1.0
     },
     "tests/corpus/generated/cv-en-sidebar.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.8653,
-      "ssim_min": 0.8653,
+      "ssim_mean": 0.8709,
+      "ssim_min": 0.8709,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-de-open.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9323,
-      "ssim_min": 0.9323,
+      "ssim_mean": 0.9631,
+      "ssim_min": 0.9631,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-de.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9292,
-      "ssim_min": 0.9292,
+      "ssim_mean": 0.9569,
+      "ssim_min": 0.9569,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-en-decimal-open.docx": {
@@ -927,26 +927,26 @@
     },
     "tests/corpus/generated/invoice-en-standard-open.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9661,
-      "ssim_min": 0.9661,
+      "ssim_mean": 0.8526,
+      "ssim_min": 0.8526,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-en-standard.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9599,
-      "ssim_min": 0.9599,
+      "ssim_mean": 0.8518,
+      "ssim_min": 0.8518,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-ru-open.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9026,
-      "ssim_min": 0.9026,
+      "ssim_mean": 0.8997,
+      "ssim_min": 0.8997,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-ru.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9011,
-      "ssim_min": 0.9011,
+      "ssim_mean": 0.8982,
+      "ssim_min": 0.8982,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-uk-open.docx": {
@@ -975,14 +975,14 @@
     },
     "tests/corpus/generated/letter-uk-open.docx": {
       "line_agreement": 0.8947,
-      "ssim_mean": 0.9421,
-      "ssim_min": 0.9421,
+      "ssim_mean": 0.9289,
+      "ssim_min": 0.9289,
       "text_score": 1.0
     },
     "tests/corpus/generated/letter-uk.docx": {
       "line_agreement": 0.8421,
-      "ssim_mean": 0.9453,
-      "ssim_min": 0.9453,
+      "ssim_mean": 0.9275,
+      "ssim_min": 0.9275,
       "text_score": 0.9436
     },
     "tests/corpus/generated/memo-ru-open.docx": {
@@ -1089,16 +1089,16 @@
       "text_score": 0.8977
     },
     "tests/corpus/word-rules/E-cell-mark-height-14.docx": {
-      "line_agreement": 0.8846,
-      "ssim_mean": 0.707,
-      "ssim_min": 0.707,
-      "text_score": 0.9271
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9889,
+      "ssim_min": 0.9889,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-cell-mark-height.docx": {
-      "line_agreement": 0.8846,
-      "ssim_mean": 0.7065,
-      "ssim_min": 0.7065,
-      "text_score": 0.9271
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9884,
+      "ssim_min": 0.9884,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-cut-lines-shapes.docx": {
       "line_agreement": 1.0,
