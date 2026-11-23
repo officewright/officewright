@@ -483,8 +483,12 @@ pub fn check_paragraph(
                         text.chars().take(8).collect::<String>()
                     ));
                 }
-            } else if text.starts_with(crate::itemize::attaches) {
-                // A mark or joiner stays in the run of the character before it.
+            } else if text.starts_with(crate::itemize::attaches)
+                && !(text.starts_with('\u{00AD}') && before.style != run.style)
+            {
+                // A mark or joiner stays in the run of the character before it, and so does
+                // a soft hyphen of its run style; one of another keeps its own font and
+                // size, which the hyphen drawn at a break there takes.
                 return Err(format!(
                     "item {index} starts with a mark or joiner: {text:?}"
                 ));
