@@ -1490,9 +1490,14 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let room = line.end_edge.0 - line.start.0 - line.width.0;
         let alignment = self.paragraph.props().alignment();
         // A justified line that holds its last word by narrowing its spaces narrows
-        // them, whichever line it is; one that is too wide for want of a place to end
-        // stays as it is.
-        if room < -EPSILON && alignment == Alignment::Both && !line.overflow {
+        // them, whichever line it is, from Word 2013 on (`Breaker::fit`); one that is too
+        // wide for want of a place to end, or that a tab to a stop past its end takes past
+        // it before mode 15, stays as it is.
+        if room < -EPSILON
+            && alignment == Alignment::Both
+            && !line.overflow
+            && self.document.settings().compat_mode() >= CompatMode::Word2013
+        {
             self.stretch(line, room, Stretch::Spaces);
             return;
         }

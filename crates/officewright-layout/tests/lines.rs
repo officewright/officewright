@@ -950,7 +950,8 @@ fn before_word_2013_a_justified_line_keeps_its_spaces_after_a_tab_past_the_end()
     // A tab to a start stop of the paragraph's own past the end takes the text after it
     // past the end of the line, and the line ends at the next place it may end: a
     // justified line, which narrows its spaces to hold a word from mode 15 on, lays out
-    // as a line aligned at its start.
+    // as a line aligned at its start, also with a space after the tab where the line may
+    // not end, before "!".
     let book = book()?;
     for mode in [
         CompatMode::Word2003,
@@ -958,14 +959,14 @@ fn before_word_2013_a_justified_line_keeps_its_spaces_after_a_tab_past_the_end()
         CompatMode::Word2010,
     ] {
         let (document, style) = eleven_points_in(mode, "Liberation Sans");
-        let lay = |alignment| {
+        let lay = |alignment, after: &str| {
             let props = ParagraphProps::default()
                 .with_tabs([TabStop::default().with_position(Pt(300.0))])
                 .with_alignment(alignment);
             let inlines = vec![
                 Inline::text("Name Two", style),
                 Inline::tab(style),
-                Inline::text("Value more", style),
+                Inline::text(after, style),
             ];
             fuzzing::lay_out(&book, &document, &paragraph(style, props, inlines), 200.0)
         };
@@ -980,10 +981,23 @@ fn before_word_2013_a_justified_line_keeps_its_spaces_after_a_tab_past_the_end()
                 })
                 .unwrap_or_default()
         };
-        let (start, both) = (lay(Alignment::Start), lay(Alignment::Both));
-        let lines: Vec<&str> = both.lines().iter().map(|line| line.text()).collect();
+        for after in ["Value more", "Value !more"] {
+            let (start, both) = (lay(Alignment::Start, after), lay(Alignment::Both, after));
+            let lines = |laid: &LaidOut| -> Vec<String> {
+                laid.lines()
+                    .iter()
+                    .map(|line| line.text().to_owned())
+                    .collect()
+            };
+            assert_eq!(lines(&both), lines(&start), "{mode:?}");
+            assert_eq!(words(&both), words(&start), "{mode:?}: {after}");
+        }
+        let lines: Vec<String> = lay(Alignment::Both, "Value more")
+            .lines()
+            .iter()
+            .map(|line| line.text().to_owned())
+            .collect();
         assert_eq!(lines, ["Name Two\tValue ", "more"], "{mode:?}");
-        assert_eq!(words(&both), words(&start), "{mode:?}");
     }
     Ok(())
 }
