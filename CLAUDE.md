@@ -65,10 +65,10 @@ crates/
                         and draws floating pictures where they are anchored (stacked behind or in
                         front of the text, the body's lines from the anchor paragraph on going
                         around those of the body that wrap text: square, tight and through as
-                        square around the frame, or top and bottom, on one side of each object;
-                        not yet: text on both sides, wrap polygons, lines above the anchor
-                        paragraph, tables, and the objects of headers, footers and notes) and
-                        text boxes,
+                        square around the frame, on each side the object allows that leaves
+                        them room, a line's text filling its parts from left to right, or top
+                        and bottom; not yet: wrap polygons, lines above the anchor paragraph,
+                        tables, and the objects of headers, footers and notes) and text boxes,
                         inline or floating, with their paragraphs (insets, anchoring down the box,
                         fill and outline), the numbers of the references of footnotes and
                         endnotes (references in headers and footers show no number), and
