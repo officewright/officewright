@@ -8345,11 +8345,9 @@ def subscript_drop_derived() -> Doc:
     for size in SUBSCRIPT_DROP_SIZES:
         for font in SUBSCRIPT_DERIVED_FONTS:
             n += 1
-            hp = half_points(size)
-            props = (f'<w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:eastAsia="{font}" '
-                     f'w:cs="{font}"/><w:sz w:val="{hp}"/><w:szCs w:val="{hp}"/>')
+            props = font_props(font, size)
             body += labelled(n, f"{font} {size} pt", styled_run("Base", props),
-                             styled_run("456", props + '<w:vertAlign w:val="subscript"/>'))
+                             styled_run("456", props + SUBSCRIPT))
     intro = para(run("In each case, Base at the size its label names and 456 as a subscript, "
                      "both in the font its label names in all four slots."))
     return Doc(

@@ -7122,7 +7122,6 @@ class Batch14A(unittest.TestCase):
         self.assertEqual(whats[1::2], expected)
 
 
-
 FONTS_WORD = SCRIPTS.parent / "tests/fonts-word"
 
 
