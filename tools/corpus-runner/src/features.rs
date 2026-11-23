@@ -28,14 +28,13 @@ pub enum Class {
 /// Words of the messages of `feature-unsupported` entries, each with the required feature
 /// it degrades, or `None` for an entry that degrades none. The first line whose words the
 /// message contains classes it.
-pub const MESSAGES: [(&str, Option<&str>); 132] = [
+pub const MESSAGES: [(&str, Option<&str>); 131] = [
     // Paragraphs: borders and shading (phase 1).
     ("paragraph borders are not drawn", Some("paragraph borders")),
     ("a shading pattern of stripes or crosses", Some("shading")),
     // Footnotes and endnotes (phase 2, required).
     ("endnotes are not laid out", Some("notes")),
     ("footnotes referenced in table cells", Some("notes")),
-    ("note numbers that start again on each page", Some("notes")),
     (
         "notes that start their numbers again on each page",
         Some("notes"),
