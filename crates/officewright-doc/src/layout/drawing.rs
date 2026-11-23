@@ -20,6 +20,15 @@ use crate::model::{
 /// whether a box has it, and the entry.
 type Feature<'a> = (Once, fn(TextBox<'a>) -> bool, &'static str);
 
+/// The entry for floating drawings left out that Word moves the text around: the layout
+/// writes the same words for those it draws, which the text does not move around either.
+const WRAP_LEFT_OUT: &str = "text does not wrap around floating objects yet: where a shape or drawing that is left out floats with text wrapping around it, the text stands as if it were not there, here and wherever else the document has one";
+
+/// Whether a drawing anchored as `anchor` floats with text wrapping around it.
+fn wraps(anchor: Option<Anchor>) -> bool {
+    anchor.is_some_and(|anchor| anchor.wrap().is_some_and(WrapKind::wraps))
+}
+
 /// The PNG file signature.
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
 /// The start of a JPEG file: a start of image marker and the next marker's 0xFF.
@@ -38,12 +47,14 @@ impl<'a> Translator<'a> {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "a drawing that shows no picture (a shape, chart or group) is left out".into()
             });
+            self.report_wrap_left_out(drawing.anchor());
             return None;
         };
         let (Some(width), Some(height)) = (drawing.width(), drawing.height()) else {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "a picture without a size is left out".into()
             });
+            self.report_wrap_left_out(drawing.anchor());
             return None;
         };
         let image = self.picture_image(picture.image_index(), picture.image());
@@ -94,6 +105,14 @@ impl<'a> Translator<'a> {
         ))
     }
 
+    /// Lists, once, that text does not wrap around a floating drawing left out, anchored
+    /// as `anchor` says, where Word moves the text around it.
+    fn report_wrap_left_out(&mut self, anchor: Option<Anchor>) {
+        if wraps(anchor) {
+            self.report_once(Once::WrapLeftOut, WRAP_LEFT_OUT);
+        }
+    }
+
     /// A VML drawing as an IR object in the line or anchored there, as
     /// [`drawing`](Self::drawing) makes one of a drawing: its picture, else the first of
     /// its own shapes that is a text box. None when it shows neither, has no size, or is
@@ -110,6 +129,10 @@ impl<'a> Translator<'a> {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "a VML drawing's shapes other than its first picture are left out (w:pict)".into()
             });
+            let drawn = !picture.is_hidden() && wraps(picture.anchor());
+            if drawing.wrapping_shapes() > usize::from(drawn) {
+                self.report_once(Once::WrapLeftOut, WRAP_LEFT_OUT);
+            }
         }
         self.vml_picture(picture)
     }
@@ -132,12 +155,19 @@ impl<'a> Translator<'a> {
                         .into()
                 });
             }
+            if drawing.wrapping_shapes() > 0 {
+                self.report_once(Once::WrapLeftOut, WRAP_LEFT_OUT);
+            }
             return None;
         };
         if drawing.has_other_shapes() {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "a VML drawing's shapes other than its first text box are left out (w:pict)".into()
             });
+            let drawn = !text_box.is_hidden() && wraps(text_box.anchor());
+            if drawing.wrapping_shapes() > usize::from(drawn) {
+                self.report_once(Once::WrapLeftOut, WRAP_LEFT_OUT);
+            }
         }
         self.text_box_object(text_box, Offsets::default(), place)
     }
@@ -158,6 +188,7 @@ impl<'a> Translator<'a> {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "a text box without a size is left out".into()
             });
+            self.report_wrap_left_out(text_box.anchor());
             return None;
         };
         let content = self.text_box(text_box, place);
@@ -398,6 +429,9 @@ impl<'a> Translator<'a> {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "an embedded object shown by a drawing (w:drawing in w:object) is left out".into()
             });
+            if object.drawing_wraps_text() {
+                self.report_once(Once::WrapLeftOut, WRAP_LEFT_OUT);
+            }
             return None;
         }
         let Some(preview) = object.preview() else {
@@ -419,6 +453,7 @@ impl<'a> Translator<'a> {
             self.leave_out(ReportKind::FeatureUnsupported, || {
                 "a picture without a size is left out".into()
             });
+            self.report_wrap_left_out(picture.anchor());
             return None;
         };
         let image = self.picture_image(picture.image_index(), picture.image());

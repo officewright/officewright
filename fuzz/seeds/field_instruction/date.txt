@@ -1,0 +1,1 @@
+DATE \@ "d MMMM yyyy" \* MERGEFORMAT

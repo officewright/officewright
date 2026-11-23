@@ -169,7 +169,11 @@ pub enum Block<'a> {
     Table(Table<'a>),
     /// A content control (`w:sdt`) around blocks.
     ContentControl(ContentControl<'a>),
-    /// An element kept without being understood, such as a bookmark.
+    /// The start of a bookmark between blocks.
+    BookmarkStart(BookmarkStart<'a>),
+    /// The end of a bookmark between blocks.
+    BookmarkEnd(BookmarkEnd<'a>),
+    /// An element kept without being understood, such as a permission range.
     Other(Opaque<'a>),
 }
 
@@ -317,6 +321,47 @@ impl<'a> Table<'a> {
             })
         })
     }
+
+    /// What the table holds, in document order: its rows, as [`rows`](Self::rows) gives
+    /// them, and what stands between them, such as the start or end of a bookmark.
+    pub fn content(self) -> impl Iterator<Item = TableContent<'a>> + 'a {
+        let document = self.document;
+        through_containers(document, &self.node.children).filter_map(move |index| {
+            let node = document.node(index)?;
+            Some(match &node.kind {
+                Kind::Row => TableContent::Row(TableRow {
+                    document,
+                    index,
+                    node,
+                }),
+                Kind::BookmarkStart(span) => {
+                    TableContent::BookmarkStart(BookmarkStart::new(document, *span))
+                }
+                Kind::BookmarkEnd(span) => {
+                    TableContent::BookmarkEnd(BookmarkEnd::new(document, *span))
+                }
+                Kind::Other(span) => TableContent::Other(Opaque::new(document, *span)),
+                _ => return None,
+            })
+        })
+    }
+}
+
+/// What a [`Table`] holds: its rows, and what stands between them.
+///
+/// More kinds may be added; an element read as [`TableContent::Other`] today may get a
+/// variant of its own in a minor version.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub enum TableContent<'a> {
+    /// A row.
+    Row(TableRow<'a>),
+    /// The start of a bookmark between rows.
+    BookmarkStart(BookmarkStart<'a>),
+    /// The end of a bookmark between rows.
+    BookmarkEnd(BookmarkEnd<'a>),
+    /// An element kept without being understood.
+    Other(Opaque<'a>),
 }
 
 /// A row of a [`Table`].
@@ -376,6 +421,47 @@ impl<'a> TableRow<'a> {
             })
         })
     }
+
+    /// What the row holds, in document order: its cells, as [`cells`](Self::cells) gives
+    /// them, and what stands between them, such as the start or end of a bookmark.
+    pub fn content(self) -> impl Iterator<Item = RowContent<'a>> + 'a {
+        let document = self.document;
+        through_containers(document, &self.node.children).filter_map(move |index| {
+            let node = document.node(index)?;
+            Some(match &node.kind {
+                Kind::Cell => RowContent::Cell(TableCell {
+                    document,
+                    index,
+                    node,
+                }),
+                Kind::BookmarkStart(span) => {
+                    RowContent::BookmarkStart(BookmarkStart::new(document, *span))
+                }
+                Kind::BookmarkEnd(span) => {
+                    RowContent::BookmarkEnd(BookmarkEnd::new(document, *span))
+                }
+                Kind::Other(span) => RowContent::Other(Opaque::new(document, *span)),
+                _ => return None,
+            })
+        })
+    }
+}
+
+/// What a [`TableRow`] holds: its cells, and what stands between them.
+///
+/// More kinds may be added; an element read as [`RowContent::Other`] today may get a
+/// variant of its own in a minor version.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub enum RowContent<'a> {
+    /// A cell.
+    Cell(TableCell<'a>),
+    /// The start of a bookmark between cells.
+    BookmarkStart(BookmarkStart<'a>),
+    /// The end of a bookmark between cells.
+    BookmarkEnd(BookmarkEnd<'a>),
+    /// An element kept without being understood.
+    Other(Opaque<'a>),
 }
 
 /// A cell of a [`TableRow`].
@@ -464,7 +550,11 @@ pub enum Inline<'a> {
     Revision(Revision<'a>),
     /// A simple field (`w:fldSimple`): an instruction and its last result.
     SimpleField(SimpleField<'a>),
-    /// An element kept without being understood, such as a bookmark or an equation.
+    /// The start of a bookmark.
+    BookmarkStart(BookmarkStart<'a>),
+    /// The end of a bookmark.
+    BookmarkEnd(BookmarkEnd<'a>),
+    /// An element kept without being understood, such as an equation.
     Other(Opaque<'a>),
 }
 
@@ -741,9 +831,37 @@ impl<'a> Hyperlink<'a> {
             .map(|target| self.document.strings.get(target))
     }
 
-    /// The bookmark the hyperlink leads to inside the document.
+    /// The bookmark the hyperlink leads to inside the document, or, with a
+    /// [`target`](Self::target), the place in the target: Word appends `#` and the
+    /// anchor to the target (MS-OI29500 §17.16.22(b)), where the standard says the anchor
+    /// is ignored then. Word allows at most 255 characters (§17.16.22(a)); a longer one is
+    /// given as written.
     pub fn anchor(self) -> Option<&'a str> {
         self.data.anchor.as_deref()
+    }
+
+    /// A place in the target that is no bookmark (`w:docLocation`), as written; Word
+    /// allows at most 255 characters (MS-OI29500 §17.16.22(a)).
+    pub fn doc_location(self) -> Option<&'a str> {
+        self.data.doc_location.as_deref()
+    }
+
+    /// The frame or window the target opens in (`w:tgtFrame`), such as `_blank`, as
+    /// written; Word allows at most 255 characters (MS-OI29500 §17.16.22(a)).
+    pub fn target_frame(self) -> Option<&'a str> {
+        self.data.target_frame.as_deref()
+    }
+
+    /// The text shown over the hyperlink (`w:tooltip`), as written; Word allows at most
+    /// 260 characters (MS-OI29500 §17.16.22(a)).
+    pub fn tooltip(self) -> Option<&'a str> {
+        self.data.tooltip.as_deref()
+    }
+
+    /// Whether following the hyperlink adds its target to the list of those followed
+    /// (`w:history`); `None` where the document does not say.
+    pub fn history(self) -> Option<bool> {
+        self.data.history
     }
 
     /// The inline content the hyperlink spans.
@@ -816,6 +934,117 @@ impl<'a> SimpleField<'a> {
     }
 }
 
+/// The start of a bookmark (`w:bookmarkStart`, ECMA-376 Part 1, §17.13.6.2): a name for
+/// the place where it stands, which hyperlinks, fields and tables of contents lead to,
+/// and the start of what the bookmark spans up to its [`BookmarkEnd`] of the same id. In
+/// a table, its columns narrow it to some of the cells it spans.
+///
+/// The values are given as written. Word allows names of at most 40 characters
+/// (MS-OI29500 §17.13.6.2(b)), and of several bookmarks of one name it keeps the last,
+/// where the standard keeps the first (§17.13.6.2(c)).
+///
+/// ```
+/// # fn main() -> officewright_doc::Result<()> {
+/// use officewright_doc::{Block, Document, Inline};
+///
+/// let document = Document::open("tests/data/bookmarks.docx")?;
+/// let mut names = Vec::new();
+/// for section in document.sections() {
+///     for block in section.blocks() {
+///         let Block::Paragraph(paragraph) = block else {
+///             continue;
+///         };
+///         for inline in paragraph.inlines() {
+///             if let Inline::BookmarkStart(start) = inline {
+///                 names.push((start.id(), start.name().map(str::to_owned)));
+///             }
+///         }
+///     }
+/// }
+/// assert_eq!(names, [(Some(0), Some("Intro".to_owned()))]);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct BookmarkStart<'a> {
+    document: &'a Document,
+    span: Span,
+}
+
+impl<'a> BookmarkStart<'a> {
+    pub(super) fn new(document: &'a Document, span: Span) -> Self {
+        Self { document, span }
+    }
+
+    fn attribute(self, local_name: &str) -> Option<&'a str> {
+        self.document
+            .element(self.span)
+            .attribute(&self.document.names.w, local_name)
+    }
+
+    /// Its id (`w:id`), which its end names; `None` where it has none, or one that is no
+    /// integer.
+    pub fn id(self) -> Option<i64> {
+        self.attribute("id").and_then(integer)
+    }
+
+    /// Its name (`w:name`), as written.
+    pub fn name(self) -> Option<&'a str> {
+        self.attribute("name")
+    }
+
+    /// The first table column it spans (`w:colFirst`), counted from 0, in a table.
+    pub fn first_column(self) -> Option<i64> {
+        self.attribute("colFirst").and_then(integer)
+    }
+
+    /// The last table column it spans (`w:colLast`), counted from 0, in a table. Where it
+    /// is less than the first, Word takes it for the first too (MS-OI29500
+    /// §17.13.6.2(a)).
+    pub fn last_column(self) -> Option<i64> {
+        self.attribute("colLast").and_then(integer)
+    }
+
+    /// The element as read, as XML with the namespace declarations it needs.
+    pub fn to_xml(self) -> String {
+        self.document.element(self.span).to_xml()
+    }
+}
+
+/// The end of a bookmark (`w:bookmarkEnd`, ECMA-376 Part 1, §17.13.6.1): where what the
+/// [`BookmarkStart`] of the same id spans ends.
+#[derive(Clone, Copy, Debug)]
+pub struct BookmarkEnd<'a> {
+    document: &'a Document,
+    span: Span,
+}
+
+impl<'a> BookmarkEnd<'a> {
+    pub(super) fn new(document: &'a Document, span: Span) -> Self {
+        Self { document, span }
+    }
+
+    /// The id of the bookmark it ends (`w:id`); `None` where it has none, or one that is
+    /// no integer.
+    pub fn id(self) -> Option<i64> {
+        self.document
+            .element(self.span)
+            .attribute(&self.document.names.w, "id")
+            .and_then(integer)
+    }
+
+    /// The element as read, as XML with the namespace declarations it needs.
+    pub fn to_xml(self) -> String {
+        self.document.element(self.span).to_xml()
+    }
+}
+
+/// An `xsd:integer` as Office reads one: no whitespace around it (MS-OI29500 2.1.1(a)),
+/// as the reader checks it.
+fn integer(value: &str) -> Option<i64> {
+    value.parse().ok()
+}
+
 /// An element kept as it was read, because officewright does not represent it (yet).
 #[derive(Clone, Copy, Debug)]
 pub struct Opaque<'a> {
@@ -863,6 +1092,8 @@ pub(super) fn blocks<'a>(
                 node,
             }),
             Kind::ContentControl { .. } => Block::ContentControl(ContentControl { document, node }),
+            Kind::BookmarkStart(span) => Block::BookmarkStart(BookmarkStart::new(document, *span)),
+            Kind::BookmarkEnd(span) => Block::BookmarkEnd(BookmarkEnd::new(document, *span)),
             Kind::Other(span) => Block::Other(Opaque::new(document, *span)),
             _ => return None,
         })
@@ -895,6 +1126,8 @@ fn inlines<'a>(
                 node,
                 instruction,
             }),
+            Kind::BookmarkStart(span) => Inline::BookmarkStart(BookmarkStart::new(document, *span)),
+            Kind::BookmarkEnd(span) => Inline::BookmarkEnd(BookmarkEnd::new(document, *span)),
             Kind::Other(span) => Inline::Other(Opaque::new(document, *span)),
             _ => return None,
         })

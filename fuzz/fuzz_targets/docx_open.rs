@@ -11,7 +11,10 @@
 use std::collections::HashSet;
 
 use libfuzzer_sys::fuzz_target;
-use officewright_doc::{Block, HeaderFooterKind, Inline, Limits, LoadOptions, RunContent, TextBox};
+use officewright_doc::{
+    Block, BookmarkEnd, BookmarkStart, FieldInstruction, HeaderFooterKind, Inline, Limits,
+    LoadOptions, RowContent, RunContent, TableContent, TextBox,
+};
 use officewright_opc::xml::Input;
 
 fuzz_target!(|data: &[u8]| {
@@ -125,6 +128,9 @@ fuzz_target!(|data: &[u8]| {
                                     RunContent::Other(opaque) => {
                                         write_back.check(|| opaque.to_xml())
                                     }
+                                    RunContent::FieldCode(code) => {
+                                        read_instruction(code);
+                                    }
                                     RunContent::Drawing(drawing) => {
                                         write_back.check(|| drawing.to_xml());
                                         let _ = (drawing.is_inline(), drawing.width());
@@ -183,16 +189,19 @@ fuzz_target!(|data: &[u8]| {
                             }
                         }
                         Inline::Hyperlink(link) => {
-                            let _ = (link.target(), link.anchor());
+                            let _ = (link.target(), link.anchor(), link.doc_location());
+                            let _ = (link.target_frame(), link.tooltip(), link.history());
                             inlines.extend(link.inlines());
                         }
+                        Inline::BookmarkStart(start) => read_start(start, &mut write_back),
+                        Inline::BookmarkEnd(end) => read_end(end, &mut write_back),
                         Inline::ContentControl(control) => inlines.extend(control.inlines()),
                         Inline::Revision(revision) => {
                             let _ = (revision.kind(), revision.author(), revision.date());
                             inlines.extend(revision.inlines());
                         }
                         Inline::SimpleField(field) => {
-                            let _ = field.instruction();
+                            read_instruction(field.instruction());
                             inlines.extend(field.inlines());
                         }
                         Inline::Other(opaque) => write_back.check(|| opaque.to_xml()),
@@ -206,6 +215,29 @@ fuzz_target!(|data: &[u8]| {
                 let _ = table.properties();
                 let properties = formats.table_properties(table);
                 let _ = formats.table_look(table);
+                // What stands between the rows and between the cells, beside them.
+                for content in table.content() {
+                    match content {
+                        TableContent::BookmarkStart(start) => read_start(start, &mut write_back),
+                        TableContent::BookmarkEnd(end) => read_end(end, &mut write_back),
+                        TableContent::Other(opaque) => write_back.check(|| opaque.to_xml()),
+                        TableContent::Row(row) => {
+                            for content in row.content() {
+                                match content {
+                                    RowContent::BookmarkStart(start) => {
+                                        read_start(start, &mut write_back)
+                                    }
+                                    RowContent::BookmarkEnd(end) => read_end(end, &mut write_back),
+                                    RowContent::Other(opaque) => {
+                                        write_back.check(|| opaque.to_xml())
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 for row in table.rows() {
                     let _ = (row.properties(), row.table_property_exceptions());
                     let row_format = formats.row_properties(row);
@@ -227,6 +259,8 @@ fuzz_target!(|data: &[u8]| {
                 }
             }
             Block::ContentControl(control) => blocks.extend(control.blocks()),
+            Block::BookmarkStart(start) => read_start(start, &mut write_back),
+            Block::BookmarkEnd(end) => read_end(end, &mut write_back),
             Block::Other(opaque) => write_back.check(|| opaque.to_xml()),
             _ => {}
         }
@@ -291,4 +325,30 @@ fn read_text_box(text_box: TextBox<'_>) {
     let _ = (text_box.fill(), text_box.outline());
     let _ = (text_box.width(), text_box.height(), text_box.anchor());
     let _ = (text_box.is_in_group(), text_box.is_hidden());
+}
+
+/// Reads a bookmark's start, whose XML must read back.
+fn read_start(start: BookmarkStart<'_>, write_back: &mut WriteBack) {
+    let _ = (
+        start.id(),
+        start.name(),
+        start.first_column(),
+        start.last_column(),
+    );
+    write_back.check(|| start.to_xml());
+}
+
+/// Reads a bookmark's end, whose XML must read back.
+fn read_end(end: BookmarkEnd<'_>, write_back: &mut WriteBack) {
+    let _ = end.id();
+    write_back.check(|| end.to_xml());
+}
+
+/// Reads a field instruction, which is written back as read.
+fn read_instruction(text: &str) {
+    let instruction = FieldInstruction::parse(text);
+    assert_eq!(instruction.to_string(), text);
+    if let Some(link) = instruction.hyperlink() {
+        let _ = (link.target(), link.bookmark(), link.tooltip());
+    }
 }
