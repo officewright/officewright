@@ -396,14 +396,6 @@ fn report_note_numbers(notes: &NoteNumbers, fonts: &mut Fonts<'_>) {
             );
         }
     }
-    if notes.each_page {
-        fonts.report_once(
-            ReportKind::FeatureUnsupported,
-            &Location::default(),
-            "note numbers that start again on each page are numbered through the section"
-                .to_owned(),
-        );
-    }
 }
 
 /// [`paginate_into`], with headers and footers drawing at most `max_frame_drawn` in all,
@@ -439,7 +431,7 @@ fn paginate_wrapping<S: PageSink>(
     mut sink: impl FnMut() -> S,
 ) -> Result<Laid<S>> {
     let flow = flow(document, fonts)?;
-    let notes = Arc::new(NoteNumbers::new(document));
+    let mut notes = Arc::new(NoteNumbers::new(document));
     report_note_numbers(&notes, fonts);
     // `NUMPAGES` and `SECTIONPAGES` depend on the layout they are part of: each pass lays
     // out with the counts the one before found, until they agree.
@@ -486,6 +478,7 @@ fn paginate_wrapping<S: PageSink>(
             note_layouts: HashMap::new(),
             specials: HashMap::new(),
             pending: Vec::new(),
+            noted: Vec::new(),
         };
         let lines = pager.run(&flow)?;
         if pager.page_count() == 0 {
@@ -493,8 +486,12 @@ fn paginate_wrapping<S: PageSink>(
         }
         pager.hand_on(usize::MAX)?;
         let found = Totals::of(pager.taken, &pager.taken_by_section, document);
-        if !counted || found == totals || pass == MAX_PASSES {
-            if counted && found != totals {
+        // Notes numbered again on each page take the numbers of the pages this pass put
+        // their references on.
+        let renumbered = notes.by_page(&pager.noted);
+        let counts_settled = !counted || found == totals;
+        if (counts_settled && renumbered.is_none()) || pass == MAX_PASSES {
+            if !counts_settled {
                 pager.fonts.report_once(
                     ReportKind::FieldCached,
                     &Location::default(),
@@ -502,6 +499,25 @@ fn paginate_wrapping<S: PageSink>(
                         "the number of pages changed in each of {MAX_PASSES} layouts; NUMPAGES \
                          and SECTIONPAGES show the count of the one before the last"
                     ),
+                );
+            }
+            if renumbered.is_some() {
+                pager.fonts.report_once(
+                    ReportKind::FeatureUnsupported,
+                    &Location::default(),
+                    format!(
+                        "the numbers of notes that start again on each page changed in each of \
+                         {MAX_PASSES} layouts; they show those of the one before the last"
+                    ),
+                );
+            }
+            if notes.unplaced(&pager.noted) {
+                pager.fonts.report_once(
+                    ReportKind::FeatureUnsupported,
+                    &Location::default(),
+                    "notes that start their numbers again on each page but that no page lays \
+                     out are numbered through their section"
+                        .to_owned(),
                 );
             }
             return Ok(Laid {
@@ -516,6 +532,9 @@ fn paginate_wrapping<S: PageSink>(
             });
         }
         totals = found;
+        if let Some(renumbered) = renumbered {
+            notes = Arc::new(renumbered);
+        }
         pass += 1;
     }
 }
@@ -1033,6 +1052,9 @@ struct Pager<'d, 'f, 'b, S> {
     specials: Specials<'d>,
     /// What of the footnotes of the last page that is not blank goes on to the next.
     pending: Vec<Waiting<'d>>,
+    /// The notes whose references each page handed on holds, in order: what numbers the
+    /// notes the next pass numbers again on each page.
+    noted: Vec<Vec<crate::ir::NoteId>>,
 }
 
 /// Which header or footer: its section, whether it is the header, and its kind.
@@ -2615,6 +2637,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 for note in notes.notes() {
                     self.note_layouts.remove(&note);
                 }
+                self.noted.push(notes.referenced().collect());
             }
             // Its body's floating objects go behind or in front of the body's text, over the
             // header and footer, now that nothing can add to them.
@@ -5192,8 +5215,6 @@ mod tests {
         };
         const DECIMAL: &str =
             "numbers in a format the layout does not write are written as decimal";
-        const EACH_PAGE: &str =
-            "note numbers that start again on each page are numbered through the section";
         const FRAMES: &str =
             "note references in headers and footers show no number, and their notes are left out";
         // A section whose footnotes are numbered in a format the layout does not write and
@@ -5253,39 +5274,36 @@ mod tests {
             let mut texts = texts(&laid.expect("pages").pages[0]);
             texts.sort();
             let messages = messages(&report);
-            let reported = [DECIMAL, EACH_PAGE, FRAMES].map(|m| messages.iter().any(|r| r == m));
+            let reported = [DECIMAL, FRAMES].map(|m| messages.iter().any(|r| r == m));
             (texts, reported)
         };
-        // Numbered in the body, in decimal through the section, and both reported; the
-        // number in the text's style is one run with it.
+        // Numbered in the body, in decimal, which is reported, from the start on its page;
+        // the number in the text's style is one run with it.
         assert_eq!(
             lay(Place::Body),
-            (vec!["A1".into(), "Z".into()], [true, true, false])
+            (vec!["A1".into(), "Z".into()], [true, false])
         );
         // A footnote referenced nowhere numbers nothing, and nothing is reported; nor is
         // one in a text box, which Word ignores, even in a field's result there.
         assert_eq!(
             lay(Place::Nowhere),
-            (vec!["A".into(), "Z".into()], [false; 3])
+            (vec!["A".into(), "Z".into()], [false; 2])
         );
         for place in [Place::TextBox, Place::TextBoxField] {
             assert_eq!(
                 lay(place),
-                (vec!["A".into(), "B".into(), "Z".into()], [false; 3])
+                (vec!["A".into(), "B".into(), "Z".into()], [false; 2])
             );
         }
         // One in the header shows no number, which is reported, also when a text box
         // references the note too.
         assert_eq!(
             lay(Place::Header),
-            (vec!["A".into(), "Z".into()], [false, false, true])
+            (vec!["A".into(), "Z".into()], [false, true])
         );
         assert_eq!(
             lay(Place::HeaderAndTextBox),
-            (
-                vec!["A".into(), "B".into(), "Z".into()],
-                [false, false, true]
-            )
+            (vec!["A".into(), "B".into(), "Z".into()], [false, true])
         );
     }
 
@@ -12479,6 +12497,225 @@ mod tests {
         assert_eq!(reported(4), [false, true]);
         // In a table nested in a cell too.
         assert_eq!(reported(5), [true, false]);
+    }
+
+    #[test]
+    fn footnote_numbers_start_again_on_each_page_as_their_pages_place_them() {
+        use crate::ir::{
+            NoteKind, NotePosition, NoteProps, NoteRestart, NoteSeparators, VerticalPosition,
+        };
+        // A section numbering its footnotes again on each page: two references on the
+        // first page, then one after a page break, which shows 1 again, as its note does.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let mark = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0))
+                .with_vertical(VerticalPosition::Superscript),
+        );
+        document.set_note_separators(
+            NoteKind::Footnote,
+            NoteSeparators::default()
+                .with_separator([holding(style, vec![Inline::separator(style)])]),
+        );
+        let notes = [(); 3].map(|()| footnote(&mut document, (style, mark), 1, spacing(0.0, 0.0)));
+        let blocks = vec![
+            referencing(style, (0, 0), &[notes[0], notes[1]], spacing(0.0, 0.0)),
+            referencing(
+                style,
+                (0, 0),
+                &[notes[2]],
+                spacing(0.0, 0.0).with_page_break_before(true),
+            ),
+        ];
+        let paged = NoteProps::footnotes()
+            .with_position(NotePosition::PageBottom)
+            .with_restart(NoteRestart::EachPage);
+        document.add_section(
+            Section::new(setup())
+                .with_footnotes(paged)
+                .with_blocks(blocks),
+        );
+        let (pages, reported) = noted_pages(&document);
+        // The test font has no digits nor `N`; nothing about the notes is reported.
+        assert!(reported.iter().all(|m| !m.contains("note")), "{reported:?}");
+        let texts = |page: &Separated| -> Vec<String> {
+            page.1.iter().map(|(text, _)| text.clone()).collect()
+        };
+        assert_eq!(pages.len(), 2);
+        assert_eq!(texts(&pages[0]), ["A1", "2", "1", "N", "2", "N"]);
+        assert_eq!(texts(&pages[1]), ["A1", "1", "N"]);
+    }
+
+    /// A document of one section that numbers its footnotes, and its endnotes where
+    /// `endnotes` says so, again on each page, the blocks `make` gives.
+    fn numbered_on_each_page(
+        endnotes: bool,
+        make: impl FnOnce(&mut Document, RunStyleId, RunStyleId) -> Vec<Block>,
+    ) -> Document {
+        use crate::ir::{
+            NoteKind, NotePosition, NoteProps, NoteRestart, NoteSeparators, VerticalPosition,
+        };
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let mark = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0))
+                .with_vertical(VerticalPosition::Superscript),
+        );
+        document.set_note_separators(
+            NoteKind::Footnote,
+            NoteSeparators::default()
+                .with_separator([holding(style, vec![Inline::separator(style)])])
+                .with_continuation_separator([holding(
+                    style,
+                    vec![Inline::continuation_separator(style)],
+                )]),
+        );
+        let blocks = make(&mut document, style, mark);
+        let section = Section::new(setup()).with_footnotes(
+            NoteProps::footnotes()
+                .with_position(NotePosition::PageBottom)
+                .with_restart(NoteRestart::EachPage),
+        );
+        let section = if endnotes {
+            section.with_endnotes(NoteProps::endnotes().with_restart(NoteRestart::EachPage))
+        } else {
+            section
+        };
+        document.add_section(section.with_blocks(blocks));
+        document
+    }
+
+    #[test]
+    fn notes_numbered_again_on_each_page_that_no_page_lays_out_are_reported() {
+        use crate::ir::{Note, NoteKind};
+        const NUMBERED: &str = "notes that start their numbers again on each page but that no \
+                                page lays out are numbered through their section";
+        // A footnote of a table cell, which no page lays out yet, beside one of the body
+        // (review of #603): the cell's keeps its number through the section, and that is
+        // reported.
+        let document = numbered_on_each_page(false, |document, style, mark| {
+            let notes = [(); 2].map(|()| footnote(document, (style, mark), 1, spacing(0.0, 0.0)));
+            let row = Row::default().with_cells([Cell::default().with_blocks([referencing(
+                style,
+                (0, 0),
+                &[notes[0]],
+                spacing(0.0, 0.0),
+            )])]);
+            vec![
+                table_with(vec![row], 0.0).into(),
+                referencing(style, (0, 0), &[notes[1]], spacing(0.0, 0.0)),
+            ]
+        });
+        let (_, reported) = noted_pages(&document);
+        assert!(reported.iter().any(|m| m == NUMBERED), "{reported:?}");
+        // An endnote of a section that numbers its endnotes again on each page: the
+        // pages place footnotes only, so it is numbered through the section.
+        let document = numbered_on_each_page(true, |document, style, _| {
+            let note = document.add_note(Note::new(NoteKind::Endnote, []));
+            vec![referencing(style, (0, 0), &[note], spacing(0.0, 0.0))]
+        });
+        let (_, reported) = noted_pages(&document);
+        assert!(reported.iter().any(|m| m == NUMBERED), "{reported:?}");
+    }
+
+    #[test]
+    fn a_note_going_on_from_the_page_before_does_not_count_on_its_page() {
+        // A note of nine lines, cut at the bottom of page 1, goes on on page 2, where the
+        // paragraph after a page break references a note of one line (review of #603):
+        // that note is the first of page 2, and shows 1.
+        let document = numbered_on_each_page(false, |document, style, mark| {
+            let long = footnote(document, (style, mark), 9, spacing(0.0, 0.0));
+            let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+            vec![
+                referencing(style, (0, 0), &[long], spacing(0.0, 0.0)),
+                referencing(
+                    style,
+                    (0, 0),
+                    &[short],
+                    spacing(0.0, 0.0).with_page_break_before(true),
+                ),
+            ]
+        });
+        let (pages, _) = noted_pages(&document);
+        let texts = |page: &Separated| -> Vec<String> {
+            page.1.iter().map(|(text, _)| text.clone()).collect()
+        };
+        // Page 2: the reference, the rest of the long note under the continuation
+        // separator, then the short note.
+        assert_eq!(texts(&pages[1]), ["A1", "N", "N", "N", "1", "N"]);
+    }
+
+    #[test]
+    fn note_numbers_that_never_settle_on_their_pages_are_reported() {
+        use crate::ir::{Note, NoteKind, NotePosition, NoteProps, NoteRestart, NoteSeparators};
+        // Numbers that start again on each page, in the test font, whose digits are its
+        // missing-glyph shape, 5 pt wide. Line 1 references nine empty notes; line 7 holds
+        // "A", a space and a word of 41 `A` that ends with the reference to a tenth. As
+        // "10" the word does not fit in the 260 pt line and goes on to the next page, where
+        // the note is the first and shows "1"; as "1" it fits on line 7, where the note is
+        // the tenth: each layout pass moves it, and the numbers never settle.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        document.set_note_separators(
+            NoteKind::Footnote,
+            NoteSeparators::default()
+                .with_separator([holding(style, vec![Inline::separator(style)])]),
+        );
+        let notes: Vec<_> = (0..10)
+            .map(|_| document.add_note(Note::new(NoteKind::Footnote, [])))
+            .collect();
+        let mut inlines = vec![Inline::text("A", style)];
+        inlines.extend(
+            notes[..9]
+                .iter()
+                .map(|&n| Inline::note_reference(n, false, style)),
+        );
+        for _ in 0..5 {
+            inlines.push(Inline::line_break(BreakClear::None, style));
+            inlines.push(Inline::text("A", style));
+        }
+        inlines.push(Inline::line_break(BreakClear::None, style));
+        inlines.push(Inline::text(format!("A {}", "A".repeat(41)), style));
+        inlines.push(Inline::note_reference(notes[9], false, style));
+        let paragraph = Paragraph::new(style)
+            .with_props(spacing(0.0, 0.0).with_widow_control(false))
+            .with_inlines(inlines);
+        let paged = NoteProps::footnotes()
+            .with_position(NotePosition::PageBottom)
+            .with_restart(NoteRestart::EachPage);
+        document.add_section(
+            Section::new(setup())
+                .with_footnotes(paged)
+                .with_blocks([paragraph.into()]),
+        );
+        let (_, reported) = noted_pages(&document);
+        assert!(
+            reported.iter().any(|m| m
+                == "the numbers of notes that start again on each page changed in each of 3 \
+                    layouts; they show those of the one before the last"),
+            "{reported:?}"
+        );
+        // The document counts no pages: nothing is said of NUMPAGES.
+        assert!(
+            !reported.iter().any(|m| m.contains("NUMPAGES")),
+            "{reported:?}"
+        );
     }
 
     #[test]
