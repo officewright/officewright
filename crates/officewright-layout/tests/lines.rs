@@ -1949,10 +1949,11 @@ fn every_tab_past_the_end_hangs_and_condensed_text_never_moves_back() -> TestRes
         first.text()
     );
     // Justified, a line that ends in a hanging tab still fills the column: its last tab
-    // that does not hang is where the stretching starts (here, there is none).
+    // that does not hang is where the stretching starts (here, there is none). The word
+    // joiner keeps the line from ending at the space, which it widens.
     let justified = ParagraphProps::default().with_alignment(Alignment::Both);
     let paragraph = Paragraph::new(style).with_props(justified).with_inlines([
-        Inline::text("one\u{00A0}two(      ", style),
+        Inline::text("one \u{2060}two(      ", style),
         Inline::tab(style),
         Inline::text("next", style),
     ]);
@@ -2329,6 +2330,53 @@ fn a_list_label_stands_at_the_first_line_s_start_as_its_level_aligns_it() -> Tes
         (word.start() - 18.0).abs() < 1e-6 && (word.end() - (18.0 + joined)).abs() < 1e-6,
         "{word:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn the_spaces_of_a_list_label_never_narrow() -> TestResult {
+    use officewright_layout::ir::{
+        Alignment, CompatMode, DocumentSettings, Level, LevelAlignment, LevelTextPart,
+        ListDefinition, ListInstance, ListItem, Suffix,
+    };
+
+    // A label of three spaces before text of two, in Word 2013's mode: a justified line
+    // may reach past its end by a fifth of the two spaces of its text, not of the five.
+    let book = book()?;
+    let laid = |alignment: Alignment, width: f64| {
+        let mut document =
+            Document::new(DocumentSettings::default().with_compat_mode(CompatMode::Word2013));
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Liberation Sans"))
+                .with_size(Pt(10.0)),
+        );
+        let level = Level::default()
+            .with_text([LevelTextPart::Literal("A A A A".into())])
+            .with_alignment(LevelAlignment::Start)
+            .with_suffix(Suffix::Nothing);
+        let list = document.add_list(ListDefinition::default().with_levels([level]));
+        let instance = document.add_list_instance(ListInstance::new(list));
+        let paragraph = Paragraph::new(style)
+            .with_props(ParagraphProps::default().with_alignment(alignment))
+            .with_list(Some(ListItem::new(instance, 0, style)))
+            .with_inlines([Inline::text("AA AA AA", style)]);
+        fuzzing::lay_out(&book, &document, &paragraph, width)
+    };
+    // Where the line ends at its spaces' width.
+    let natural = laid(Alignment::Start, 400.0);
+    let end = natural
+        .lines()
+        .first()
+        .ok_or("no line")?
+        .words()
+        .iter()
+        .map(|word| word.end())
+        .fold(0.0, f64::max);
+    // Liberation Sans's space at 10 pt is 2.78 pt: a fifth of the text's two is 1.11 pt,
+    // of all five 2.78 pt.
+    assert_eq!(laid(Alignment::Both, end - 1.0).lines().len(), 1);
+    assert_eq!(laid(Alignment::Both, end - 2.0).lines().len(), 2);
     Ok(())
 }
 

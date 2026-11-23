@@ -845,10 +845,10 @@ fn a_words_only_underline_covers_the_hyphen_at_a_soft_hyphen() -> TestResult {
         .into_iter()
         .filter(|line| ends(line).0.1 < 253)
         .collect();
-    // The hyphen drawn at the soft hyphen: a run that stands for no text.
+    // The hyphen drawn at the soft hyphen: a run that stands for a hyphen-minus.
     let hyphen_run = items(&painted, "glyphs")
         .into_iter()
-        .find(|run| run.contains(" \"\" "))
+        .find(|run| run.contains(" \"-\" "))
         .ok_or_else(|| format!("no hyphen:\n{}", painted.text()))?;
     let hyphen_x = at(hyphen_run).0;
     assert!(
@@ -859,6 +859,175 @@ fn a_words_only_underline_covers_the_hyphen_at_a_soft_hyphen() -> TestResult {
         "{}",
         painted.text()
     );
+    Ok(())
+}
+
+#[test]
+fn soft_hyphens_and_zero_width_spaces_inside_a_line_draw_nothing() -> TestResult {
+    // Word's PDF has no glyph and no text for them, so a reader of the PDF's text finds
+    // each word whole (E-spacing-condensed).
+    let book = book()?;
+    let mut document = Document::default();
+    let style = document.add_run_style(base());
+    let painted = paint(
+        &book,
+        &document,
+        &[one_paragraph(
+            style,
+            vec![
+                Inline::text("extra", style),
+                Inline::soft_hyphen(style),
+                Inline::text("ordinary ab\u{200B}cd", style),
+            ],
+        )],
+    );
+    let runs = items(&painted, "glyphs");
+    assert!(!runs.is_empty(), "{}", painted.text());
+    let mut text = String::new();
+    let mut glyphs = 0;
+    for run in &runs {
+        let quoted = run
+            .split_once('"')
+            .and_then(|(_, rest)| rest.rsplit_once('"'))
+            .map(|(quoted, _)| quoted)
+            .ok_or_else(|| format!("no text: {run}"))?;
+        assert!(!quoted.is_empty(), "{}", painted.text());
+        text.push_str(quoted);
+        glyphs += glyph_xs(run).len();
+    }
+    assert_eq!(text, "extraordinary abcd", "{}", painted.text());
+    // One glyph for each character drawn: none for the soft hyphen or the space of no
+    // width.
+    assert_eq!(glyphs, text.chars().count(), "{}", painted.text());
+    Ok(())
+}
+
+#[test]
+fn the_hyphen_at_a_soft_hyphen_of_another_run_takes_its_font_and_size_but_not_its_height()
+-> TestResult {
+    // E-soft-hyphen-font: a soft hyphen in Noto Sans 20 pt between letters in Calibri
+    // 11 pt. Word draws the hyphen at the break in Noto Sans 20 pt on the line's
+    // baseline, and the lines stay as far apart as without it.
+    let book = book()?;
+    let mut document = Document::default();
+    let text = document.add_run_style(base());
+    let big = styled(&mut document, |style| {
+        style
+            .with_fonts(RunFonts::new("Noto Sans"))
+            .with_size(Pt(20.0))
+    });
+    let painted = |soft: RunStyleId| {
+        let paragraph = Paragraph::new(text).with_inlines([
+            Inline::text("Extraordinarily", text),
+            Inline::soft_hyphen(soft),
+            Inline::text("longwordsplit", text),
+        ]);
+        fuzzing::paint(&book, &document, &[paragraph], 80.0)
+    };
+    let (own, same) = (painted(big), painted(text));
+    let run = |painted: &Painted, quoted: &str| {
+        items(painted, "glyphs")
+            .into_iter()
+            .find(|run| run.contains(&format!(" \"{quoted}\" ")))
+            .map(str::to_owned)
+            .ok_or_else(|| format!("no {quoted}:\n{}", painted.text()))
+    };
+    let hyphen = run(&own, "-")?;
+    assert!(hyphen.starts_with("glyphs Noto Sans 400 "), "{hyphen}");
+    assert_eq!(at(&hyphen).1, BASELINE, "{}", own.text());
+    // The second line where it is when the soft hyphen has the letters' font and size.
+    assert_eq!(
+        at(&run(&own, "longwordsplit")?).1,
+        at(&run(&same, "longwordsplit")?).1,
+        "{}",
+        own.text()
+    );
+    assert!(run(&same, "-")?.starts_with("glyphs Liberation Sans 220 "));
+    Ok(())
+}
+
+#[test]
+fn a_soft_hyphen_of_another_size_makes_its_line_no_taller_but_text_of_that_size_does() -> TestResult
+{
+    // The soft hyphen in Noto Sans 20 pt, then a word in the same, after a word in
+    // Liberation Sans 11 pt: the run of the soft hyphen goes on after it.
+    let book = book()?;
+    let mut document = Document::default();
+    let text = document.add_run_style(base());
+    let big = styled(&mut document, |style| {
+        style
+            .with_fonts(RunFonts::new("Noto Sans"))
+            .with_size(Pt(20.0))
+    });
+    let painted = |first: &str, soft: RunStyleId, second: &str, width: f64| {
+        let paragraph = Paragraph::new(text).with_inlines([
+            Inline::text(first, text),
+            Inline::soft_hyphen(soft),
+            Inline::text(second, big),
+        ]);
+        fuzzing::paint(&book, &document, &[paragraph], width)
+    };
+    let y = |painted: &Painted, quoted: &str| {
+        items(painted, "glyphs")
+            .into_iter()
+            .find(|run| run.contains(&format!(" \"{quoted}\" ")))
+            .map(|run| at(run).1)
+            .ok_or_else(|| format!("no {quoted}:\n{}", painted.text()))
+    };
+    // A line that ends at the soft hyphen keeps its letters' height, and the line of
+    // the 20 pt word after it is where it is with the soft hyphen in the letters' size.
+    let (own, same) = (
+        painted("Extraordinarily", big, "longwordsplit", 150.0),
+        painted("Extraordinarily", text, "longwordsplit", 150.0),
+    );
+    assert_eq!(y(&own, "-")?, BASELINE, "{}", own.text());
+    assert_eq!(
+        y(&own, "longwordsplit")?,
+        y(&same, "longwordsplit")?,
+        "{}",
+        own.text()
+    );
+    // In the middle of a line, the 20 pt text after the soft hyphen makes the line as
+    // tall as it does without the soft hyphen in that size.
+    let (own, same) = (
+        painted("Extra", big, "ordinary", 400.0),
+        painted("Extra", text, "ordinary", 400.0),
+    );
+    assert!(y(&own, "ordinary")? > BASELINE, "{}", own.text());
+    assert_eq!(
+        y(&own, "ordinary")?,
+        y(&same, "ordinary")?,
+        "{}",
+        own.text()
+    );
+    assert_eq!(y(&own, "Extra")?, y(&same, "Extra")?, "{}", own.text());
+    Ok(())
+}
+
+#[test]
+fn a_zero_width_space_under_a_mark_leaves_the_mark_its_text() -> TestResult {
+    // A combining acute after a zero-width space: their cluster stands for the acute.
+    let book = book()?;
+    let mut document = Document::default();
+    let style = document.add_run_style(base());
+    let painted = paint(
+        &book,
+        &document,
+        &[one_paragraph(
+            style,
+            vec![Inline::text("ab\u{200B}\u{301}cd", style)],
+        )],
+    );
+    let text: String = items(&painted, "glyphs")
+        .into_iter()
+        .filter_map(|run| {
+            run.split_once('"')
+                .and_then(|(_, rest)| rest.rsplit_once('"'))
+                .map(|(quoted, _)| quoted.to_owned())
+        })
+        .collect();
+    // The dump writes characters past ASCII escaped.
+    assert_eq!(text, r"ab\u{301}cd", "{}", painted.text());
     Ok(())
 }
 

@@ -431,6 +431,7 @@ fn paginate_with<S: PageSink>(
             sink: sink(),
             taken: 0,
             taken_by_section: vec![0; document.sections().len()],
+            flow_sections: flow.iter().map(|flowed| flowed.section).collect(),
             keep_from: usize::MAX,
             most_held: 0,
             layouts_held: 0,
@@ -505,9 +506,11 @@ struct Totals {
 impl Totals {
     /// The counts of a document of `pages` pages, `by_section` of them in each section of
     /// `document`: all of them, but one less when the first section has a title page and
-    /// numbers its pages from 0 (MS-OI29500 2.1.489 a). A section counts the blank page of
-    /// its odd or even start, and not the page it starts on when it is continuous:
-    /// hypotheses until Word shows them (#298, `E-section-continuous-headers.docx`).
+    /// numbers its pages from 0 (MS-OI29500 2.1.489 a). A section counts the page it starts
+    /// on when it is continuous, as the section before does (Word's render of
+    /// `E-section-continuous-title.docx`; that a section whose first text goes on to the
+    /// next page starts there is a hypothesis, see `add_page`), and the blank page of its
+    /// odd or even start, a hypothesis until Word shows it (#298).
     fn of(pages: usize, by_section: &[u32], document: &Document) -> Self {
         let count = |section: usize| by_section.get(section).copied().unwrap_or(0);
         let all = u32::try_from(pages).unwrap_or(u32::MAX);
@@ -929,6 +932,8 @@ struct Pager<'d, 'f, 'b, S> {
     /// How many pages went to the sink, of each section.
     taken: usize,
     taken_by_section: Vec<u32>,
+    /// The section of each paragraph and table of the flow, by its place in it.
+    flow_sections: Vec<usize>,
     /// The first page that going back to a checkpoint could still change: where a chain
     /// of paragraphs kept with the next one starts while the chain can still move (it
     /// does not start at the top of a page), where the last piece of the paragraph before
@@ -1389,7 +1394,8 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// section of the same page setup, unless a page break (`after_break`) ended the
     /// paragraph before. Returns whether it started a new page. The current page keeps
     /// the section it started in: a continuous section's headers and footers apply from
-    /// its next page (hypothesis, `E-section-continuous-headers.docx`).
+    /// its next page, as Word's renders of `E-section-continuous-headers.docx` and
+    /// `E-section-continuous-title.docx` show.
     fn start_section(
         &mut self,
         index: usize,
@@ -2176,18 +2182,23 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let mut items = Vec::new();
         let mut floats = Vec::new();
         if let Some(ir) = self.document.sections().get(section).filter(|_| !blank) {
-            // The section's first page is the first of its own: a continuous section starts
-            // on a page that keeps the section before, so its title-page header is on its
-            // second. Hypothesis until a Word render (`E-section-continuous-headers.docx`).
-            // The sink takes no page before a later one is made, so the last page is held:
-            // a page that is not blank, or a blank one that an odd or even section start put
-            // before that section's first page, after a page of another section.
+            // The section's first page is the one it starts on, also when it is continuous
+            // and starts on a page that keeps the header of the section before: Word's
+            // render of `E-section-continuous-title.docx` gives the page after that one the
+            // section's default header, not its title page's. A continuous section starts on
+            // the page that holds its first text, so that one whose first text goes on to the
+            // next page (a keep chain that moves, widow control, a page break before its
+            // first paragraph) starts there: a hypothesis until a Word render, which might
+            // count the page that holds the section break instead. The sink takes no page before
+            // a later one is made, so the last page is held: a page that is not blank, or a
+            // blank one that an odd or even section start put before that section's first
+            // page, after a page of another section.
             let first = self
                 .pages
                 .iter()
                 .rev()
                 .find(|page| !page.blank)
-                .is_none_or(|page| page.section != section);
+                .is_none_or(|page| self.last_section(page) < section);
             let kind = if ir.title_page() && first {
                 Kind::First
             } else if self.document.settings().even_and_odd_headers() && number % 2 == 0 {
@@ -2301,6 +2312,15 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         self.taken + self.pages.len()
     }
 
+    /// The last section whose body is on `page`: its own, or a continuous one whose first
+    /// text is on it (see `add_page` for the hypothesis this takes).
+    fn last_section(&self, page: &Page) -> usize {
+        page.fragments
+            .last()
+            .and_then(|fragment| self.flow_sections.get(fragment.paragraph))
+            .map_or(page.section, |&section| section.max(page.section))
+    }
+
     /// Page `index` of those made, unless it went to the sink.
     fn page_at(&self, index: usize) -> Option<&Page> {
         index
@@ -2319,7 +2339,15 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             .collect();
         let mut notes = notes.into_iter();
         for mut page in pages {
-            if let Some(taken) = self.taken_by_section.get_mut(page.section) {
+            // A page counts for its own section, and for every continuous one that starts
+            // on it: Word's render of `E-section-continuous-title.docx` counts the page a
+            // continuous section starts on in that section's SECTIONPAGES as well.
+            let last = self.last_section(&page);
+            for taken in self
+                .taken_by_section
+                .get_mut(page.section..=last)
+                .unwrap_or_default()
+            {
                 *taken = taken.saturating_add(1);
             }
             self.taken += 1;
@@ -5057,19 +5085,18 @@ mod tests {
             (0, "AAAAAAAAAA", 56.0),
             (0, "Z", 76.0),
         ];
-        // The soft hyphen's own glyphs, then the hyphen drawn for it, which stands for no
-        // text.
+        // The soft hyphen itself is not drawn, as in Word's PDF, and the hyphen drawn for
+        // it stands for a hyphen-minus.
         const HYPHENATED: &[(usize, &str, f64)] = &[
             (0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 36.0),
-            (0, "\u{ad}", 36.0),
-            (0, "", 36.0),
+            (0, "-", 36.0),
             (0, "AAAAAAAAAA", 56.0),
             (0, "Z", 76.0),
         ];
         const AT_THE_SPACES: &[(usize, &str, f64)] = &[
             (0, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 36.0),
             (0, "  ", 36.0),
-            (0, "AA\u{ad}", 56.0),
+            (0, "AA", 56.0),
             (0, "AAAAAAAAAA", 56.0),
             (0, "Z", 76.0),
         ];
@@ -6382,6 +6409,248 @@ mod tests {
             .with_rows(rows)
     }
 
+    #[test]
+    fn a_floating_picture_in_a_link_takes_the_link_over_its_frame() {
+        use crate::ir::{HorizontalPlacement, HorizontalReference, LinkTarget};
+        use crate::ir::{VerticalPlacement, VerticalReference};
+        // A picture 30 by 10 pt placed 50 pt from the page's left edge and 70 pt down, in a
+        // link between two letters: the link takes the picture's frame, and nothing on the
+        // line, where the picture takes no room.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let picture = anchored_picture(
+            &mut document,
+            (
+                HorizontalReference::Page,
+                HorizontalPlacement::Offset(Pt(50.0)),
+            ),
+            (VerticalReference::Page, VerticalPlacement::Offset(Pt(70.0))),
+        );
+        let paragraph = Paragraph::new(style).with_inlines([
+            Inline::text("A", style),
+            Inline::link_start(LinkTarget::Uri("https://example.com/".into())),
+            picture,
+            Inline::link_end(),
+            Inline::text("A", style),
+        ]);
+        document.add_section(Section::new(setup()).with_blocks([paragraph.into()]));
+        let (laid, _) = laid(&document, 10);
+        let pages = laid.expect("pages").pages;
+        let boxes: Vec<String> = pages[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Image(image) => Some(format!(
+                    "image {} {} {} {}",
+                    image.at.x.0, image.at.y.0, image.width.0, image.height.0
+                )),
+                DisplayItem::Link {
+                    at, width, height, ..
+                } => Some(format!(
+                    "link {} {} {} {}",
+                    at.x.0, at.y.0, width.0, height.0
+                )),
+                _ => None,
+            })
+            .collect();
+        // The link first, before what the object draws, so that a text box's own links
+        // come after it, over it.
+        assert_eq!(boxes, ["link 50 70 30 10", "image 50 70 30 10"]);
+    }
+
+    #[test]
+    fn links_that_a_row_of_exact_height_cuts_off_are_reported() {
+        use crate::ir::{Alignment, Indent, LinkTarget, RowHeight};
+        const CUT: &str =
+            "links of text and pictures that a table row of exact height cuts off are left out";
+        // A row of an exact `height` holding two 20 pt lines, the link over `linked`, spaced
+        // by `letters`, between two `A` on line `on`, its paragraph with `props`: reported
+        // where the row leaves none of the link, below it or beside it, as an overflow; not
+        // where it is inside the row, nor where the row cuts it only in part, nor where the
+        // link is too small to be one anywhere.
+        let reported = |height: f64, on: usize, props: ParagraphProps, (linked, letters)| {
+            let mut document = Document::default();
+            let font = RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0));
+            let style = document.add_run_style(font.clone());
+            let spaced = document.add_run_style(font.with_letter_spacing(Pt(letters)));
+            let link = [
+                Inline::link_start(LinkTarget::Uri("u".into())),
+                Inline::text(linked, spaced),
+                Inline::link_end(),
+            ];
+            let mut inlines = Vec::new();
+            for line in 1..=2 {
+                if line > 1 {
+                    inlines.push(Inline::line_break(BreakClear::None, style));
+                }
+                if line == on {
+                    inlines.push(Inline::text("A", style));
+                    inlines.extend(link.clone());
+                }
+                inlines.push(Inline::text("A", style));
+            }
+            let row = Row::default()
+                .with_height(RowHeight::Exact(Pt(height)))
+                .with_cells([Cell::default().with_blocks([Paragraph::new(style)
+                    .with_props(props)
+                    .with_inlines(inlines)
+                    .into()])]);
+            document.add_section(
+                Section::new(setup()).with_blocks(vec![table_with(vec![row], 0.0).into()]),
+            );
+            let (laid, report) = laid(&document, 10);
+            laid.expect("pages");
+            report
+                .entries()
+                .iter()
+                .find(|entry| entry.message() == CUT)
+                .map(crate::report::ReportEntry::kind)
+        };
+        let plain = || spacing(0.0, 0.0);
+        let a = ("A", 0.0);
+        assert_eq!(reported(20.0, 2, plain(), a), Some(ReportKind::Overflow));
+        assert_eq!(reported(20.0, 1, plain(), a), None);
+        // Line 2, from 20 to 40, in a row of 30: cut in part, and kept as far as the row.
+        assert_eq!(reported(30.0, 2, plain(), a), None);
+        // Line 1 inside a row of 30, but 60 pt left of the cell, which the row clips to,
+        // or right of it.
+        let left = plain().with_indent(Indent::default().with_start(Pt(-60.0)));
+        assert_eq!(reported(30.0, 1, left, a), Some(ReportKind::Overflow));
+        let right = plain()
+            .with_alignment(Alignment::End)
+            .with_indent(Indent::default().with_end(Pt(-60.0)));
+        assert_eq!(reported(30.0, 1, right, a), Some(ReportKind::Overflow));
+        // Line 2 in a row of 20.005 pt: 0.005 pt of it inside the row, less than a link may
+        // be, so the painter leaves the link out.
+        assert_eq!(reported(20.005, 2, plain(), a), Some(ReportKind::Overflow));
+        // Inside the row, a link over a character of no width, and one over an `A` of
+        // 0.005 pt, its letters spaced by -5.995 pt: too small for a link on any page.
+        assert_eq!(reported(30.0, 1, plain(), ("\u{200B}", 0.0)), None);
+        assert_eq!(reported(30.0, 1, plain(), ("A", -5.995)), None);
+        // And one on a line of 0.0004 of a single line of 11.5 pt, too low for a link on
+        // any page, in a row of an exact 30 pt that cuts off the three lines of 20 pt of
+        // the paragraph after it.
+        let mut document = Document::default();
+        let style = document.add_run_style(
+            RunStyle::default()
+                .with_fonts(RunFonts::new("Officewright Test"))
+                .with_size(Pt(10.0)),
+        );
+        let low = Paragraph::new(style)
+            .with_props(
+                ParagraphProps::default()
+                    .with_spacing(Spacing::default().with_line(LineSpacing::Multiple(0.0004))),
+            )
+            .with_inlines([
+                Inline::link_start(LinkTarget::Uri("u".into())),
+                Inline::text("A", style),
+                Inline::link_end(),
+            ]);
+        let row = Row::default()
+            .with_height(RowHeight::Exact(Pt(30.0)))
+            .with_cells([
+                Cell::default().with_blocks([low.into(), lines(style, 3, spacing(0.0, 0.0))])
+            ]);
+        document.add_section(
+            Section::new(setup()).with_blocks(vec![table_with(vec![row], 0.0).into()]),
+        );
+        let (laid, report) = laid(&document, 10);
+        laid.expect("pages");
+        let messages = messages(&report);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("exact height")),
+            "{messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|message| message == CUT),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn links_and_bookmarks_in_headers_and_table_cells_are_where_their_text_is() {
+        use crate::ir::LinkTarget;
+
+        let link = |style: RunStyleId, uri: &str| {
+            vec![
+                Inline::link_start(LinkTarget::Uri(uri.to_owned())),
+                Inline::text("A", style),
+                Inline::link_end(),
+            ]
+        };
+        let document = document(|style| {
+            let header = Paragraph::new(style).with_inlines(link(style, "header"));
+            let mut linked = vec![Inline::bookmark("cell")];
+            linked.extend(link(style, "cell"));
+            let row = Row::default().with_cells([
+                Cell::default().with_blocks([lines(style, 1, ParagraphProps::default())]),
+                Cell::default().with_blocks([Paragraph::new(style).with_inlines(linked).into()]),
+            ]);
+            vec![
+                Section::new(setup())
+                    .with_headers(HeaderFooterSet::default().with_primary([header.into()]))
+                    .with_blocks(vec![
+                        table_with(vec![row], 0.0).into(),
+                        Paragraph::new(style)
+                            .with_inlines([Inline::page_break(style), Inline::text("B", style)])
+                            .into(),
+                    ]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let pages = laid.expect("pages").pages;
+        assert_eq!(pages.len(), 2);
+        // Each link starts where its glyphs do, and its line's box holds their baseline.
+        let marks = |page: &Page| -> Vec<String> {
+            let runs: Vec<(f64, f64)> = page
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    DisplayItem::Glyphs(run) => Some((run.origin.x.0, run.origin.y.0)),
+                    _ => None,
+                })
+                .collect();
+            page.items
+                .iter()
+                .filter_map(|item| match item {
+                    DisplayItem::Link {
+                        at, height, target, ..
+                    } => {
+                        let over = runs.iter().any(|&(x, baseline)| {
+                            x == at.x.0 && (at.y.0..at.y.0 + height.0).contains(&baseline)
+                        });
+                        Some(format!("{target:?} at {} over its text: {over}", at.x.0))
+                    }
+                    DisplayItem::Destination { at, name } => {
+                        let over = runs.iter().any(|&(x, _)| x == at.x.0);
+                        Some(format!("{name} at {} by its text: {over}", at.x.0))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            marks(&pages[0]),
+            [
+                "Uri(\"header\") at 20 over its text: true",
+                "cell at 120 by its text: true",
+                "Uri(\"cell\") at 120 over its text: true",
+            ]
+        );
+        assert_eq!(
+            marks(&pages[1]),
+            ["Uri(\"header\") at 20 over its text: true"]
+        );
+    }
+
     /// The baselines of the glyphs of `page` left of `x`, and of those right of it.
     fn baselines(page: &Page, x: f64) -> (Vec<f64>, Vec<f64>) {
         let mut sides = (Vec::new(), Vec::new());
@@ -7526,6 +7795,65 @@ mod tests {
         // Section 1 numbers its pages in capital Roman numerals; section 2 continues the
         // numbers, and its field writes them as letters.
         assert_eq!(footers, ["I 5 2", "II 5 2", "c 5 3", "d 5 3", "e 5 3"]);
+    }
+
+    #[test]
+    fn a_continuous_section_s_first_page_is_the_one_it_starts_on() {
+        use crate::ir::{Field, FieldKind};
+        // E-section-continuous-title.docx: a continuous section with a title page starts
+        // on page 1, below the section before, and goes on to pages 2 and 3. Page 1 keeps
+        // the header and footer of the section before; Word gives page 2 the section's
+        // default ones, not its title page's, and counts page 1 in its SECTIONPAGES too.
+        let document = document(|style| {
+            let text = |text: &str| text_paragraph(style, text, spacing(0.0, 0.0));
+            let counted = |text: &str| -> Vec<Block> {
+                vec![
+                    Paragraph::new(style)
+                        .with_props(spacing(0.0, 0.0))
+                        .with_inlines([
+                            Inline::text(text, style),
+                            Inline::Field(Field::new(FieldKind::SectionPages, style)),
+                        ])
+                        .into(),
+                ]
+            };
+            let next_page = || lines(style, 1, spacing(0.0, 0.0).with_page_break_before(true));
+            vec![
+                Section::new(close_frames())
+                    .with_headers(HeaderFooterSet::default().with_primary(vec![text("HA")]))
+                    .with_footers(HeaderFooterSet::default().with_primary(counted("FA ")))
+                    .with_blocks(vec![lines(style, 1, spacing(0.0, 0.0))]),
+                Section::new(close_frames())
+                    .with_start(SectionStart::Continuous)
+                    .with_title_page(true)
+                    .with_headers(
+                        HeaderFooterSet::default()
+                            .with_first(vec![text("HF")])
+                            .with_primary(vec![text("HB")]),
+                    )
+                    .with_footers(
+                        HeaderFooterSet::default()
+                            .with_first(counted("FF "))
+                            .with_primary(counted("FB ")),
+                    )
+                    .with_blocks(vec![
+                        lines(style, 1, spacing(0.0, 0.0)),
+                        next_page(),
+                        next_page(),
+                    ]),
+            ]
+        });
+        let (laid, _) = laid(&document, 100);
+        let frames: Vec<Vec<String>> = laid
+            .expect("pages")
+            .pages
+            .iter()
+            .map(|page| texts(page).into_iter().take(2).collect())
+            .collect();
+        assert_eq!(
+            frames,
+            [["HA", "FA 1"], ["HB", "FB 3"], ["HB", "FB 3"]].map(|frames| frames.map(String::from))
+        );
     }
 
     #[test]
@@ -9464,6 +9792,12 @@ mod tests {
                     at, width, height, ..
                 } => format!("clip {} {} {} {}", at.x.0, at.y.0, width.0, height.0),
                 DisplayItem::PopClip => "end clip".to_owned(),
+                DisplayItem::Link {
+                    at, width, height, ..
+                } => format!("link {} {} {} {}", at.x.0, at.y.0, width.0, height.0),
+                DisplayItem::Destination { at, name } => {
+                    format!("destination {name} {} {}", at.x.0, at.y.0)
+                }
             })
             .collect()
     }

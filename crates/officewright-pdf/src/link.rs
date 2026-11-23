@@ -1,8 +1,11 @@
 //! Links and the named destinations they go to: link annotations (ISO 32000-1, 12.5.6.5)
 //! and the `/Dests` name tree of the catalog (12.3.2.3).
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::hash::{BuildHasher, RandomState};
 use std::ops::Range;
+use std::sync::Arc;
 
 use officewright_core::Pt;
 
@@ -47,15 +50,19 @@ pub enum LinkTarget {
 pub(crate) struct Link {
     /// The lower-left and upper-right corners.
     rect: [f64; 4],
-    target: Target,
+    /// Shared by the links of one target that [`LinkTargets`] gave out, so that a link over
+    /// many lines keeps its target once (#581).
+    target: Arc<Target>,
 }
 
-#[derive(Clone, Debug)]
-enum Target {
+/// Where a link goes, checked and in the form the file stores: the action that every
+/// link to it shares, written once.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Target {
     /// The URI, percent-encoded.
     Uri(Vec<u8>),
-    /// The destination's name, and its key in the name tree.
-    Destination { name: String, key: Vec<u8> },
+    /// The destination's name as its key in the name tree.
+    Destination(Vec<u8>),
 }
 
 /// A named destination of a page, checked and in the form the file stores.
@@ -68,55 +75,132 @@ pub(crate) struct Destination {
     y: f64,
 }
 
+/// The targets of links checked so far, each kept once in the form the file stores: the
+/// links of one target share it. Only a cache, so that a link that spans many lines does
+/// not keep its URI once for each (#581): the file writes each target once whether or not
+/// the links share it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LinkTargets {
+    /// The targets by the hash of what they were checked from.
+    targets: HashMap<u64, Vec<Arc<Target>>>,
+    hasher: RandomState,
+    /// The target asked for last, as it was asked for, which the boxes of one link ask
+    /// for one after another: found by comparing it, without hashing or encoding it again.
+    last: Option<(LinkTarget, Arc<Target>)>,
+}
+
+impl LinkTargets {
+    /// `target` checked, the same as for every link to it before.
+    fn get(&mut self, target: &LinkTarget) -> Result<Arc<Target>> {
+        if let Some((_, checked)) = self.last.as_ref().filter(|(last, _)| last == target) {
+            return Ok(Arc::clone(checked));
+        }
+        let hash = self.hasher.hash_one(target);
+        let known = self
+            .targets
+            .get(&hash)
+            .and_then(|known| known.iter().find(|known| known.is(target)))
+            .cloned();
+        let checked = match known {
+            Some(checked) => checked,
+            None => {
+                let checked = Arc::new(Target::check(target)?);
+                self.targets
+                    .entry(hash)
+                    .or_default()
+                    .push(Arc::clone(&checked));
+                checked
+            }
+        };
+        self.last = Some((target.clone(), Arc::clone(&checked)));
+        Ok(checked)
+    }
+}
+
 impl Link {
-    /// Checks a link of the rectangle with its lower-left corner at (`x`, `y`) and the
-    /// given width and height, to `target`.
-    pub(crate) fn new(x: Pt, y: Pt, width: Pt, height: Pt, target: &LinkTarget) -> Result<Self> {
+    /// Checks the rectangle of a link with its lower-left corner at (`x`, `y`) and the
+    /// given width and height: its corners.
+    pub(crate) fn rect(x: Pt, y: Pt, width: Pt, height: Pt) -> Result<[f64; 4]> {
         check_range("link width", width.0, MIN_LINK_SIDE, MAX_POSITION)?;
         check_range("link height", height.0, MIN_LINK_SIDE, MAX_POSITION)?;
         check_position(x, y)?;
         let (right, top) = (Pt(x.0 + width.0), Pt(y.0 + height.0));
         check_position(right, top)?;
-        let target = match target {
-            LinkTarget::Uri(uri) => {
-                let encoded = uri_key(uri);
-                check_length("URI length in bytes", encoded.len())?;
-                Target::Uri(encoded)
-            }
-            LinkTarget::Destination(name) => Target::Destination {
-                name: name.clone(),
-                key: name_key(name)?,
-            },
-        };
+        Ok([x.0, y.0, right.0, top.0])
+    }
+
+    /// A link of the corners `rect` ([`Self::rect`]) to `target`, checked by `targets`.
+    pub(crate) fn new(
+        rect: [f64; 4],
+        target: &LinkTarget,
+        targets: &mut LinkTargets,
+    ) -> Result<Self> {
         Ok(Self {
-            rect: [x.0, y.0, right.0, top.0],
-            target,
+            rect,
+            target: targets.get(target)?,
         })
     }
 
-    /// The name of the destination the link goes to, and its key; `None` for a URI.
-    fn destination(&self) -> Option<(&str, &[u8])> {
-        match &self.target {
-            Target::Destination { name, key } => Some((name, key)),
+    /// Where the link goes.
+    pub(crate) fn target(&self) -> &Target {
+        &self.target
+    }
+
+    /// The key of the destination the link goes to; `None` for a URI.
+    fn destination(&self) -> Option<&[u8]> {
+        match self.target.as_ref() {
+            Target::Destination(key) => Some(key),
             Target::Uri(_) => None,
         }
     }
 
-    /// The annotation dictionary.
-    pub(crate) fn dictionary(&self) -> Vec<u8> {
+    /// The annotation dictionary, whose action is object `action` ([`Target::action`]).
+    pub(crate) fn dictionary(&self, action: usize) -> Vec<u8> {
         let [left, bottom, right, top] = self.rect.map(number);
-        let mut out = format!(
-            "<< /Type /Annot /Subtype /Link /Rect [{left} {bottom} {right} {top}] /Border [0 0 0] "
+        format!(
+            "<< /Type /Annot /Subtype /Link /Rect [{left} {bottom} {right} {top}] /Border [0 0 0] \
+             /A {action} 0 R >>"
         )
-        .into_bytes();
-        match &self.target {
-            Target::Uri(uri) => {
-                out.extend_from_slice(b"/A << /S /URI /URI ");
-                push_string(&mut out, uri);
-                out.extend_from_slice(b" >>");
+        .into_bytes()
+    }
+}
+
+impl Target {
+    /// `target` checked, in the form the file stores.
+    fn check(target: &LinkTarget) -> Result<Self> {
+        match target {
+            LinkTarget::Uri(uri) => {
+                let encoded = uri_key(uri);
+                check_length("URI length in bytes", encoded.len())?;
+                Ok(Self::Uri(encoded))
             }
-            Target::Destination { key, .. } => {
-                out.extend_from_slice(b"/Dest ");
+            LinkTarget::Destination(name) => Ok(Self::Destination(name_key(name)?)),
+        }
+    }
+
+    /// Whether it is `target` checked, compared in the form the file stores.
+    fn is(&self, target: &LinkTarget) -> bool {
+        match (self, target) {
+            (Self::Uri(encoded), LinkTarget::Uri(uri)) => encodes_to(uri, keeps_uri, encoded),
+            (Self::Destination(key), LinkTarget::Destination(name)) => {
+                encodes_to(name, keeps_name, key)
+            }
+            _ => false,
+        }
+    }
+
+    /// The action of every link to it (ISO 32000-1, 12.6.4.7 and 12.6.4.2): an indirect
+    /// object, which the links share (12.5.6.5), so that a link over many lines writes
+    /// its target once.
+    pub(crate) fn action(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        match self {
+            Self::Uri(uri) => {
+                out.extend_from_slice(b"<< /S /URI /URI ");
+                push_string(&mut out, uri);
+            }
+            Self::Destination(key) => {
+                out.extend_from_slice(b"<< /S /GoTo /D ");
                 push_string(&mut out, key);
             }
         }
@@ -189,13 +273,13 @@ impl<'a> Destinations<'a> {
             }
         }
         for (page, (_, links)) in pages.into_iter().enumerate() {
-            for (name, key) in links.iter().filter_map(Link::destination) {
+            for key in links.iter().filter_map(Link::destination) {
                 if entries
                     .binary_search_by(|(known, _)| known.key.as_slice().cmp(key))
                     .is_err()
                 {
                     return Err(Error::UnknownDestination {
-                        name: name.to_owned(),
+                        name: key_name(key),
                         page,
                     });
                 }
@@ -320,7 +404,70 @@ fn tree(count: usize, leaf: usize, fanout: usize) -> Vec<Node> {
 
 /// `uri` as a URI: each byte of its UTF-8 form outside `!` to `~` as `%XX`.
 fn uri_key(uri: &str) -> Vec<u8> {
-    percent_encode(uri, |byte| (b'!'..=b'~').contains(&byte))
+    percent_encode(uri, keeps_uri)
+}
+
+/// Whether a URI keeps `byte` as it is.
+fn keeps_uri(byte: u8) -> bool {
+    (b'!'..=b'~').contains(&byte)
+}
+
+/// Whether a destination's key keeps `byte` as it is.
+fn keeps_name(byte: u8) -> bool {
+    byte != b'%' && (b' '..=b'~').contains(&byte)
+}
+
+/// Whether `text` percent-encoded as [`percent_encode`] does with `keep` is `encoded`,
+/// compared without encoding it.
+fn encodes_to(text: &str, keep: impl Fn(u8) -> bool, encoded: &[u8]) -> bool {
+    let mut rest = encoded;
+    for &byte in text.as_bytes() {
+        let matched = if keep(byte) {
+            rest.split_first().filter(|(first, _)| **first == byte)
+        } else {
+            let escape = [b'%', hex_digit(byte >> 4), hex_digit(byte & 0x0F)];
+            rest.split_at_checked(3)
+                .filter(|(head, _)| *head == escape)
+                .map(|(_, tail)| (&0, tail))
+        };
+        match matched {
+            Some((_, tail)) => rest = tail,
+            None => return false,
+        }
+    }
+    rest.is_empty()
+}
+
+/// The upper-case hexadecimal digit of `nibble` (0 to 15), as `%XX` writes it.
+fn hex_digit(nibble: u8) -> u8 {
+    match nibble {
+        0..=9 => b'0' + nibble,
+        _ => b'A' + nibble - 10,
+    }
+}
+
+/// The name a destination's key stands for: its `%XX` decoded.
+fn key_name(key: &[u8]) -> String {
+    let mut bytes = Vec::with_capacity(key.len());
+    let mut rest = key;
+    while let Some((&byte, tail)) = rest.split_first() {
+        let decoded = (byte == b'%')
+            .then(|| tail.get(..2))
+            .flatten()
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match decoded {
+            Some(value) => {
+                bytes.push(value);
+                rest = tail.get(2..).unwrap_or_default();
+            }
+            None => {
+                bytes.push(byte);
+                rest = tail;
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// `text` with each byte of its UTF-8 form that `keep` refuses written as `%XX`.
@@ -341,7 +488,7 @@ fn percent_encode(text: &str, keep: impl Fn(u8) -> bool) -> Vec<u8> {
 /// readers that compare them as text, as qpdf does, put printable ASCII in the same order.
 /// `%` itself is encoded, so that no two names share a key.
 fn name_key(name: &str) -> Result<Vec<u8>> {
-    let key = percent_encode(name, |byte| byte != b'%' && (b' '..=b'~').contains(&byte));
+    let key = percent_encode(name, keeps_name);
     check_length("destination name length in bytes", key.len())?;
     Ok(key)
 }
@@ -487,6 +634,46 @@ mod tests {
         // `%` is encoded too, so a name that looks encoded keeps a key of its own.
         assert_eq!(name_key("100%").unwrap(), b"100%25");
         assert_ne!(name_key("%D0%96").unwrap(), name_key("Ж").unwrap());
+    }
+
+    #[test]
+    fn compares_a_target_without_encoding_it_and_names_a_key_back() {
+        let texts = [
+            "https://example.com/a b/(Ж)",
+            "100%",
+            "%41",
+            "Глава",
+            "a)b",
+            "\u{1F600}",
+            "~ !",
+        ];
+        for text in texts {
+            assert!(encodes_to(text, keeps_uri, &uri_key(text)), "{text}");
+            let key = name_key(text).unwrap();
+            assert!(encodes_to(text, keeps_name, &key), "{text}");
+            assert_eq!(key_name(&key), text);
+            // Another text, a longer one and a shorter one are not the same.
+            for other in texts.iter().filter(|other| **other != text) {
+                assert!(
+                    !encodes_to(other, keeps_uri, &uri_key(text)),
+                    "{other} {text}"
+                );
+            }
+            assert!(!encodes_to(&format!("{text}x"), keeps_uri, &uri_key(text)));
+            let shorter = &uri_key(text)[..uri_key(text).len() - 1];
+            assert!(!encodes_to(text, keeps_uri, shorter), "{text}");
+        }
+        // A text whose encoding is shorter than the stored one is not it, and a URI is not
+        // a destination of the same text.
+        assert!(!encodes_to("ab", keeps_uri, b"abc"));
+        let uri = Target::check(&LinkTarget::Uri("top".to_owned())).unwrap();
+        assert!(uri.is(&LinkTarget::Uri("top".to_owned())));
+        assert!(!uri.is(&LinkTarget::Destination("top".to_owned())));
+        let name = Target::check(&LinkTarget::Destination("top".to_owned())).unwrap();
+        assert!(!name.is(&LinkTarget::Uri("top".to_owned())));
+        // A key that is not one keeps what it cannot decode.
+        assert_eq!(key_name(b"%4"), "%4");
+        assert_eq!(key_name(b"%zz%41"), "%zzA");
     }
 
     #[test]

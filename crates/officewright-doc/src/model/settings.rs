@@ -365,8 +365,9 @@ impl Settings {
     }
 
     /// The document's footnote placement and numbering (`w:footnotePr`), which
-    /// sections may change. Word takes the placement from the sections only
-    /// (MS-OI29500 §17.11.21(a)).
+    /// sections may change. Word takes both from the sections only: the placement
+    /// (MS-OI29500 §17.11.21(a)), and the numbering, as its render of
+    /// `E-footnote-numbering-settings` shows (#579).
     pub fn footnotes(&self) -> Option<&NoteProperties> {
         self.footnotes.as_ref()
     }

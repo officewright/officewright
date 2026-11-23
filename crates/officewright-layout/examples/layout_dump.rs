@@ -13,7 +13,9 @@
 //! ```
 //!
 //! Each line of FILE is a paragraph; in it, `\t` is a tab, `\n` a line break, `\p` a
-//! page break, text between `_` is underlined and text between `*` is bold. For example
+//! page break, text between `_` is underlined and text between `*` is bold;
+//! `\l{TARGET}` starts a link to TARGET, a URI or `#` and the name of a bookmark, `\e`
+//! ends it, and `\b{NAME}` starts the bookmark NAME. For example
 //! `tests/fonts Calibri 468 notes.txt --justify --page 792` lays the file out in
 //! Carlito, justified, on Letter pages with 1 inch margins.
 
@@ -23,8 +25,8 @@ use officewright_core::{PageSize, Pt};
 use officewright_font::FontBook;
 use officewright_layout::fuzzing;
 use officewright_layout::ir::{
-    Alignment, BreakClear, Document, Field, FieldKind, HeaderFooterSet, Inline, PageSetup,
-    Paragraph, ParagraphProps, RunFonts, RunStyle, RunStyleId, Section, Underline,
+    Alignment, BreakClear, Document, Field, FieldKind, HeaderFooterSet, Inline, LinkTarget,
+    PageSetup, Paragraph, ParagraphProps, RunFonts, RunStyle, RunStyleId, Section, Underline,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -153,8 +155,9 @@ struct Styles {
     both: RunStyleId,
 }
 
-/// The inlines of a line of the file: text, tabs (`\t`) and line breaks (`\n`), in the
-/// styles `_` and `*` switch.
+/// The inlines of a line of the file: text, tabs (`\t`), line breaks (`\n`), page
+/// breaks (`\p`), links (`\l{TARGET}` to `\e`) and bookmarks (`\b{NAME}`), in the styles
+/// `_` and `*` switch.
 fn inlines(line: &str, styles: &Styles) -> Vec<Inline> {
     let mut inlines = Vec::new();
     let (mut underlined, mut bold) = (false, false);
@@ -169,7 +172,7 @@ fn inlines(line: &str, styles: &Styles) -> Vec<Inline> {
     while let Some(ch) = chars.next() {
         let piece = match ch {
             '_' | '*' => None,
-            '\\' if matches!(chars.peek(), Some('t' | 'n' | 'p')) => chars.next(),
+            '\\' if matches!(chars.peek(), Some('t' | 'n' | 'p' | 'l' | 'e' | 'b')) => chars.next(),
             _ => {
                 text.push(ch);
                 continue;
@@ -188,6 +191,26 @@ fn inlines(line: &str, styles: &Styles) -> Vec<Inline> {
             (_, Some('t')) => inlines.push(Inline::tab(current)),
             (_, Some('n')) => inlines.push(Inline::line_break(BreakClear::None, current)),
             (_, Some('p')) => inlines.push(Inline::page_break(current)),
+            (_, Some('e')) => inlines.push(Inline::link_end()),
+            (_, Some(mark @ ('l' | 'b'))) => {
+                // The target or name, between braces.
+                let mut name = String::new();
+                if chars.next_if_eq(&'{').is_some() {
+                    for ch in chars.by_ref() {
+                        if ch == '}' {
+                            break;
+                        }
+                        name.push(ch);
+                    }
+                }
+                inlines.push(match (mark, name.strip_prefix('#')) {
+                    ('b', _) => Inline::bookmark(name),
+                    (_, Some(bookmark)) => {
+                        Inline::link_start(LinkTarget::Bookmark(bookmark.into()))
+                    }
+                    _ => Inline::link_start(LinkTarget::Uri(name)),
+                });
+            }
             _ => {}
         }
     }

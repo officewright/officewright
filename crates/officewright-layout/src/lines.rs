@@ -44,6 +44,16 @@ pub(crate) const SEPARATOR_LENGTH: f64 = 144.0;
 /// [`TabStops::next`]: crate::tabs::TabStops::next
 pub(crate) const EPSILON: f64 = 1e-9;
 
+/// The share of their width by which the spaces of a justified line may narrow so that the
+/// next word fits on it, as Word 2013 and later narrow them (#497): Word's gaps in
+/// `generated/contract-ru` go down to 76 % of the space. A fifth is measured over the
+/// corpus, where with it no document's lines agree with Word's less than without it. It
+/// is not Word's rule, which no share of the spaces gives: Word narrows some lines by
+/// more than a fifth (24 % in `generated/contract-ru`) and does not narrow others that
+/// need less (about a tenth for «з» in `generated/letter-uk`), so a line can hold a word
+/// more or less than Word's. Measured so until a rule document shows Word's limit.
+const SPACE_SHRINK: f64 = 0.2;
+
 /// How many clusters after a cut are shaped again at most when HarfRust marks none of
 /// them safe to break before, which bounds the work per line in a run kerned
 /// throughout. Where the shaped pieces meet there, the shaping of the one before ends as
@@ -53,7 +63,7 @@ pub(crate) const EPSILON: f64 = 1e-9;
 const RESHAPE_WINDOW: usize = 64;
 
 /// Where first fit ends a line.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Fit {
     /// The unit after the line's last.
     end: usize,
@@ -68,6 +78,8 @@ struct Fit {
     /// Whether the line holds a tab to a stop past its end that Word takes before mode
     /// 15 ([`Cursor::tab`]), so that the line may be wider than its room.
     beyond: bool,
+    /// How far past its end the line may reach, narrowing its spaces to justify it.
+    squeeze: f64,
 }
 
 /// What a tab to a stop past the end of a line does ([`Cursor::tab`]).
@@ -310,10 +322,7 @@ impl Piece {
                 if let (Some(start), Some(text)) = (run_start, &text) {
                     let end = next.map_or(text.end, |next| start + next.cluster);
                     let cluster = itemized.text.get(start + glyph.cluster..end).unwrap_or("");
-                    let spaces = cluster
-                        .chars()
-                        .filter(|&ch| ch == ' ' || ch == '\u{00A0}')
-                        .count();
+                    let spaces = cluster.chars().filter(|&ch| stretches(ch)).count();
                     advance += spaces as f64 * space_extra.0;
                 }
                 if next.is_some() || last_extra {
@@ -725,6 +734,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     overflow: false,
                     hanging_tab: None,
                     beyond: false,
+                    squeeze: 0.0,
                 };
                 let mut line = self.place(end, fit, false);
                 self.set_height(&mut line, true);
@@ -754,7 +764,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             let mut line = self.place(start, fit, first);
             // Indents wider than the column leave no room, not less than none.
             let room = (right.0 - line.start.0).max(0.0);
-            let fits = line.width.0 <= room + EPSILON || fit.beyond;
+            let fits = line.width.0 <= room + EPSILON + fit.squeeze || fit.beyond;
             if fits || fit.end_kind != LineEnd::Wrap || line.overflow {
                 return (fit.end, line);
             }
@@ -847,9 +857,31 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
     fn fit(&mut self, start: usize, first: bool) -> Fit {
         let (left, right) = self.edges(first);
         let mut cursor = Cursor::new(left);
-        // The unit after the last place the line may end, where it would fit, and
-        // whether that place is a soft hyphen.
-        let mut candidate: Option<(usize, bool)> = None;
+        // How far past its end a justified line may reach: it narrows its spaces, from
+        // Word 2013 on. Documents saved in Word 2010's mode keep their spaces (the EC
+        // documents of business/, mode 14, lose up to a quarter of their lines to
+        // narrowing).
+        let justified = self.paragraph.props().alignment() == Alignment::Both
+            && self.document.settings().compat_mode() >= CompatMode::Word2013;
+        let squeeze = |cursor: &Cursor| {
+            if justified {
+                SPACE_SHRINK * cursor.narrowable()
+            } else {
+                0.0
+            }
+        };
+        // What a line that ends here may narrow: its spaces before its last text.
+        let held = |cursor: &Cursor| {
+            if justified {
+                SPACE_SHRINK * cursor.inner_spaces
+            } else {
+                0.0
+            }
+        };
+        // The unit after the last place the line may end, where it would fit, whether
+        // that place is a soft hyphen, and how far past its end the line may reach when
+        // it ends there.
+        let mut candidate: Option<(usize, bool, f64)> = None;
         let mut overflow = false;
         let mut hanging_tab: Option<usize> = None;
         let past_end = self.past_end();
@@ -870,13 +902,15 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     hyphen: bool,
                     overflow: bool,
                     hanging_tab: Option<usize>,
-                    beyond: Option<usize>| Fit {
+                    beyond: Option<usize>,
+                    squeeze: f64| Fit {
             end,
             end_kind: LineEnd::Wrap,
             hyphen,
             overflow,
             hanging_tab: hanging_tab.filter(|&tab| tab < end),
             beyond: beyond.is_some_and(|tab| tab < end),
+            squeeze,
         };
         let mut index = start;
         while let Some(unit) = self.units.get(index).cloned() {
@@ -910,6 +944,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                         overflow,
                         hanging_tab,
                         beyond: beyond.is_some(),
+                        squeeze: held(&cursor),
                     };
                 }
                 UnitKind::Tab { item } => {
@@ -918,8 +953,8 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     // and hangs with the spaces. After a tab to a stop past the end that
                     // Word takes before mode 15, the line goes on to its next place to end.
                     if cursor.x.0 > right.0 + EPSILON && beyond.is_none() {
-                        if let Some((end, hyphen)) = candidate {
-                            return wrap(end, hyphen, overflow, hanging_tab, beyond);
+                        if let Some((end, hyphen, squeeze)) = candidate {
+                            return wrap(end, hyphen, overflow, hanging_tab, beyond, squeeze);
                         }
                         hanging_tab.get_or_insert(index);
                     } else if past_end == PastEnd::Wrap
@@ -930,7 +965,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                         // past its end, even where UAX #14 lets no line end, and the tab
                         // starts the next line (`E-tab-margin`, cases 1, 2 and 4 to 8:
                         // after "before", after "(" and between two tabs).
-                        return wrap(index, false, overflow, hanging_tab, beyond);
+                        return wrap(index, false, overflow, hanging_tab, beyond, held(&cursor));
                     }
                     let from = cursor.x;
                     let rule = if *item >= label_end {
@@ -945,24 +980,33 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                     shown |= *item >= label_end;
                 }
                 UnitKind::Glyphs { text, .. } if is_space(self.itemized, text) => {
-                    cursor.space(unit.width);
+                    cursor.space(unit.width, !self.in_label(&unit));
                 }
                 kind => {
                     let what = self.decimal_char(kind);
                     let x = cursor.peek(unit.width, what);
                     // What does not show fits wherever the line has got to; characters
                     // condensed to no width show, and must start before the end.
-                    let over = shows(&unit) && x.0 > right.0 + EPSILON && beyond.is_none();
+                    let over = shows(&unit)
+                        && x.0 > right.0 + EPSILON + squeeze(&cursor)
+                        && beyond.is_none();
                     if over {
                         // The line ends at its last place to end, if it has one (after
                         // spaces at its start, too), else before the unit that does not
                         // fit, between two clusters; a unit alone on its line that does
                         // not fit stays there, reported.
-                        if let Some((end, hyphen)) = candidate {
-                            return wrap(end, hyphen, overflow, hanging_tab, beyond);
+                        if let Some((end, hyphen, squeeze)) = candidate {
+                            return wrap(end, hyphen, overflow, hanging_tab, beyond, squeeze);
                         }
                         if cursor.has_content {
-                            return wrap(index, false, overflow, hanging_tab, beyond);
+                            return wrap(
+                                index,
+                                false,
+                                overflow,
+                                hanging_tab,
+                                beyond,
+                                held(&cursor),
+                            );
                         }
                         self.report_overflow(kind);
                         overflow = true;
@@ -977,8 +1021,10 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             // before it ends after it instead, with that place's soft hyphen, so that it
             // stays on the line before a wrap.
             if unit.range.is_empty() {
-                if let Some((end, hyphen)) = candidate.filter(|&(end, _)| end + 1 == index) {
-                    candidate = Some((end + 1, hyphen));
+                if let Some((end, hyphen, squeeze)) =
+                    candidate.filter(|&(end, _, _)| end + 1 == index)
+                {
+                    candidate = Some((end + 1, hyphen, squeeze));
                 }
                 continue;
             }
@@ -995,12 +1041,20 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                         // keeps the text before the tab, though it could end before it (in
                         // the renders "before" is a paragraph of its own).
                         if index > tab + 1 && !hyphen {
-                            return wrap(index, false, overflow, hanging_tab, beyond);
+                            return wrap(
+                                index,
+                                false,
+                                overflow,
+                                hanging_tab,
+                                beyond,
+                                held(&cursor),
+                            );
                         }
-                    } else if !hyphen
-                        || cursor.x.0 + self.hyphen_width(index - 1).0 <= right.0 + EPSILON
-                    {
-                        candidate = Some((index, hyphen));
+                    } else {
+                        let end = right.0 + EPSILON + squeeze(&cursor);
+                        if !hyphen || cursor.x.0 + self.hyphen_width(index - 1).0 <= end {
+                            candidate = Some((index, hyphen, held(&cursor)));
+                        }
                     }
                 }
                 Some(Opportunity::Mandatory) if index < self.units.len() => {
@@ -1023,6 +1077,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
                             overflow,
                             hanging_tab,
                             beyond: beyond.is_some(),
+                            squeeze: held(&cursor),
                         };
                     }
                 }
@@ -1036,13 +1091,14 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             overflow,
             hanging_tab,
             beyond: beyond.is_some(),
+            squeeze: held(&cursor),
         }
     }
 
     /// The item after those of the list label and its suffix. No render shows a label's
-    /// tab past the end, so it is laid out as before Word's renders of `E-tab-margin` were
-    /// taken in, in every mode: the line does not end before it, and it takes no stop past
-    /// the end but reaches the end ([`PastEnd::Reach`]); a hypothesis until a Word render.
+    /// tab past the end, so in every mode the line does not end before it, and it takes no
+    /// stop past the end but reaches the end ([`PastEnd::Reach`]): a hypothesis until a
+    /// Word render.
     fn label_end(&self) -> usize {
         self.itemized.label.map_or(0, |label| label.with_suffix)
     }
@@ -1351,7 +1407,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             // the tab's end.
             let x = cursor.pending.map_or(cursor.x, |pending| Pt(pending.text));
             if self.is_space_unit(unit) {
-                cursor.space(unit.width);
+                cursor.space(unit.width, false);
             } else {
                 let what = self.decimal_char(&unit.kind);
                 cursor.add(unit.width, what);
@@ -1414,6 +1470,14 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         }
     }
 
+    /// Whether `unit` is part of the paragraph's list label or its suffix, which
+    /// justification leaves as they are (design 7.3).
+    fn in_label(&self, unit: &Unit) -> bool {
+        self.itemized
+            .label
+            .is_some_and(|label| unit.kind.item() < label.with_suffix)
+    }
+
     /// Whether `unit` is a space that may hang at the end of a line.
     fn is_space_unit(&self, unit: &Unit) -> bool {
         matches!(&unit.kind, UnitKind::Glyphs { text, .. } if is_space(self.itemized, text))
@@ -1424,6 +1488,14 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
     /// says otherwise) or by spacing out every cluster (every line).
     fn align(&mut self, line: &mut Line, last: bool) {
         let room = line.end_edge.0 - line.start.0 - line.width.0;
+        let alignment = self.paragraph.props().alignment();
+        // A justified line that holds its last word by narrowing its spaces narrows
+        // them, whichever line it is; one that is too wide for want of a place to end
+        // stays as it is.
+        if room < -EPSILON && alignment == Alignment::Both && !line.overflow {
+            self.stretch(line, room, Stretch::Spaces);
+            return;
+        }
         if room <= 0.0 {
             return;
         }
@@ -1431,7 +1503,7 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             .document
             .settings()
             .has_compat_flag(&CompatFlag::DoNotExpandShiftReturn);
-        match self.paragraph.props().alignment() {
+        match alignment {
             Alignment::Start => {}
             Alignment::Center => shift(line, Pt(room / 2.0)),
             Alignment::End => shift(line, Pt(room)),
@@ -1551,7 +1623,13 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
         let mut breaks = Vec::new();
         for piece in &line.pieces {
             match &piece.kind {
-                PieceKind::Text { item, .. } | PieceKind::Hyphen { item, .. } => {
+                // Soft hyphens of a run of another size make the line no taller, nor
+                // does the hyphen drawn for a soft hyphen (E-soft-hyphen-font: Noto Sans
+                // 20 pt among Calibri 11 pt, lines 13.44 pt apart). A soft hyphen of its
+                // letters' run draws its hyphen as tall as they are.
+                PieceKind::Hyphen { .. } => {}
+                PieceKind::Text { text: drawn, .. } if self.soft_hyphens_only(drawn) => {}
+                PieceKind::Text { item, .. } => {
                     text = true;
                     let metrics = self.text_metrics(*item);
                     extent.add(metrics, self.position(*item));
@@ -1653,6 +1731,14 @@ impl<'p, 'f, 'b> Breaker<'p, 'f, 'b> {
             return LineSpacing::Multiple(1.0);
         }
         spacing
+    }
+
+    /// Whether bytes `drawn` of the drawn text are nothing but soft hyphens.
+    fn soft_hyphens_only(&self, drawn: &Range<usize>) -> bool {
+        self.itemized
+            .text
+            .get(drawn.clone())
+            .is_some_and(|text| !text.is_empty() && text.chars().all(|ch| ch == '\u{00AD}'))
     }
 
     /// The vertical metrics of text item `item`: those of its face at the size its
@@ -1780,6 +1866,12 @@ struct Cursor {
     /// Whether the line has anything but spaces.
     has_content: bool,
     pending: Option<Pending>,
+    /// The width of the spaces after the last tab that text follows, which justification
+    /// may narrow.
+    inner_spaces: f64,
+    /// The width of the spaces since the last text, which justification may narrow once
+    /// text follows them.
+    last_spaces: f64,
 }
 
 /// A centred, end or decimal tab that waits for the text after it.
@@ -1844,7 +1936,15 @@ impl Cursor {
             x: start,
             has_content: false,
             pending: None,
+            inner_spaces: 0.0,
+            last_spaces: 0.0,
         }
+    }
+
+    /// The width of the spaces that text added now would have before it on the line,
+    /// after the last tab.
+    fn narrowable(&self) -> f64 {
+        self.inner_spaces + self.last_spaces
     }
 
     /// Where a piece `width` wide holding `what` would end.
@@ -1866,13 +1966,18 @@ impl Cursor {
             pending.add(width.0, what);
         }
         self.has_content = true;
+        self.inner_spaces += self.last_spaces;
+        self.last_spaces = 0.0;
     }
 
     /// Adds a space, which may hang past the end of the line.
-    fn space(&mut self, width: Pt) {
+    fn space(&mut self, width: Pt, narrows: bool) {
         self.x = self.peek(width, DecimalChar::Other);
         if let Some(pending) = &mut self.pending {
             pending.add(width.0, DecimalChar::Other);
+        }
+        if narrows {
+            self.last_spaces += width.0;
         }
     }
 
@@ -1929,6 +2034,9 @@ impl Cursor {
         }
         let start = self.x;
         self.has_content = true;
+        // Justification stretches only the text after the last tab.
+        self.inner_spaces = 0.0;
+        self.last_spaces = 0.0;
         let next = tabs.next(start);
         let stop = next.and_then(|stop| {
             if stop.position.0 <= end.0 + EPSILON {
@@ -2106,14 +2214,22 @@ fn is_space(itemized: &Itemized, text: &Range<usize>) -> bool {
         .is_some_and(|text| !text.is_empty() && text.chars().all(|ch| ch == ' '))
 }
 
-/// How many spaces that justification widens bytes `text` of the drawn text hold: the
-/// space and the no-break space.
+/// How many spaces that justification widens bytes `text` of the drawn text hold.
 fn stretchable_spaces(itemized: &Itemized, text: &Range<usize>) -> usize {
-    itemized.text.get(text.clone()).map_or(0, |text| {
-        text.chars()
-            .filter(|&ch| ch == ' ' || ch == '\u{00A0}')
-            .count()
-    })
+    itemized
+        .text
+        .get(text.clone())
+        .map_or(0, |text| text.chars().filter(|&ch| stretches(ch)).count())
+}
+
+/// Whether justification widens `ch`: the space only. Word keeps a no-break space at its
+/// width and spreads the room over the line's spaces (business/contract-ec-data-processing-
+/// clauses-el, page 2, item ε: «(ΕΕ)» and «2016/679», joined by U+00A0, are 3.11 pt apart
+/// in Word's PDF, while the line's other gaps are 20.2 to 20.3 pt). The documents that
+/// show it are saved in compatibility mode 14; that mode 15 does the same is a hypothesis
+/// until a rule document shows it (#601).
+fn stretches(ch: char) -> bool {
+    ch == ' '
 }
 
 /// Whether `unit` shows on its line: it takes room, or it is glyphs with an advance of
@@ -2210,8 +2326,20 @@ mod tests {
         props: ParagraphProps,
         width: f64,
     ) -> (ParagraphLayout, Vec<String>) {
+        lay_in_mode(font, CompatMode::Word2007, make, props, width)
+    }
+
+    /// [`lay_in`] in a document saved in compatibility mode `mode`.
+    fn lay_in_mode(
+        font: Vec<u8>,
+        mode: CompatMode,
+        make: impl Fn(RunStyleId) -> Vec<Inline>,
+        props: ParagraphProps,
+        width: f64,
+    ) -> (ParagraphLayout, Vec<String>) {
         let book = book(vec![font]);
-        let mut document = Document::default();
+        let mut document =
+            Document::new(crate::ir::DocumentSettings::default().with_compat_mode(mode));
         let style = document.add_run_style(
             RunStyle::default()
                 .with_fonts(RunFonts::new("Officewright Test"))
@@ -2326,6 +2454,167 @@ mod tests {
 
     fn widths(layout: &ParagraphLayout) -> Vec<f64> {
         layout.lines.iter().map(|line| line.width.0).collect()
+    }
+
+    #[test]
+    fn justification_widens_the_spaces_but_not_a_no_break_space() {
+        // "A A A A" joined by a no-break space after the first A: 31.5 pt of 35 pt on the
+        // first line. The 3.5 pt go to its two spaces, 1.75 pt each; the no-break space
+        // keeps its 2.5 pt.
+        let both = ParagraphProps::default().with_alignment(Alignment::Both);
+        let (layout, _) = lay(text("A\u{A0}A A A A"), both, 35.0);
+        assert_eq!(widths(&layout), [35.0, 6.0]);
+        let line = layout.lines.first().expect("a line");
+        let glyphs: Vec<(f64, f64)> = line
+            .pieces
+            .iter()
+            .flat_map(|piece| piece.glyphs(&layout.itemized))
+            .map(|glyph| (glyph.x.0, glyph.advance.0))
+            .collect();
+        assert_eq!(
+            glyphs,
+            [
+                (0.0, 6.0),
+                (6.0, 2.5),
+                (8.5, 6.0),
+                (14.5, 4.25),
+                (18.75, 6.0),
+                (24.75, 4.25),
+                (29.0, 6.0),
+                (35.0, 2.5)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_justified_line_narrows_its_spaces_by_a_fifth_to_hold_the_next_word() {
+        // "AA AA AA" is 41 pt with spaces of 2.5 pt; in 40 pt its two spaces narrow to
+        // 2 pt, from Word 2013's mode on, the most they may.
+        let both = || ParagraphProps::default().with_alignment(Alignment::Both);
+        let lay = |mode, width| lay_in_mode(minimal(), mode, text("AA AA AA"), both(), width).0;
+        let layout = lay(CompatMode::Word2013, 40.0);
+        assert_eq!(widths(&layout), [40.0]);
+        let line = layout.lines.first().expect("a line");
+        let glyphs: Vec<(f64, f64)> = line
+            .pieces
+            .iter()
+            .flat_map(|piece| piece.glyphs(&layout.itemized))
+            .map(|glyph| (glyph.x.0, glyph.advance.0))
+            .collect();
+        assert_eq!(
+            glyphs,
+            [
+                (0.0, 6.0),
+                (6.0, 6.0),
+                (12.0, 2.0),
+                (14.0, 6.0),
+                (20.0, 6.0),
+                (26.0, 2.0),
+                (28.0, 6.0),
+                (34.0, 6.0)
+            ]
+        );
+        // So does a line that wraps, which keeps its last word whole.
+        let (layout, _) = lay_in_mode(
+            minimal(),
+            CompatMode::Word2013,
+            text("AA AA AA AA"),
+            both(),
+            40.0,
+        );
+        assert_eq!(widths(&layout), [40.0, 12.0]);
+        // A little narrower, the last word goes to the next line whole, as it does in
+        // Word 2010's mode and in a paragraph aligned at its start.
+        assert_eq!(widths(&lay(CompatMode::Word2013, 39.9)), [39.9, 12.0]);
+        assert_eq!(widths(&lay(CompatMode::Word2010, 40.0)), [40.0, 12.0]);
+        let start = ParagraphProps::default();
+        let (layout, _) = lay_in_mode(
+            minimal(),
+            CompatMode::Word2013,
+            text("AA AA AA"),
+            start,
+            40.0,
+        );
+        assert_eq!(widths(&layout), [26.5, 12.0]);
+        // Only the spaces after the line's last tab narrow: "AA AA AA" after the tab ends
+        // 1 pt past 76 pt, which its two spaces make up, and 2 pt past 75 pt, which the
+        // three spaces before the tab would have helped to.
+        let tabbed = |style| {
+            vec![
+                Inline::text("A A A A", style),
+                Inline::tab(style),
+                Inline::text("AA AA AA", style),
+            ]
+        };
+        let lines = |width| {
+            let both = ParagraphProps::default().with_alignment(Alignment::Both);
+            let (layout, _) = lay_in_mode(minimal(), CompatMode::Word2013, tabbed, both, width);
+            layout.lines.len()
+        };
+        assert_eq!(lines(76.0), 1);
+        assert_eq!(lines(75.0), 2);
+    }
+
+    #[test]
+    fn what_a_justified_line_may_narrow() {
+        let both = || ParagraphProps::default().with_alignment(Alignment::Both);
+        let word = |words: &'static str, width| {
+            lay_in_mode(minimal(), CompatMode::Word2013, text(words), both(), width).0
+        };
+        // The space before a word of one letter counts: "AA AA A" is 35 pt, and in 34 pt
+        // its two spaces make up the 1 pt.
+        assert_eq!(widths(&word("AA AA A", 34.0)), [34.0]);
+        // No more than a fifth: 41 pt in 39.99 pt needs 1.01 pt of 5 pt of spaces.
+        assert_eq!(widths(&word("AA AA AA", 39.99)), [39.99, 12.0]);
+        // A run of letters cut between two of them, with no place to end before: the
+        // cut may come after a letter that the space before it makes room for. "AA " and
+        // four letters end 0.2 pt past 38.3 pt, which the space's half point covers.
+        let cut = word("AA \u{2060}AAAAAAAAAA", 38.3);
+        assert_eq!(widths(&cut).first().copied(), Some(38.3));
+        assert_eq!(cut.lines.len(), 2);
+        // A line too wide for want of a place to end keeps its spaces: no line may start
+        // with "!" (UAX #14 LB13), so the three spaces before it cannot end a line, and
+        // "   !", the font's missing glyph 5 pt wide, is 12.5 pt in 10 pt, more than a
+        // fifth of the spaces, 1.5 pt, makes up.
+        let held = word("   !AAAA", 10.0);
+        let line = held.lines.first().expect("a line");
+        assert!(line.overflow);
+        assert_eq!(widths(&held).first().copied(), Some(12.5));
+        let advances: Vec<f64> = line
+            .pieces
+            .iter()
+            .flat_map(|piece| piece.glyphs(&held.itemized))
+            .map(|glyph| glyph.advance.0)
+            .collect();
+        assert_eq!(advances, [2.5, 2.5, 2.5, 5.0]);
+    }
+
+    #[test]
+    fn the_hyphen_of_a_soft_hyphen_may_need_the_spaces_narrowed() {
+        // The width of the hyphen drawn at a soft hyphen, from a line that ends there.
+        let alone = |style| {
+            vec![
+                Inline::text("AAAA", style),
+                Inline::soft_hyphen(style),
+                Inline::text("AAAA", style),
+            ]
+        };
+        let (layout, _) = lay(alone, ParagraphProps::default(), 40.0);
+        let hyphen = widths(&layout)[0] - 24.0;
+        assert!(hyphen > 0.0, "{:?}", widths(&layout));
+        // "AA AA AA" and the hyphen end 0.5 pt past the line: the spaces make room for
+        // the hyphen, and the line ends at the soft hyphen, not before the last "AA".
+        let both = ParagraphProps::default().with_alignment(Alignment::Both);
+        let hyphenated = |style| {
+            vec![
+                Inline::text("AA AA AA", style),
+                Inline::soft_hyphen(style),
+                Inline::text("AAAA", style),
+            ]
+        };
+        let width = 41.0 + hyphen - 0.5;
+        let (layout, _) = lay_in_mode(minimal(), CompatMode::Word2013, hyphenated, both, width);
+        assert_eq!(widths(&layout), [width, 24.0]);
     }
 
     #[test]
