@@ -359,6 +359,18 @@
     "tests/corpus/word-rules/E-advance-rounding-12.docx": "opened",
     "tests/corpus/word-rules/E-advance-rounding-14.docx": "opened",
     "tests/corpus/word-rules/E-advance-rounding-15.docx": "opened",
+    "tests/corpus/word-rules/E-anchor-column-character.docx": "opened",
+    "tests/corpus/word-rules/E-anchor-effects.docx": "opened",
+    "tests/corpus/word-rules/E-anchor-header.docx": "opened",
+    "tests/corpus/word-rules/E-anchor-in-cell.docx": "opened",
+    "tests/corpus/word-rules/E-anchor-inside-outside-mirror.docx": "opened",
+    "tests/corpus/word-rules/E-anchor-inside-outside.docx": "opened",
+    "tests/corpus/word-rules/E-anchor-margin.docx": "opened",
+    "tests/corpus/word-rules/E-anchor-page.docx": "opened",
+    "tests/corpus/word-rules/E-anchor-paragraph-header-note.docx": "opened",
+    "tests/corpus/word-rules/E-anchor-paragraph-line.docx": "opened",
+    "tests/corpus/word-rules/E-anchor-paragraph-spacing.docx": "opened",
+    "tests/corpus/word-rules/E-anchor-stack.docx": "opened",
     "tests/corpus/word-rules/E-auto-color-threshold.docx": "opened",
     "tests/corpus/word-rules/E-auto-color.docx": "opened",
     "tests/corpus/word-rules/E-autospacing-nohtml.docx": "opened",
@@ -410,6 +422,7 @@
     "tests/corpus/word-rules/E-greek-caps.docx": "opened",
     "tests/corpus/word-rules/E-header-cut-distance.docx": "opened",
     "tests/corpus/word-rules/E-header-cut-first-line.docx": "opened",
+    "tests/corpus/word-rules/E-header-cut-first-picture.docx": "opened",
     "tests/corpus/word-rules/E-header-cut-line-heights.docx": "opened",
     "tests/corpus/word-rules/E-header-cut-margins.docx": "opened",
     "tests/corpus/word-rules/E-header-cut-page-sizes.docx": "opened",
@@ -423,6 +436,7 @@
     "tests/corpus/word-rules/E-header-space-before.docx": "opened",
     "tests/corpus/word-rules/E-header-tall.docx": "opened",
     "tests/corpus/word-rules/E-header-taller-than-page.docx": "opened",
+    "tests/corpus/word-rules/E-hidden-drawings.docx": "opened",
     "tests/corpus/word-rules/E-hidden-pictures.docx": "opened",
     "tests/corpus/word-rules/E-highlight-spacing.docx": "opened",
     "tests/corpus/word-rules/E-highlight-tall.docx": "opened",
@@ -582,6 +596,7 @@
     "tests/corpus/word-rules/E-textbox-insets.docx": "opened",
     "tests/corpus/word-rules/E-textbox-lists.docx": "opened",
     "tests/corpus/word-rules/E-textbox-spacing.docx": "opened",
+    "tests/corpus/word-rules/E-textbox-vml-inline-shapes.docx": "opened",
     "tests/corpus/word-rules/E-textbox-vml-inline.docx": "opened",
     "tests/corpus/word-rules/E-textbox-vml.docx": "opened",
     "tests/corpus/word-rules/E-theme-colors.docx": "opened",
@@ -591,7 +606,12 @@
     "tests/corpus/word-rules/E-underline-trailspace-margin.docx": "opened",
     "tests/corpus/word-rules/E-underline-trailspace.docx": "opened",
     "tests/corpus/word-rules/E-underline.docx": "opened",
+    "tests/corpus/word-rules/E-vml-anchor-align.docx": "opened",
+    "tests/corpus/word-rules/E-vml-anchor-relative.docx": "opened",
+    "tests/corpus/word-rules/E-vml-crop-rotate.docx": "opened",
     "tests/corpus/word-rules/E-vml-pictures.docx": "opened",
+    "tests/corpus/word-rules/E-vml-px-effects.docx": "opened",
+    "tests/corpus/word-rules/E-vml-stack.docx": "opened",
     "tests/corpus/word-rules/E-wrap-square.docx": "opened",
     "tests/corpus/word-rules/E-wrap-textbox.docx": "opened",
     "tests/corpus/word-rules/E-wrap-tight.docx": "opened",
@@ -601,25 +621,25 @@
   },
   "scores": {
     "tests/corpus/business/contract-ec-data-processing-clauses-bg.docx": {
-      "line_agreement": 0.9928,
+      "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9302,
-      "ssim_min": 0.6543,
-      "text_score": 0.9999
+      "ssim_mean": 0.9524,
+      "ssim_min": 0.904,
+      "text_score": 1.0
     },
     "tests/corpus/business/contract-ec-data-processing-clauses-de.docx": {
       "line_agreement": 0.9929,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.9386,
-      "ssim_min": 0.6535,
+      "ssim_mean": 0.9564,
+      "ssim_min": 0.916,
       "text_score": 0.9999
     },
     "tests/corpus/business/contract-ec-data-processing-clauses-el.docx": {
-      "line_agreement": 0.9708,
-      "page_break_agreement": 0.6,
-      "ssim_mean": 0.8086,
-      "ssim_min": 0.4983,
-      "text_score": 0.9236
+      "line_agreement": 1.0,
+      "page_break_agreement": 1.0,
+      "ssim_mean": 0.943,
+      "ssim_min": 0.9005,
+      "text_score": 1.0
     },
     "tests/corpus/business/contract-gsa-user-agreement.docx": {
       "line_agreement": 1.0,
@@ -632,13 +652,13 @@
       "page_break_agreement": 0.6667,
       "ssim_mean": 0.7727,
       "ssim_min": 0.6331,
-      "text_score": 0.8114
+      "text_score": 0.8115
     },
     "tests/corpus/business/contract-hhs-sow-usability-testing.docx": {
-      "line_agreement": 0.8756,
+      "line_agreement": 0.8822,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.511,
-      "ssim_min": 0.4448,
+      "ssim_mean": 0.5111,
+      "ssim_min": 0.4453,
       "text_score": 0.6136
     },
     "tests/corpus/business/contract-hhs-teaming-agreement.docx": {
@@ -672,23 +692,23 @@
     "tests/corpus/business/form-ec-state-aid-notification-bg.docx": {
       "line_agreement": 0.9257,
       "page_break_agreement": 0.3889,
-      "ssim_mean": 0.7291,
-      "ssim_min": 0.578,
+      "ssim_mean": 0.7289,
+      "ssim_min": 0.5775,
       "text_score": 0.9049
     },
     "tests/corpus/business/form-ec-state-aid-notification-de.docx": {
-      "line_agreement": 0.8489,
+      "line_agreement": 0.8579,
       "page_break_agreement": 0.3158,
-      "ssim_mean": 0.6519,
+      "ssim_mean": 0.6523,
       "ssim_min": 0.0,
-      "text_score": 0.778
+      "text_score": 0.7781
     },
     "tests/corpus/business/form-ec-state-aid-notification-el.docx": {
-      "line_agreement": 0.8105,
+      "line_agreement": 0.8231,
       "page_break_agreement": 0.1053,
-      "ssim_mean": 0.612,
-      "ssim_min": 0.0,
-      "text_score": 0.5925
+      "ssim_mean": 0.6601,
+      "ssim_min": 0.5112,
+      "text_score": 0.6633
     },
     "tests/corpus/business/form-gsa-dira-dias-template.docx": {
       "line_agreement": 0.9027,
@@ -698,16 +718,16 @@
       "text_score": 0.9362
     },
     "tests/corpus/business/form-gsa-pacs-series-form.docx": {
-      "line_agreement": 0.9516,
+      "line_agreement": 0.9543,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.7498,
+      "ssim_mean": 0.7735,
       "ssim_min": 0.0,
-      "text_score": 0.8106
+      "text_score": 0.8115
     },
     "tests/corpus/business/form-gsa-reseller-form.docx": {
       "line_agreement": 1.0,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.8359,
+      "ssim_mean": 0.8385,
       "ssim_min": 0.7233,
       "text_score": 1.0
     },
@@ -731,11 +751,11 @@
       "text_score": 0.0084
     },
     "tests/corpus/business/letter-dol-cobra-election-notice.docx": {
-      "line_agreement": 0.9221,
+      "line_agreement": 0.9318,
       "page_break_agreement": 0.875,
-      "ssim_mean": 0.8991,
+      "ssim_mean": 0.9005,
       "ssim_min": 0.6745,
-      "text_score": 0.9989
+      "text_score": 0.999
     },
     "tests/corpus/business/letter-dol-cobra-general-notice.docx": {
       "line_agreement": 0.8962,
@@ -762,14 +782,14 @@
       "page_break_agreement": 0.2222,
       "ssim_mean": 0.5042,
       "ssim_min": 0.0,
-      "text_score": 0.497
+      "text_score": 0.4971
     },
     "tests/corpus/business/report-hhs-usability-test-report.docx": {
-      "line_agreement": 0.7456,
+      "line_agreement": 0.7491,
       "page_break_agreement": 1.0,
-      "ssim_mean": 0.7509,
+      "ssim_mean": 0.751,
       "ssim_min": 0.5781,
-      "text_score": 0.9812
+      "text_score": 0.9813
     },
     "tests/corpus/business/report-usds-tech-challenge-playbook.docx": {
       "line_agreement": 0.4648,
@@ -781,46 +801,46 @@
     "tests/corpus/generated/contract-de-open.docx": {
       "line_agreement": 0.86,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.9948,
+      "ssim_mean": 0.9959,
       "ssim_min": 0.992,
       "text_score": 0.995
     },
     "tests/corpus/generated/contract-de.docx": {
       "line_agreement": 0.86,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.9897,
+      "ssim_mean": 0.9908,
       "ssim_min": 0.9818,
       "text_score": 0.995
     },
     "tests/corpus/generated/contract-ru-open.docx": {
       "line_agreement": 0.92,
-      "ssim_mean": 0.9643,
-      "ssim_min": 0.9643,
+      "ssim_mean": 0.9661,
+      "ssim_min": 0.9661,
       "text_score": 0.999
     },
     "tests/corpus/generated/contract-ru.docx": {
       "line_agreement": 0.92,
-      "ssim_mean": 0.9411,
-      "ssim_min": 0.9411,
+      "ssim_mean": 0.9427,
+      "ssim_min": 0.9427,
       "text_score": 0.999
     },
     "tests/corpus/generated/contract-uk-open.docx": {
       "line_agreement": 0.9167,
-      "ssim_mean": 0.9672,
-      "ssim_min": 0.9672,
+      "ssim_mean": 0.9688,
+      "ssim_min": 0.9688,
       "text_score": 0.999
     },
     "tests/corpus/generated/contract-uk.docx": {
       "line_agreement": 0.9167,
-      "ssim_mean": 0.9436,
-      "ssim_min": 0.9436,
+      "ssim_mean": 0.9451,
+      "ssim_min": 0.9451,
       "text_score": 0.999
     },
     "tests/corpus/generated/contract-zh.docx": {
       "line_agreement": 0.2703,
       "page_break_agreement": 0.0,
-      "ssim_mean": 0.8476,
-      "ssim_min": 0.7303,
+      "ssim_mean": 0.8477,
+      "ssim_min": 0.7304,
       "text_score": 0.5575
     },
     "tests/corpus/generated/cv-en-academic-open.docx": {
@@ -849,14 +869,14 @@
     },
     "tests/corpus/generated/cv-en-compact-open.docx": {
       "line_agreement": 0.9677,
-      "ssim_mean": 0.9089,
-      "ssim_min": 0.9089,
+      "ssim_mean": 0.8977,
+      "ssim_min": 0.8977,
       "text_score": 0.9972
     },
     "tests/corpus/generated/cv-en-compact.docx": {
       "line_agreement": 0.9677,
-      "ssim_mean": 0.9082,
-      "ssim_min": 0.9082,
+      "ssim_mean": 0.896,
+      "ssim_min": 0.896,
       "text_score": 0.9972
     },
     "tests/corpus/generated/cv-en-leaders-open.docx": {
@@ -875,26 +895,26 @@
     },
     "tests/corpus/generated/cv-en-sidebar-open.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.8664,
-      "ssim_min": 0.8664,
+      "ssim_mean": 0.8722,
+      "ssim_min": 0.8722,
       "text_score": 1.0
     },
     "tests/corpus/generated/cv-en-sidebar.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.8653,
-      "ssim_min": 0.8653,
+      "ssim_mean": 0.8709,
+      "ssim_min": 0.8709,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-de-open.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9323,
-      "ssim_min": 0.9323,
+      "ssim_mean": 0.9631,
+      "ssim_min": 0.9631,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-de.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9292,
-      "ssim_min": 0.9292,
+      "ssim_mean": 0.9569,
+      "ssim_min": 0.9569,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-en-decimal-open.docx": {
@@ -949,26 +969,26 @@
     },
     "tests/corpus/generated/invoice-en-standard-open.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9661,
-      "ssim_min": 0.9661,
+      "ssim_mean": 0.8526,
+      "ssim_min": 0.8526,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-en-standard.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9599,
-      "ssim_min": 0.9599,
+      "ssim_mean": 0.8518,
+      "ssim_min": 0.8518,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-ru-open.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9026,
-      "ssim_min": 0.9026,
+      "ssim_mean": 0.8997,
+      "ssim_min": 0.8997,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-ru.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9011,
-      "ssim_min": 0.9011,
+      "ssim_mean": 0.8982,
+      "ssim_min": 0.8982,
       "text_score": 1.0
     },
     "tests/corpus/generated/invoice-uk-open.docx": {
@@ -997,14 +1017,14 @@
     },
     "tests/corpus/generated/letter-uk-open.docx": {
       "line_agreement": 0.8947,
-      "ssim_mean": 0.9421,
-      "ssim_min": 0.9421,
+      "ssim_mean": 0.9289,
+      "ssim_min": 0.9289,
       "text_score": 1.0
     },
     "tests/corpus/generated/letter-uk.docx": {
       "line_agreement": 0.8421,
-      "ssim_mean": 0.9453,
-      "ssim_min": 0.9453,
+      "ssim_mean": 0.9275,
+      "ssim_min": 0.9275,
       "text_score": 0.9436
     },
     "tests/corpus/generated/memo-ru-open.docx": {
@@ -1111,16 +1131,16 @@
       "text_score": 0.8977
     },
     "tests/corpus/word-rules/E-cell-mark-height-14.docx": {
-      "line_agreement": 0.8846,
-      "ssim_mean": 0.707,
-      "ssim_min": 0.707,
-      "text_score": 0.9271
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9889,
+      "ssim_min": 0.9889,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-cell-mark-height.docx": {
-      "line_agreement": 0.8846,
-      "ssim_mean": 0.7065,
-      "ssim_min": 0.7065,
-      "text_score": 0.9271
+      "line_agreement": 1.0,
+      "ssim_mean": 0.9884,
+      "ssim_min": 0.9884,
+      "text_score": 1.0
     },
     "tests/corpus/word-rules/E-cut-lines-shapes.docx": {
       "line_agreement": 1.0,
@@ -1820,8 +1840,8 @@
     },
     "tests/corpus/word-rules/E-table-cell-margins-style.docx": {
       "line_agreement": 1.0,
-      "ssim_mean": 0.9299,
-      "ssim_min": 0.9299,
+      "ssim_mean": 0.9835,
+      "ssim_min": 0.9835,
       "text_score": 1.0
     },
     "tests/corpus/word-rules/E-table-cell-margins.docx": {
