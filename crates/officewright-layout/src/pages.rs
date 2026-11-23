@@ -1665,8 +1665,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             // laid out again without it and those after it, and where one they did not go
             // around would stay, the page takes no line from its line on, and of the lines
             // before it what keeping together and widow control let it (`lines_taken`).
-            // Each round leaves out an object more, so the rounds end.
-            let mut limit = None;
+            // Each round leaves out an object more, so the rounds end. The objects of the lines
+            // that cannot be on the page, as they stand, are left out from the first round
+            // on, so that each round walks the lines of a page, whatever the paragraph's
+            // length: those from the first whose top is at or below the bottom of the body.
+            let mut limit = beyond(layout, first, top, self.body()?.bottom.0);
             let (fit, breaks, rest, taken) = loop {
                 self.wrap(
                     flowed,
@@ -1684,14 +1687,15 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 if let Some(cut) = cut.filter(|&cut| first < cut && first + fit > cut) {
                     (fit, breaks) = (cut - first, true);
                 }
+                // The line of the first object left out among the lines that fit, if any: the
+                // lines before it fit, the last of them ending in no break, as a break the
+                // lines that fit end in comes at or after its line.
                 let left_out = limit.and_then(|limit| {
-                    wrapping_objects(layout, paragraph, first + 1)
+                    wrapping_objects(layout, paragraph, first + 1..first + fit)
                         .find(|&(_, item)| item >= limit)
                         .map(|(line, _)| line)
                 });
-                // The lines before it fit, the last of them ending in no break: a break the
-                // lines that fit end in comes at or after its line.
-                if let Some(line) = left_out.filter(|&line| first + fit > line) {
+                if let Some(line) = left_out {
                     (fit, breaks) = (line - first, false);
                 }
                 let taken = lines_taken(
@@ -1699,7 +1703,12 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                     (first, keep_lines, widow_control, bare),
                 );
                 // The objects of line `first` stay with it: it is the first the page may take.
-                let gone = wrapping_objects(layout, paragraph, first + taken.max(1))
+                // Those it went around are before `limit`, in the lines before the one that
+                // starts there.
+                let from = first + taken.max(1);
+                let until =
+                    limit.map_or(layout.lines.len(), |limit| line_from(layout, from, limit));
+                let gone = wrapping_objects(layout, paragraph, from..until)
                     .map(|(_, item)| item)
                     .find(|&item| limit.is_none_or(|limit| item < limit));
                 match gone {
@@ -1711,8 +1720,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             // without it: that line takes it to the next page where it goes around it, and
             // back where it does not. It stays, the line not going around it.
             let back = limit.is_some_and(|limit| {
-                wrapping_objects(layout, paragraph, first)
-                    .take_while(|&(line, _)| line < first + taken)
+                wrapping_objects(layout, paragraph, first..first + taken)
                     .any(|(_, item)| item >= limit)
             });
             if back {
@@ -1825,6 +1833,11 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         // Past the most a page wraps around, the paragraph's own objects are left out.
         let mut left_out = false;
         for (index, line) in layout.lines.iter().enumerate().skip(first) {
+            // The lines from the one that starts at `limit` on hold no object to go around.
+            if index > first && limit.is_some_and(|limit| starts_from(line, limit)) {
+                break;
+            }
+            count_walked();
             for piece in &line.pieces {
                 let PieceKind::Object { item, height: None } = piece.kind else {
                     continue;
@@ -1852,13 +1865,18 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             }
         }
         // Whether the lines from `first` on, as they are, meet an object, or went around one
-        // where they were laid out before.
+        // where they were laid out before, as far as they can be on the page: those after,
+        // laid out again where they go, are measured there.
         let mut y = top;
         let mut stale = false;
         let mut meets = false;
         for line in layout.lines.iter().skip(first) {
-            stale |= line.above.0 != 0.0 || line.room.is_some();
             let line_top = y + line.above.0;
+            if line_top >= body.bottom.0 - EPSILON && y > top {
+                break;
+            }
+            count_walked();
+            stale |= line.above.0 != 0.0 || line.room.is_some();
             meets |= exclusions
                 .iter()
                 .any(|exclusion| exclusion.meets(line_top, line_top + line.height.0));
@@ -3353,26 +3371,88 @@ fn anchored<'p>(
     }
 }
 
-/// The floating objects that text wraps around in the lines of `layout`, a paragraph's laid
-/// out from `paragraph`, from line `from` on, in order: each line's index, and the object's
-/// item.
+/// The floating objects that text wraps around in `lines` of `layout`, a paragraph's laid
+/// out from `paragraph`, in order: each line's index, and the object's item.
 fn wrapping_objects<'a>(
     layout: &'a ParagraphLayout,
     paragraph: &'a Paragraph,
-    from: usize,
+    lines: Range<usize>,
 ) -> impl Iterator<Item = (usize, usize)> + 'a {
+    let first = lines.start;
     layout
         .lines
+        .get(lines)
+        .unwrap_or(&[])
         .iter()
-        .enumerate()
-        .skip(from)
-        .flat_map(|(index, line)| line.pieces.iter().map(move |piece| (index, piece)))
+        .zip(first..)
+        .inspect(|_| count_walked())
+        .flat_map(|(line, index)| line.pieces.iter().map(move |piece| (index, piece)))
         .filter_map(move |(index, piece)| match piece.kind {
             PieceKind::Object { item, height: None } => anchored(layout, paragraph, item)
                 .filter(|object| object.wrap() != Wrap::None)
                 .map(|_| (index, item)),
             _ => None,
         })
+}
+
+/// The first item of the first line of `layout` from line `first` on, `top` its top down
+/// the page, that cannot be on a page whose body ends at `bottom`, as the lines stand: the
+/// first after line `first` whose top is at or below that bottom; `None` where all can be.
+fn beyond(layout: &ParagraphLayout, first: usize, top: f64, bottom: f64) -> Option<usize> {
+    let mut y = top;
+    for line in layout.lines.iter().skip(first) {
+        count_walked();
+        if y + line.above.0 >= bottom - EPSILON && y > top {
+            return line.pieces.first().map(item_of);
+        }
+        y += line.advance();
+    }
+    None
+}
+
+/// The index of the first line of `layout` from line `from` on that starts at item `item`
+/// or after it, or the number of its lines where none does.
+fn line_from(layout: &ParagraphLayout, from: usize, item: usize) -> usize {
+    let lines = layout.lines.get(from..).unwrap_or(&[]);
+    for (index, line) in lines.iter().enumerate() {
+        count_walked();
+        if starts_from(line, item) {
+            return from + index;
+        }
+    }
+    layout.lines.len()
+}
+
+/// Whether `line` starts at item `item` or after it, so that every floating object in it
+/// and after it has an item from `item` on.
+fn starts_from(line: &crate::lines::Line, item: usize) -> bool {
+    line.pieces
+        .first()
+        .is_some_and(|piece| item_of(piece) >= item)
+}
+
+/// The item of `piece`.
+fn item_of(piece: &crate::lines::Piece) -> usize {
+    match &piece.kind {
+        PieceKind::Text { item, .. }
+        | PieceKind::Hyphen { item, .. }
+        | PieceKind::Tab { item, .. }
+        | PieceKind::Break { item }
+        | PieceKind::Object { item, .. } => *item,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many lines the wrapping of paragraphs around floating objects walked on this
+    /// thread: for the tests of its cost.
+    static WRAP_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts a line the wrapping walks, for the tests of its cost.
+fn count_walked() {
+    #[cfg(test)]
+    WRAP_WALKED.with(|walked| walked.set(walked.get() + 1));
 }
 
 /// How many of a paragraph's `rest` lines from line `first` on its page takes, where `fit`

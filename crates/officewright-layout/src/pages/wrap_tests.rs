@@ -1228,3 +1228,55 @@ fn a_paragraph_that_may_split_takes_no_line_from_an_object_left_out_on() {
         [(starts, words, 0), around(vec![5, 5, 5, 3])]
     );
 }
+
+/// A paragraph of one word, then one of `count` words with widow control that holds, after
+/// five of every nine words, four pictures of no size wrapped as `wrap`, placed from the
+/// margin and the paragraph.
+fn many_objects(count: usize, wrap: Wrap) -> Document {
+    document(|style, document| {
+        let wrapping = Wrapping {
+            wrap,
+            ..Wrapping::square([0.0; 4])
+        };
+        let mut inlines = Vec::new();
+        for word in 0..count {
+            inlines.push(Inline::text("AAAA ", style));
+            if word % 9 == 4 {
+                for _ in 0..4 {
+                    inlines.push(picture(
+                        document,
+                        (0.0, 0.0),
+                        at(0.0),
+                        from_paragraph(0.0),
+                        wrapping,
+                    ));
+                }
+            }
+        }
+        vec![
+            paragraph(style, Vec::new(), 1),
+            Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines(inlines)
+                .into(),
+        ]
+    })
+}
+
+#[test]
+fn wrapping_walks_the_lines_of_each_page_only() {
+    // On every page the paragraph goes on to, the wrapping walks its lines that can be on
+    // that page, not all those left: twice the words, on twice the pages, walk about twice
+    // the lines, whether the pictures wrap text or not.
+    for wrap in [Wrap::None, Wrap::Square] {
+        let walked = |count: usize| {
+            super::WRAP_WALKED.with(|walked| walked.set(0));
+            let (laid, _) = lay(&many_objects(count, wrap));
+            let pages = laid.pages.len();
+            (pages, super::WRAP_WALKED.with(std::cell::Cell::get))
+        };
+        let (short, long) = (walked(900), walked(1800));
+        assert_eq!((short.0, long.0), (13, 26), "{wrap:?}");
+        assert!(long.1 <= short.1 * 5 / 2, "{wrap:?}: {short:?} {long:?}");
+    }
+}
