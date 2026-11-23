@@ -405,7 +405,7 @@ line heights.
 
 Each row gives the build of Word as Word reports it. The references come from three builds of
 Word 16.0: 16.0.17932 for those rendered from 2026-10-13 to 2026-10-20, 16.0.14334 for those of
-2026-11-02, and 16.0.20527 for those of 2026-11-09, which is Office 16.0.20527.20150.
+2026-11-02, and 16.0.20527 for those of 2026-11-09 and 2026-11-16, which is Office 16.0.20527.20150.
 
 | File | Rendered from | Application and version | Date | Notes |
 |------|---------------|-------------------------|------|-------|
