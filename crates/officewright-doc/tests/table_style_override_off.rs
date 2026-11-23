@@ -1,22 +1,32 @@
 //! The size and justification of a table's text with the setting
-//! `overrideTableStyleFontSizeAndJustification` written 0, as Word's renders of
-//! `word-rules/E-table-style-override-off-*.docx` show them: as if the setting were not
-//! written. It reads `tests/corpus` at the root of the repository, so it is left out of
-//! the published crate.
+//! `overrideTableStyleFontSizeAndJustification` written 0, in
+//! `word-rules/E-table-style-override-off-*.docx`: off, in every mode. It reads
+//! `tests/corpus` at the root of the repository, so it is left out of the published
+//! crate.
 
 use std::path::Path;
 
 use officewright_doc::{Block, Document, Justification};
 
 #[test]
-fn takes_a_setting_written_off_as_not_written_as_words_renders_show() {
+fn takes_a_setting_written_off_as_off_in_every_mode() {
     // The table style Big gives 14 pt and centring; Normal gives its own size and left,
-    // over document defaults a point larger and right-aligned. From the references'
-    // geometry: the cells' text in mode 15 in Normal's size and at the cells' left edge;
-    // in mode 14 in Normal's 11 pt, centred.
+    // over document defaults a point larger and right-aligned. With the setting off,
+    // Normal's 11 pt stays, its 12 pt gives way, and its left justification gives way. In
+    // mode 14, -11pt-14, Word's render shows it (#595). In mode 15, -11pt and -12pt, no
+    // render shows it: Word left the 0 out of the copies it saved, which its renders are
+    // exported from, and those copies read as on.
     for (name, size, justification) in [
-        ("E-table-style-override-off-11pt", 11.0, Justification::Left),
-        ("E-table-style-override-off-12pt", 12.0, Justification::Left),
+        (
+            "E-table-style-override-off-11pt",
+            11.0,
+            Justification::Center,
+        ),
+        (
+            "E-table-style-override-off-12pt",
+            14.0,
+            Justification::Center,
+        ),
         (
             "E-table-style-override-off-11pt-14",
             11.0,

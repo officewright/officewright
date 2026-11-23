@@ -534,60 +534,70 @@ impl Formats<'_> {
     }
 
     /// Whether, in a cell, the left justification that the default paragraph style gives
-    /// gives way to the table style's: below compatibility mode 15, when the setting
-    /// `overrideTableStyleFontSizeAndJustification` ([MS-DOCX] 2.3.1) is not on.
+    /// gives way to the table style's: when the setting
+    /// `overrideTableStyleFontSizeAndJustification` ([MS-DOCX] 2.3.1) is off.
     fn table_style_wins(&mut self) -> bool {
         self.table_style_override() != TableStyleWins::Never
     }
 
     /// The sizes that, in a cell, the default paragraph style gives way with to the table
-    /// style's. None with the setting `overrideTableStyleFontSizeAndJustification` on.
+    /// style's: none with the setting `overrideTableStyleFontSizeAndJustification` on,
+    /// which it is from compatibility mode 15 when it is not written.
     ///
-    /// Below compatibility mode 15, with the setting not on, only 12 pt. Word deviates
-    /// here from [MS-DOCX] 2.3.1, which lets 11 or 12 pt give way with the setting off:
-    /// Word draws the cells of word-rules/E-table-style-size-12pt-14.docx and
+    /// With the setting off, only 12 pt. Word deviates here from [MS-DOCX] 2.3.1, which
+    /// lets 11 or 12 pt give way with the setting off: in mode 14, Word draws the cells of
+    /// word-rules/E-table-style-size-12pt-14.docx and
     /// E-table-style-defaults-size-13-12-14.docx in the table style's 14 pt over Normal's
     /// 12 pt, and those of E-table-style-defaults-size-14.docx,
     /// E-table-style-defaults-size-10-11-14.docx, E-table-style-defaults-size-right-14.docx
     /// and E-table-style-override-off-11pt-14.docx, the last with the setting written 0,
-    /// in Normal's 11 pt (#506, #595).
+    /// in Normal's 11 pt (#506, #595). From mode 15, with the setting written off, no
+    /// render shows what Word does (see [`table_style_override`](Self::table_style_override)):
+    /// the same, our choice.
     fn sizes_giving_way(&mut self) -> &'static [Pt] {
         match self.table_style_override() {
             TableStyleWins::Never => &[],
-            TableStyleWins::NotOn => &[Pt(12.0)],
+            TableStyleWins::Off => &[Pt(12.0)],
         }
     }
 
     /// What the setting `overrideTableStyleFontSizeAndJustification` gives, once worked
-    /// out: on, or below compatibility mode 15 not on. Not written from mode 15, it is on:
-    /// Word writes it on when it saves such a document (E-table-style-size-12pt-none.docx
-    /// and the copy Word saved of it), and draws Normal's 12 pt.
+    /// out: on or off. Written, it is on with an on value and off with any other; of
+    /// several, the last counts. Not written, it is on from compatibility mode 15 and off
+    /// below.
     ///
-    /// Written off, it is as if it were not written: Word drops it from the copy it saves.
-    /// In mode 15 Word draws the cells of word-rules/E-table-style-override-off-11pt.docx
-    /// and -12pt.docx in Normal's size and left justification over the table style's
-    /// 14 pt and centring, and in mode 14 those of -11pt-14.docx in Normal's 11 pt and the
-    /// style's centring (#595). Word deviates here from [MS-DOCX] 2.3.1, by which a
-    /// setting off lets Normal's 11 or 12 pt and its left justification give way in any
+    /// Word writes a compatibility setting only when it is on, and writes this one on
+    /// when it saves a document of mode 15 that does not write it
+    /// (word-rules/E-table-style-size-12pt-none.docx and the copy Word saved of it). It
+    /// left the setting written 0 out of the copies it saved of
+    /// E-table-style-override-off-11pt.docx and -12pt.docx, also of mode 15: Word reads
+    /// the 0 as off, not as not written (#595). Those copies, and so Word's renders of the
+    /// two documents, which are exported from them, read as on, so they do not show how
+    /// Word lays out a setting written off from mode 15. LibreOffice's
+    /// tdf118947_tableStyle.docx (sw/qa/extras/ooxmlexport/data), of mode 15 with the
+    /// setting written 0 last, says that it shows the defaults' size and the table
+    /// style's right alignment over Normal's 12 pt and left, in Word's compatibility
     /// mode.
     fn table_style_override(&mut self) -> TableStyleWins {
         if let Some(wins) = self.table_style_wins {
             return wins;
         }
         let settings = &self.document.settings;
-        let on = settings
+        let written = settings
             .compatibility_settings()
             .iter()
             .rev()
-            .find(|setting| setting.name() == "overrideTableStyleFontSizeAndJustification")
-            .and_then(|setting| setting.value())
-            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on"));
-        let wins = if on
-            || settings.effective_compatibility_mode() >= super::CompatibilityMode::WORD_2013
-        {
+            .find(|setting| setting.name() == "overrideTableStyleFontSizeAndJustification");
+        let on = match written {
+            Some(setting) => setting
+                .value()
+                .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on")),
+            None => settings.effective_compatibility_mode() >= super::CompatibilityMode::WORD_2013,
+        };
+        let wins = if on {
             TableStyleWins::Never
         } else {
-            TableStyleWins::NotOn
+            TableStyleWins::Off
         };
         self.table_style_wins = Some(wins);
         wins
@@ -598,10 +608,10 @@ impl Formats<'_> {
 /// `overrideTableStyleFontSizeAndJustification`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TableStyleWins {
-    /// Nothing: the setting is written on, or the compatibility mode is 15 or later.
+    /// Nothing: the setting is on.
     Never,
-    /// The setting is not on, below compatibility mode 15.
-    NotOn,
+    /// Normal's 12 pt and left justification: the setting is off.
+    Off,
 }
 
 /// How many combinations of a paragraph style and a list level the resolver keeps at a
