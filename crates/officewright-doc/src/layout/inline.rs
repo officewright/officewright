@@ -19,9 +19,9 @@ use crate::model::{
 };
 
 /// The longest part of a field's instruction read: far more than the name and switches
-/// of any field the layout computes, and as long as the longest link target a PDF holds
-/// (32,767 bytes), for a `HYPERLINK` field.
-const MAX_INSTRUCTION: usize = 32 << 10;
+/// of any field the layout computes, and for a `HYPERLINK` field room for the longest
+/// link target a PDF holds (32,767 bytes) with the field's name, quotes and switches.
+const MAX_INSTRUCTION: usize = 33 << 10;
 
 /// What ends with the content of a container on the stack.
 #[derive(Clone, Copy)]
@@ -67,7 +67,7 @@ impl<'a> Translator<'a> {
             match inline {
                 Inline::Run(run) => self.run(run, &mut content),
                 Inline::Hyperlink(link) => {
-                    let close = match self.link_target(link.target(), link.anchor()) {
+                    let close = match self.link_target(link) {
                         Some(target) => {
                             content.push(links::link_start(&target));
                             Close::Link
@@ -276,7 +276,7 @@ impl<'a> Translator<'a> {
             }
             Separated::CutLink => self.report_once(
                 Once::LongLinkField,
-                "a HYPERLINK field whose instruction is longer than 32 KiB is shown without its link, here and wherever else the document has one",
+                "a HYPERLINK field whose instruction is longer than 33 KiB is shown without its link, here and wherever else the document has one",
             ),
             Separated::Other => {}
         }
@@ -621,22 +621,51 @@ impl Content {
         match self.fields.last() {
             // The outermost field: its result is all the shared list holds from its start.
             None => {
-                let result: Vec<ir::Inline> = match start {
+                let mut result: Vec<ir::Inline> = match start {
                     Some(start) => self.results.drain(start..).collect(),
                     None => Vec::new(),
+                };
+                // The layout shows a value it computes in place of such a field's result,
+                // so the ends of links and the bookmarks in it go right after the field.
+                let marks: Vec<ir::Inline> = if matches!(kind, ir::FieldKind::Other(_)) {
+                    Vec::new()
+                } else {
+                    let (marks, rest) = result.into_iter().partition(|inline| {
+                        matches!(
+                            inline,
+                            ir::Inline::LinkStart { .. }
+                                | ir::Inline::LinkEnd
+                                | ir::Inline::Bookmark { .. }
+                        )
+                    });
+                    result = rest;
+                    marks
                 };
                 self.out.push(ir::Inline::Field(
                     ir::Field::new(kind, style)
                         .with_result(result)
                         .with_format(format),
                 ));
+                self.out.extend(marks);
             }
             // Inside another field's result, the result stays where it is, part of it.
             Some(Frame::Result { .. }) => {}
-            // Inside an instruction, it is not shown.
+            // Inside an instruction, its result is part of that instruction, as Word reads
+            // `{ HYPERLINK "mailto:{ MERGEFIELD Email }" }`, and is not shown.
             Some(Frame::Instruction { .. }) => {
                 if let Some(start) = start {
+                    let text: String = self
+                        .results
+                        .get(start..)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|inline| match inline {
+                            ir::Inline::Text { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
                     self.results.truncate(start);
+                    self.instruction(&text);
                 }
             }
         }

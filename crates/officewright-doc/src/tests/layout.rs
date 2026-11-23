@@ -2110,7 +2110,10 @@ fn translates_list_overrides_links_and_restarts() {
 
 /// The work the translation does on this thread while `f` runs, of the kind `kind`
 /// picks.
-fn work_of<T>(kind: fn(crate::layout::Work) -> usize, f: impl FnOnce() -> T) -> (T, usize) {
+pub(super) fn work_of<T>(
+    kind: fn(crate::layout::Work) -> usize,
+    f: impl FnOnce() -> T,
+) -> (T, usize) {
     let before = kind(crate::layout::WORK.get());
     let result = f();
     (result, kind(crate::layout::WORK.get()) - before)

@@ -329,11 +329,11 @@ const MAX_COPIED: usize = if cfg!(test) { 1 << 20 } else { 64 << 20 };
 
 /// How many bytes of memory a copy of some blocks takes: every allocation a clone makes.
 /// That is each block, row, cell, inline and tab stop, and what they own: a table's grid,
-/// a paragraph's tab stops, the text of inlines, a symbol's font name, a field's name, its
-/// number format's name and its result, an anchored object. A part that is small in the
-/// document can take much more in the IR: a table of thousands of grid columns, or empty
-/// paragraphs whose style gives 64 tab stops. Tables nest no deeper than the IR allows,
-/// and the results of fields hold no fields.
+/// a paragraph's tab stops, the text of inlines, a symbol's font name, a bookmark's name, a
+/// field's name, its number format's name and its result, an anchored object. A part that
+/// is small in the document can take much more in the IR: a table of thousands of grid
+/// columns, or empty paragraphs whose style gives 64 tab stops. Tables nest no deeper
+/// than the IR allows, and the results of fields hold no fields.
 fn weight(blocks: &[ir::Block]) -> usize {
     blocks
         .iter()
@@ -387,6 +387,9 @@ fn inlines_weight(inlines: &[ir::Inline]) -> usize {
                         name + format + inlines_weight(field.result())
                     }
                     ir::Inline::Anchored(_) => size_of::<ir::AnchoredObject>(),
+                    // A copy of a link holds its target's pointer, which the links to it
+                    // share; one of a bookmark its own name.
+                    ir::Inline::Bookmark { name, .. } => name.len(),
                     _ => 0,
                 }
         })

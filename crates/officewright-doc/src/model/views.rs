@@ -831,6 +831,13 @@ impl<'a> Hyperlink<'a> {
             .map(|target| self.document.strings.get(target))
     }
 
+    /// The target as it is interned: the same for every hyperlink that names it.
+    // reason: only the translation into the layout IR asks for it.
+    #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+    pub(crate) fn target_symbol(self) -> Option<super::xml::Sym> {
+        self.data.target
+    }
+
     /// The bookmark the hyperlink leads to inside the document, or, with a
     /// [`target`](Self::target), the place in the target: Word appends `#` and the
     /// anchor to the target (MS-OI29500 §17.16.22(b)), where the standard says the anchor

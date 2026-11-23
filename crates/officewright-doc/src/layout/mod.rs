@@ -18,8 +18,7 @@ mod section;
 mod style;
 mod table;
 
-use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use officewright_core::Pt;
@@ -35,7 +34,8 @@ thread_local! {
     /// paragraphs and field results, bytes of names and tags looked up to share run
     /// styles, run styles built, places tried to cut names, comparisons of compatibility
     /// flags, table cells copied where a horizontal merge should move them, cells whose
-    /// properties in effect were worked out, and paragraph properties not shared.
+    /// properties in effect were worked out, paragraph properties not shared, and bytes
+    /// of link addresses looked up and of link targets made.
     pub(crate) static WORK: std::cell::Cell<Work> = const { std::cell::Cell::new(Work {
         inlines: 0,
         compared: 0,
@@ -47,6 +47,8 @@ thread_local! {
         label_checks: 0,
         paragraph_props: 0,
         props_compared: 0,
+        link_key_bytes: 0,
+        link_target_bytes: 0,
     }) };
 }
 
@@ -70,6 +72,11 @@ pub(crate) struct Work {
     pub(crate) paragraph_props: usize,
     /// Comparisons of paragraph properties with kept ones.
     pub(crate) props_compared: usize,
+    /// Bytes of the keys of link addresses looked up: a hyperlink's anchor, a field's
+    /// target and anchor.
+    pub(crate) link_key_bytes: usize,
+    /// Bytes of the link targets made.
+    pub(crate) link_target_bytes: usize,
 }
 
 /// Counts work for [`WORK`].
@@ -260,12 +267,14 @@ struct Translator<'a> {
     /// by where it was read.
     last_bookmarks: HashMap<&'a str, Span>,
     /// The names of the bookmarks met among blocks, between rows or between cells, which
-    /// start at the next paragraph.
+    /// start at the next paragraph of their blocks, or end the last one.
     pending_bookmarks: Vec<String>,
-    /// The target of each distinct address of the document's links, by the target and the
-    /// anchor that make it (the empty string for none): every link to one address shares
-    /// it.
-    link_targets: HashMap<Cow<'a, str>, HashMap<Cow<'a, str>, Arc<ir::LinkTarget>>>,
+    /// Whether the body being translated is the document's last.
+    last_body: bool,
+    /// The target of each link met, by what makes its address: none for a link left out.
+    link_keys: HashMap<links::LinkKey<'a>, Option<Arc<ir::LinkTarget>>>,
+    /// The distinct targets made: every link to one address shares its target.
+    link_targets: HashSet<Arc<ir::LinkTarget>>,
     /// The bytes of the targets in [`link_targets`](Self::link_targets), at most
     /// [`MAX_LINK_BYTES`].
     link_bytes: usize,
@@ -379,7 +388,9 @@ impl<'a> Translator<'a> {
             ends_deleted: false,
             last_bookmarks: last_bookmarks(document),
             pending_bookmarks: Vec::new(),
-            link_targets: HashMap::new(),
+            last_body: false,
+            link_keys: HashMap::new(),
+            link_targets: HashSet::new(),
             link_bytes: 0,
         }
     }
@@ -387,9 +398,11 @@ impl<'a> Translator<'a> {
     fn translate(mut self) -> Translation {
         let settings = section::settings(&mut self);
         self.ir = ir::Document::new(settings);
+        let count = self.document.sections().count();
         for (index, model) in self.document.sections().enumerate() {
             self.path
                 .extend([Step::Field("sections"), Step::Index(index)]);
+            self.last_body = index + 1 == count;
             let section = section::section(&mut self, model);
             self.ir.add_section(section);
             self.path.truncate(self.path.len().saturating_sub(2));
@@ -446,11 +459,18 @@ impl<'a> Translator<'a> {
         continues: bool,
     ) -> Vec<ir::Block> {
         // These blocks may be translated inside a paragraph (a note) or between bodies
-        // (a header): what the blocks around them left pending waits for them to end.
+        // (a header): what the blocks around them left pending waits for them to end. So
+        // do the bookmarks a body left for its next paragraph while a story is translated;
+        // a cell takes those left before it, between rows or cells.
         let outer = if continues {
             None
         } else {
             self.deleted_mark.take()
+        };
+        let outer_bookmarks = if field.is_none() {
+            std::mem::take(&mut self.pending_bookmarks)
+        } else {
+            Vec::new()
         };
         let mut out = Vec::new();
         let mut ends_deleted = false;
@@ -506,8 +526,35 @@ impl<'a> Translator<'a> {
         } else {
             self.deleted_mark = outer;
         }
+        if !continues || self.last_body {
+            self.end_bookmarks(&mut out);
+        }
+        if field.is_none() {
+            self.pending_bookmarks = outer_bookmarks;
+        }
         self.ends_deleted = ends_deleted;
         out
+    }
+
+    /// Ends the last paragraph of `blocks` with the bookmarks met after it, which no
+    /// paragraph of theirs follows: where Word puts what marks the end of a story or a
+    /// cell. With no paragraph there, they stay pending: a cell's for the blocks after it,
+    /// while a story's are dropped.
+    fn end_bookmarks(&mut self, blocks: &mut Vec<ir::Block>) {
+        if self.pending_bookmarks.is_empty() {
+            return;
+        }
+        let Some(at) = blocks
+            .iter()
+            .rposition(|block| matches!(block, ir::Block::Paragraph(_)))
+        else {
+            return;
+        };
+        if let ir::Block::Paragraph(paragraph) = blocks.remove(at) {
+            let mut inlines = paragraph.inlines().to_vec();
+            inlines.extend(self.pending_bookmarks.drain(..).map(ir::Inline::bookmark));
+            blocks.insert(at, paragraph.with_inlines(inlines).into());
+        }
     }
 
     /// Lists the paragraph whose deleted mark was pending, now that a block follows it,
