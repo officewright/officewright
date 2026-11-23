@@ -1652,24 +1652,70 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
             );
             // Floating objects are positioned from the paragraph's top (`float_position`).
             let space = space_laid_above(self.document, neighbours.0, props, top - self.cursor);
-            self.wrap(
-                flowed,
-                (paragraph, label),
-                (layout, laid_for),
-                first,
-                (top, space),
-            );
+            // The lines go around the objects of the lines that stay on the page, those the
+            // page draws (`Painting::float`), and those of line `first` whatever happens to
+            // it: where one they went around goes on to a later page with its line, they are
+            // laid out again without it and those after it, and where one they did not go
+            // around would stay, its line starts the next page. Each round leaves out an
+            // object more, so the rounds end.
+            let mut limit = None;
+            let (fit, breaks, rest, taken) = loop {
+                self.wrap(
+                    flowed,
+                    (paragraph, label),
+                    (layout, laid_for),
+                    first,
+                    (top, space, limit),
+                );
+                let rest = layout.lines.len().saturating_sub(first);
+                if rest == 0 {
+                    return Ok((first_page.unwrap_or(here), false));
+                }
+                let (mut fit, mut breaks) =
+                    self.fitting_with_notes((flowed.section, paragraph), layout, first, top)?;
+                if let Some(cut) = cut.filter(|&cut| first < cut && first + fit > cut) {
+                    (fit, breaks) = (cut - first, true);
+                }
+                let left_out = limit.and_then(|limit| {
+                    wrapping_objects(layout, paragraph, first + 1)
+                        .find(|&(_, item)| item >= limit)
+                        .map(|(line, _)| line)
+                });
+                if let Some(line) = left_out.filter(|&line| first + fit > line) {
+                    (fit, breaks) = (line - first, true);
+                }
+                let taken = lines_taken(
+                    (fit, breaks, rest),
+                    (first, keep_lines, widow_control, bare),
+                );
+                // The objects of line `first` stay with it: it is the first the page may take.
+                let gone = wrapping_objects(layout, paragraph, first + taken.max(1))
+                    .map(|(_, item)| item)
+                    .find(|&item| limit.is_none_or(|limit| item < limit));
+                match gone {
+                    Some(item) => limit = Some(item),
+                    None => break (fit, breaks, rest, taken),
+                }
+            };
+            // An object left out can come back to the page's first line, as the text goes on
+            // without it: that line takes it to the next page where it goes around it, and
+            // back where it does not. It stays, the line not going around it.
+            let back = limit.is_some_and(|limit| {
+                wrapping_objects(layout, paragraph, first)
+                    .take_while(|&(line, _)| line < first + taken)
+                    .any(|(_, item)| item >= limit)
+            });
+            if back {
+                self.fonts.report_once(
+                    ReportKind::FeatureUnsupported,
+                    &flowed.location,
+                    "a line does not go around a floating object it holds where going around it \
+                     would take the object to the next page: it runs over or under it"
+                        .to_owned(),
+                );
+            }
             let lines = &layout.lines;
             let count = lines.len();
-            let rest = count.saturating_sub(first);
-            if rest == 0 {
-                return Ok((first_page.unwrap_or(here), false));
-            }
-            let (mut fit, mut breaks) =
-                self.fitting_with_notes((flowed.section, paragraph), layout, first, top)?;
-            if let Some(cut) = cut.filter(|&cut| first < cut && first + fit > cut) {
-                (fit, breaks) = (cut - first, true);
-            }
             if fit == rest || (breaks && fit > 0) {
                 self.put(
                     index,
@@ -1693,39 +1739,22 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
                 self.new_page(flowed.section, &section)?;
                 continue;
             }
-            // The paragraph does not fit: split it, or move it. One kept on one page that is
-            // taller than a page moves to a new page all the same, and is split there.
-            // Hypothesis until a Word render (`E-keeplines-long.docx`).
-            if first == 0 && keep_lines && !bare {
+            // The paragraph does not fit: split it, or move it (`lines_taken`).
+            let take = lines_taken(
+                (fit, breaks, rest),
+                (first, keep_lines, widow_control, bare),
+            );
+            if take == 0 {
                 self.new_page(flowed.section, &section)?;
                 continue;
             }
-            let mut take = fit;
-            if widow_control {
-                // At least two lines at the bottom of a page and at the top of the next.
-                if rest - take < 2 {
-                    take = rest.saturating_sub(2);
-                }
-                let least = if first == 0 { 2 } else { 1 };
-                if take < least {
-                    take = 0;
-                }
-            }
-            if take == 0 {
-                if !bare {
-                    self.new_page(flowed.section, &section)?;
-                    continue;
-                }
-                // Nothing moves it further: the lines that fit, at least one, and of its
-                // footnotes what fits, the rest on the next page.
-                take = fit.max(1);
-                if fit == 0 && fitting(lines, first, top, bottom).0 == 0 {
-                    self.fonts.report_once(
-                        ReportKind::Overflow,
-                        &flowed.location,
-                        "a line is taller than the body of its page".to_owned(),
-                    );
-                }
+            // Nothing moved it further, and no line fits: the first, all the same.
+            if fit == 0 && fitting(lines, first, top, bottom).0 == 0 {
+                self.fonts.report_once(
+                    ReportKind::Overflow,
+                    &flowed.location,
+                    "a line is taller than the body of its page".to_owned(),
+                );
             }
             self.put(
                 index,
@@ -1747,9 +1776,10 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
     /// numbered `laid_for`, again from line `first` on, where they go around floating
     /// objects on the current page, from `top` down, `space` below the paragraph's top: the
     /// objects of the paragraphs above on the page, and those the paragraph anchors in
-    /// these lines, positioned from its top (`float_position`). Its lines before `first`
-    /// stay as they are. A layout whose lines from `first` on meet none of them, and went
-    /// around none where they were placed before, stays as it is: a document without
+    /// these lines, positioned from its top (`float_position`), but for those of its items
+    /// from `limit` on, if any, after line `first` (see `Pager::place`). Its lines before
+    /// `first` stay as they are. A layout whose lines from `first` on meet none of them, and
+    /// went around none where they were placed before, stays as it is: a document without
     /// floating objects that text wraps around is laid out as without this.
     ///
     /// An object positioned from its line, or across from its character, is not where
@@ -1762,7 +1792,7 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         (paragraph, label): (&Paragraph, Option<&Label>),
         (layout, laid_for): (&mut ParagraphLayout, u32),
         first: usize,
-        (top, space): (f64, f64),
+        (top, space, limit): (f64, f64, Option<usize>),
     ) {
         let Some(page) = self.pages.last() else {
             return;
@@ -1784,15 +1814,15 @@ impl<'d, S: PageSink> Pager<'d, '_, '_, S> {
         let mut guessed = false;
         // Past the most a page wraps around, the paragraph's own objects are left out.
         let mut left_out = false;
-        for line in layout.lines.iter().skip(first) {
+        for (index, line) in layout.lines.iter().enumerate().skip(first) {
             for piece in &line.pieces {
                 let PieceKind::Object { item, height: None } = piece.kind else {
                     continue;
                 };
-                let Some(Item::Anchored(path)) = layout.itemized.items.get(item) else {
+                if index > first && limit.is_some_and(|limit| item >= limit) {
                     continue;
-                };
-                let Some(Inline::Anchored(object)) = inline_at(paragraph.inlines(), path) else {
+                }
+                let Some(object) = anchored(layout, paragraph, item) else {
                     continue;
                 };
                 if object.wrap() == Wrap::None {
@@ -3295,6 +3325,76 @@ pub(crate) fn body(setup: &PageSetup) -> Body {
         width: Pt((right - left).max(0.0)),
         bottom: Pt(bottom),
     }
+}
+
+/// The floating object of `layout`'s item `item`, a paragraph's laid out from `paragraph`,
+/// if it is one.
+fn anchored<'p>(
+    layout: &ParagraphLayout,
+    paragraph: &'p Paragraph,
+    item: usize,
+) -> Option<&'p crate::ir::AnchoredObject> {
+    let Some(Item::Anchored(path)) = layout.itemized.items.get(item) else {
+        return None;
+    };
+    match inline_at(paragraph.inlines(), path) {
+        Some(Inline::Anchored(object)) => Some(object),
+        _ => None,
+    }
+}
+
+/// The floating objects that text wraps around in the lines of `layout`, a paragraph's laid
+/// out from `paragraph`, from line `from` on, in order: each line's index, and the object's
+/// item.
+fn wrapping_objects<'a>(
+    layout: &'a ParagraphLayout,
+    paragraph: &'a Paragraph,
+    from: usize,
+) -> impl Iterator<Item = (usize, usize)> + 'a {
+    layout
+        .lines
+        .iter()
+        .enumerate()
+        .skip(from)
+        .flat_map(|(index, line)| line.pieces.iter().map(move |piece| (index, piece)))
+        .filter_map(move |(index, piece)| match piece.kind {
+            PieceKind::Object { item, height: None } => anchored(layout, paragraph, item)
+                .filter(|object| object.wrap() != Wrap::None)
+                .map(|_| (index, item)),
+            _ => None,
+        })
+}
+
+/// How many of a paragraph's `rest` lines from line `first` on its page takes, where `fit`
+/// of them fit on it, and `breaks` says the last of those ends in a break, after which the
+/// rest goes on on the next page; none moves the paragraph to the next page. A paragraph
+/// kept on one page, `keep_lines`, that does not fit moves; one taller than a page moves to
+/// a new page all the same, and is split there (hypothesis until a Word render,
+/// `E-keeplines-long.docx`). With `widow_control`, at least two lines stay at the bottom of
+/// a page and go on at the top of the next. On a `bare` page, where nothing moves the
+/// paragraph further, the lines that fit, at least one, and of its footnotes what fits,
+/// the rest going on on the next page.
+fn lines_taken(
+    (fit, breaks, rest): (usize, bool, usize),
+    (first, keep_lines, widow_control, bare): (usize, bool, bool, bool),
+) -> usize {
+    if fit == rest || (breaks && fit > 0) {
+        return fit;
+    }
+    if first == 0 && keep_lines && !bare {
+        return 0;
+    }
+    let mut take = fit;
+    if widow_control {
+        if rest.saturating_sub(take) < 2 {
+            take = rest.saturating_sub(2);
+        }
+        let least = if first == 0 { 2 } else { 1 };
+        if take < least {
+            take = 0;
+        }
+    }
+    if take == 0 && bare { fit.max(1) } else { take }
 }
 
 /// How many of `lines` from `first` on fit between `top` and `bottom`, the room multiple

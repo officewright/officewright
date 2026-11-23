@@ -781,3 +781,166 @@ fn objects_whose_effects_take_more_than_their_frames_keep_the_room_beside_them_s
     );
     assert_eq!(words_per_line(page).get(..4), Some(&[5, 5, 5, 9][..]));
 }
+
+#[test]
+fn lines_go_around_the_objects_that_their_page_draws_only() {
+    // Twelve lines of 9 words, the last of which anchors a picture: page 1 takes 8 lines,
+    // and the picture goes on to page 2 with its line, where it is drawn. Page 1's lines go
+    // around nothing; page 2's first three go around the picture, at the paragraph's top
+    // there, 5 words each, and the 21 words left take three lines from the margin.
+    let document = document(|style, document| {
+        let wrapping = Wrapping::square([10.0, 0.0, 10.0, 0.0]);
+        let object = picture(
+            document,
+            (100.0, 50.0),
+            at(0.0),
+            from_paragraph(0.0),
+            wrapping,
+        );
+        vec![
+            Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines([words(108, style), Inline::text(" ", style), object])
+                .into(),
+        ]
+    });
+    let (laid, report) = lay(&document);
+    let pages = &laid.pages;
+    assert_eq!(pages.len(), 2);
+    let pictures = |page: &Page| -> Vec<(f64, f64)> {
+        page.items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Image(image) => Some((image.at.x.0, image.at.y.0)),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(pictures(&pages[0]).is_empty());
+    assert!(pages[0].exclusions.is_empty());
+    assert_eq!(words_per_line(&pages[0]), [9; 8]);
+    assert!(lines(&pages[0]).iter().all(|&(x, _)| x == 20.0));
+    assert_eq!(pictures(&pages[1]), [(20.0, 20.0)]);
+    assert_eq!(
+        lines(&pages[1]),
+        [
+            (130.0, 36.0),
+            (130.0, 56.0),
+            (130.0, 76.0),
+            (20.0, 96.0),
+            (20.0, 116.0),
+            (20.0, 136.0)
+        ]
+    );
+    assert_eq!(words_per_line(&pages[1]), [5, 5, 5, 9, 9, 3]);
+    assert!(messages(&report).is_empty(), "{:?}", messages(&report));
+}
+
+#[test]
+fn a_line_whose_object_takes_the_whole_body_goes_below_it_on_the_page_that_draws_it() {
+    // A paragraph of one line, then one of 120 words that anchors, after its 20th word, in
+    // its third line, a picture as large as the body, wrapped top and bottom, placed from
+    // the margin. Page 1 takes the second paragraph's first two lines, from the margin, as
+    // the picture goes on with its line: its line starts page 2, which draws the picture,
+    // and goes below it, past the body, which is reported. The rest goes on from page 3 on,
+    // from the margin, around nothing.
+    let document = document(|style, document| {
+        let wrapping = Wrapping {
+            wrap: Wrap::TopAndBottom,
+            side: WrapSide::BothSides,
+            distances: [0.0; 4],
+        };
+        let object = picture(
+            document,
+            (260.0, 160.0),
+            at(0.0),
+            (VerticalReference::Margin, 0.0),
+            wrapping,
+        );
+        vec![
+            paragraph(style, Vec::new(), 1),
+            Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines([
+                    words(20, style),
+                    object,
+                    Inline::text(" ", style),
+                    words(100, style),
+                ])
+                .into(),
+        ]
+    });
+    let (laid, report) = lay(&document);
+    let pages = &laid.pages;
+    let drawn: Vec<usize> = pages
+        .iter()
+        .map(|page| {
+            page.items
+                .iter()
+                .filter(|item| matches!(item, DisplayItem::Image(_)))
+                .count()
+        })
+        .collect();
+    assert_eq!(drawn, [0, 1, 0, 0]);
+    assert_eq!(lines(&pages[0]), [(20.0, 36.0), (20.0, 56.0), (20.0, 76.0)]);
+    assert_eq!(words_per_line(&pages[0]), [1, 9, 9]);
+    assert_eq!(lines(&pages[1]), [(20.0, 196.0)]);
+    assert_eq!(words_per_line(&pages[2]), [9; 8]);
+    assert_eq!(words_per_line(&pages[3]), [9, 9, 3]);
+    assert!(pages[2].exclusions.is_empty() && pages[3].exclusions.is_empty());
+    let messages = messages(&report);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m == "a line is taller than the body of its page"),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn an_object_that_going_around_it_would_take_to_the_next_page_is_reported() {
+    // Seven lines fill page 1 down to 160; the last line there is the first of a paragraph
+    // without widow control that anchors a picture after its sixth word. Going around the
+    // picture, the line takes 5 words, and the picture goes on to page 2 with the sixth;
+    // without it, the line takes 9 words, the picture among them. It stays there, drawn
+    // at the paragraph's top over the line, and that is reported.
+    let document = document(|style, document| {
+        let mut blocks: Vec<Block> = (0..7).map(|_| paragraph(style, Vec::new(), 1)).collect();
+        let wrapping = Wrapping::square([10.0, 0.0, 10.0, 0.0]);
+        let object = picture(
+            document,
+            (100.0, 50.0),
+            at(0.0),
+            from_paragraph(0.0),
+            wrapping,
+        );
+        blocks.push(
+            Paragraph::new(style)
+                .with_props(exact().with_widow_control(false))
+                .with_inlines([
+                    words(6, style),
+                    object,
+                    Inline::text(" ".to_owned() + &["AAAA"; 14].join(" "), style),
+                ])
+                .into(),
+        );
+        blocks
+    });
+    let (laid, report) = lay(&document);
+    let page = &laid.pages[0];
+    assert_eq!(lines(page).last(), Some(&(20.0, 176.0)));
+    assert_eq!(words_per_line(page).last(), Some(&9));
+    let pictures: Vec<(f64, f64)> = page
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            DisplayItem::Image(image) => Some((image.at.x.0, image.at.y.0)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pictures, [(20.0, 160.0)]);
+    let messages = messages(&report);
+    let reported = "a line does not go around a floating object it holds where going around it \
+                    would take the object to the next page: it runs over or under it";
+    assert!(messages.iter().any(|m| m == reported), "{messages:?}");
+}
