@@ -1684,10 +1684,6 @@ mod tests {
             // does not: the scan does not find that content, so these name none.
             (
                 "text wrapping",
-                "text with room on both sides of a floating object goes on the side with more room only",
-            ),
-            (
-                "text wrapping",
                 "text above the paragraph that anchors a floating object does not wrap around it yet: it runs over or under it",
             ),
             (

@@ -28,7 +28,7 @@ pub enum Class {
 /// Words of the messages of `feature-unsupported` entries, each with the required feature
 /// it degrades, or `None` for an entry that degrades none. The first line whose words the
 /// message contains classes it.
-pub const MESSAGES: [(&str, Option<&str>); 132] = [
+pub const MESSAGES: [(&str, Option<&str>); 131] = [
     // Paragraphs: borders and shading (phase 1).
     ("paragraph borders are not drawn", Some("paragraph borders")),
     ("a shading pattern of stripes or crosses", Some("shading")),
@@ -114,7 +114,6 @@ pub const MESSAGES: [(&str, Option<&str>); 132] = [
         None,
     ),
     ("text wrapped tight or through a floating object", None),
-    ("text with room on both sides of a floating object", None),
     (
         "text above the paragraph that anchors a floating object",
         None,
@@ -309,11 +308,6 @@ mod tests {
             (
                 "text wrapped tight or through a floating object goes around its frame, not its \
                  outline",
-                Class::NotRequired,
-            ),
-            (
-                "text with room on both sides of a floating object goes on the side with more \
-                 room only",
                 Class::NotRequired,
             ),
             (
