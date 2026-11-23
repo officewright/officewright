@@ -9455,36 +9455,40 @@ EAST_ASIAN_TEXT = "这是一段用来测量缩进的中文文字，它足够长�
 def paragraph_units_normal() -> Doc:
     # Question 6 (c) and (e) of the comment of 2026-10-19 19:12: Normal is 16 pt and the
     # document defaults 11 pt, so that a character of 16 pt tells Normal's size from the
-    # defaults'. The East Asian text is in the defaults' fonts, Calibri, which has no Chinese
-    # glyphs: Word draws them in a font of its own choice, which leaves the indent alone.
+    # defaults'. Each case's label is a paragraph of its own above it, so that an East Asian
+    # case holds East Asian text only; that text is in SimSun (w:eastAsia), the Chinese font
+    # of the corpus's generated Chinese documents, beyond the fonts of the other documents,
+    # so that Word draws it in a font the document names.
     def sizes(sz: float, sz_cs: float) -> str:
         return (f'<w:sz w:val="{half_points(sz)}"/>'
                 f'<w:szCs w:val="{half_points(sz_cs)}"/>')
+
+    east_asian_font = '<w:rFonts w:eastAsia="SimSun"/>'
 
     indent = {"leftChars": 200}
     cases = [
         ("Normal 16 pt over document defaults of 11 pt, no other size; leftChars 200",
          None, UNIT_TEXT),
-        ("East Asian text, w:sz 11 pt and w:szCs 20 pt on its runs and mark; leftChars 200",
-         sizes(11, 20), EAST_ASIAN_TEXT),
+        ("East Asian text in SimSun, w:sz 11 pt and w:szCs 20 pt on its run and mark; "
+         "leftChars 200", sizes(11, 20), EAST_ASIAN_TEXT),
         ("Latin text with the same sizes (to compare); leftChars 200", sizes(11, 20),
          UNIT_TEXT),
-        ("East Asian text, w:sz 20 pt and w:szCs 11 pt on its runs and mark; leftChars 200",
-         sizes(20, 11), EAST_ASIAN_TEXT),
+        ("East Asian text in SimSun, w:sz 20 pt and w:szCs 11 pt on its run and mark; "
+         "leftChars 200", sizes(20, 11), EAST_ASIAN_TEXT),
         ("Latin text with the same sizes (to compare); leftChars 200", sizes(20, 11),
          UNIT_TEXT),
     ]
     body = ""
     for n, (label, props, sample) in enumerate(cases, 1):
-        content = styled_run(f"Case {n:02d}: {label}: ", props or "") + styled_run(sample,
-                                                                                    props or "")
-        body += para(content, shading=GREY, ind=indent, mark=props)
-        body += para(run("Between the cases."))
+        font = east_asian_font if sample == EAST_ASIAN_TEXT else ""
+        body += para(run(f"Case {n:02d}: {label}:"))
+        body += para(styled_run(sample, font + (props or "")), shading=GREY, ind=indent,
+                     mark=props)
     return Doc(
         "E-paragraph-units-normal",
         "Which size a character unit (w:leftChars) takes when only Normal gives a size, 16 pt "
-        "over document defaults of 11 pt, and in East Asian text whose w:sz and w:szCs "
-        "differ, beside Latin text of the same sizes",
+        "over document defaults of 11 pt, and in East Asian text in SimSun whose w:sz and "
+        "w:szCs differ, beside Latin text of the same sizes",
         body,
         normal_props=f"<w:rPr>{size_props(16)}</w:rPr>",
     )
@@ -9617,21 +9621,25 @@ def table_style_based_on_normal_14() -> Doc:
 
 
 def table_style_no_defaults() -> Doc:
-    # #360's question 4 (comment of 2026-10-19 18:17): with no w:rPrDefault the implied size
-    # is 10 pt, which Normal's w:sz 20 equals.
+    # #360's question 4 (comment of 2026-10-19 18:17): a Normal equal to the size text takes
+    # when the document defaults give no run properties. In Word that is 11 pt, not
+    # ECMA-376's 10 pt: E-defaults-empty's reference draws its case 01 in Calibri 11, and its
+    # re-saved copy, which the reference is exported from, writes w:sz 22 into the defaults.
+    # So Normal is w:sz 22; a Normal that differs from the defaults is
+    # E-table-style-defaults-size's question.
     body = table_case(
         1, "a table in the style Big (14 pt, centred); no run properties in the document "
-        "defaults, Normal w:sz 20 (10 pt)",
+        "defaults, Normal w:sz 22 (11 pt, the size Word gives text without them)",
         styled_table("Big", named_cells(2, 2), widths=[TEXT_W // 2] * 2),
     ) + para(run("Case 02: a paragraph after the table, in Normal"))
     return Doc(
         "E-table-style-no-defaults",
-        "Whether a Normal style of 10 pt (w:sz 20) gives way to the 14 pt of a table style "
-        "when the document defaults give no run properties, whose implied size is 10 pt, "
-        "with the setting overrideTableStyleFontSizeAndJustification on",
+        "Whether a Normal style of 11 pt (w:sz 22) gives way to the 14 pt of a table style "
+        "when the document defaults give no run properties, where Word gives text 11 pt "
+        "(E-defaults-empty), with the setting overrideTableStyleFontSizeAndJustification on",
         body,
         styles=table_style("Big", [], whole=BIG_TABLE_STYLE_WHOLE),
-        normal_props=f"<w:rPr>{size_props(10)}</w:rPr>",
+        normal_props=f"<w:rPr>{size_props(11)}</w:rPr>",
         run_defaults=False,
     )
 
@@ -10119,7 +10127,7 @@ def tab_leader_no_underscore() -> Doc:
         "E-tab-leader-no-underscore",
         "How Word draws underscore and heavy tab leaders when the tab is in Officewright "
         "Test Symbol, whose character map has no U+005F (only the symbol code F05F), beside "
-        "dot, hyphen and middle dot leaders in it and the same leaders in Calibri",
+        "dot, hyphen and middle dot leaders in it, and underscore and heavy leaders in Calibri",
         body,
     )
 
@@ -10127,10 +10135,13 @@ def tab_leader_no_underscore() -> Doc:
 # The theme font languages whose primary language names no script of the theme (#358): each
 # document gives all three slots of w:themeFontLang one language, and the theme a font of
 # its own to each of these scripts, so the font of each case names the script Word took.
-# These and the theme's own fonts (Verdana, Tahoma) are Windows fonts beyond the ones the
-# other documents use, since the question is which font Word takes.
-THEME_LANG_SCRIPTS = (("Mymr", "Times New Roman"), ("Java", "Cambria"), ("Nkoo", "Courier New"),
-                      ("Olck", "Arial"), ("Tfng", "Noto Sans"))
+# The theme's East Asian font is empty, so a slot whose script Word does not take may fall
+# back to a font of Word's choice: no script's font is one Word commonly falls back to (Times
+# New Roman, Arial, Courier New, Calibri, Segoe UI). Constantia, Consolas, Trebuchet MS and
+# the theme's own fonts (Verdana, Tahoma) are Windows fonts beyond the ones the other
+# documents use, since the question is which font Word takes; each has Greek and Cyrillic.
+THEME_LANG_SCRIPTS = (("Mymr", "Constantia"), ("Java", "Cambria"), ("Nkoo", "Consolas"),
+                      ("Olck", "Trebuchet MS"), ("Tfng", "Noto Sans"))
 THEME_LANGUAGES = [("my", "my-MM", "Burmese"), ("jv", "jv-ID", "Javanese"),
                    ("nqo", "nqo", "N'Ko"), ("sat", "sat", "Santali"),
                    ("zgh", "zgh-Tfng", "Standard Moroccan Tamazight in Tifinagh")]
@@ -10162,8 +10173,9 @@ def theme_font_lang(short: str, tag: str, language: str) -> Doc:
     fonts = ", ".join(f"{script} {typeface}" for script, typeface in THEME_LANG_SCRIPTS)
     return Doc(
         f"E-theme-font-lang-{short}",
-        f"Which theme font Word takes for Latin, East Asian and complex script text when "
-        f"w:themeFontLang gives {tag} ({language}) for all three, with a theme whose minor "
+        f"Which theme font Word takes in the theme's Latin, East Asian and complex script "
+        f"slots when w:themeFontLang gives {tag} ({language}) for all three, with a theme whose "
+        f"minor "
         f"fonts are Verdana, none and Tahoma and which gives {fonts}; also with the runs in "
         f"{tag}",
         body,

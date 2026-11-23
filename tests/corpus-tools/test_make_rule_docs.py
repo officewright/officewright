@@ -7,6 +7,7 @@ and check the package structure that Word needs to open a file at all.
 
 import dataclasses
 import importlib.util
+import json
 import re
 import shutil
 import struct
@@ -473,13 +474,15 @@ class Packages(unittest.TestCase):
 
     def test_styles_named_are_defined(self):
         # Word falls back to Normal for a style it does not find, so a mistyped name would
-        # only show in the render. The documents about how Word matches style ids name ids
-        # in another case, a name, and a style of no type of the schema on purpose (#40);
-        # BatchFourteenStyles checks theirs.
-        on_purpose = {"E-style-id-case", "E-style-id-missing", "E-style-type-unknown"}
+        # only show in the render. The documents about how Word matches style ids (#40) name
+        # ids in another case and a style's name, and a style of no type of the schema, on
+        # purpose: only those values are left out here (BatchFourteenStyles checks them).
+        odd_names = {"E-style-id-case": {"mixedcase", "MIXEDCASE", "linkedchar"},
+                     "E-style-id-missing": {"NoIdStyle", "No Id Style"}}
+        odd_types = {"E-style-type-unknown": {"UnknownType"}}
         for doc in self.docs:
-            if doc.name in on_purpose:
-                continue
+            odd = odd_names.get(doc.name, set())
+            untyped = odd_types.get(doc.name, set())
             parts = rules.parts(doc)
             styles = part(parts, "word/styles.xml")
             defined = {s.get(f"{W}styleId") for s in styles.iter(f"{W}style")}
@@ -495,19 +498,25 @@ class Packages(unittest.TestCase):
                 for tag in ("pStyle", "rStyle", "basedOn", "numStyleLink", "styleLink", "tblStyle")
                 for n in root.iter(f"{W}{tag}")
             }
-            self.assertLessEqual(named, defined, doc.name)
+            self.assertLessEqual(named - odd, defined, doc.name)
+            # The odd values are named and match no id as written.
+            self.assertLessEqual(odd, named - defined, doc.name)
             # And of the right type: a paragraph or a list level names a paragraph style, a
             # run or a paragraph mark a character style, and a style is based on its own type.
             kind = {s.get(f"{W}styleId"): s.get(f"{W}type") for s in styles.iter(f"{W}style")}
+            self.assertLessEqual(untyped, {i for i, k in kind.items() if k == "unknown"},
+                                 doc.name)
             for root in roots:
                 for tag, expected in (
                     ("pStyle", "paragraph"), ("rStyle", "character"), ("tblStyle", "table")
                 ):
                     for n in root.iter(f"{W}{tag}"):
+                        if n.get(f"{W}val") in odd | untyped:
+                            continue
                         self.assertEqual(kind[n.get(f"{W}val")], expected, doc.name)
             for style in styles.iter(f"{W}style"):
                 base = style.find(f"{W}basedOn")
-                if base is not None:
+                if base is not None and base.get(f"{W}val") not in odd:
                     self.assertEqual(kind[base.get(f"{W}val")], style.get(f"{W}type"), doc.name)
 
     def test_refuses_a_colour_mapping_value_that_is_not_a_theme_colour(self):
@@ -8314,6 +8323,8 @@ class FloatingObjectDocuments(unittest.TestCase):
                 self.assertTrue(b14_text(holder).endswith(" after it."))
         # The inline cases on page 1, then two floating cases to a page.
         self.assertEqual(pages, [1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6])
+
+
 A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 
@@ -8649,23 +8660,28 @@ class BatchFourteenParagraphs(BatchFourteen):
         self.assertEqual([c.tag for c in normal.find(f"{W}rPr")], [f"{W}sz", f"{W}szCs"])
         self.assertEqual(self.val(normal, f"{W}rPr/{W}sz"), "32", "Normal 16 pt")
         self.assertIsNone(normal.find(f"{W}pPr"))
-        cases = self.case_paragraphs(name)
-        self.assertEqual(len(cases), 5)
+        paragraphs = self.body(name).findall(f"{W}p")
+        self.assertEqual(len(paragraphs), 10)
         previous = None
-        for n, p in enumerate(cases, 1):
-            label = self.texts(p)
+        for n, (label_p, p) in enumerate(zip(paragraphs[::2], paragraphs[1::2]), 1):
+            # The label is a paragraph of its own, in Normal, above the case.
+            label = self.texts(label_p)
             self.assertTrue(label.startswith(f"Case {n:02d}: "), label)
+            self.assertIsNone(label_p.find(f"{W}pPr"), label)
+            self.assertIsNone(label_p.find(f"{W}r/{W}rPr"), label)
             ind = p.find(f"{W}pPr/{W}ind")
             self.assertEqual(dict(ind.attrib), {f"{W}leftChars": "200"}, label)
             self.assertIn("leftChars 200", label)
-            runs = p.findall(f"{W}r")
-            self.assertEqual(len(runs), 2)
-            sample = self.texts(runs[1])
+            self.assertEqual(p.find(f"{W}pPr/{W}shd").get(f"{W}fill"), rules.GREY)
+            (sample_run,) = p.findall(f"{W}r")
+            sample = self.texts(sample_run)
             sizes = []
-            for props in [r.find(f"{W}rPr") for r in runs] + [p.find(f"{W}pPr/{W}rPr")]:
-                sizes.append(None if props is None else (
-                    int(self.val(props, f"{W}sz")) / 2, int(self.val(props, f"{W}szCs")) / 2))
-            self.assertEqual(len(set(sizes)), 1, "runs and mark alike")
+            for props in (sample_run.find(f"{W}rPr"), p.find(f"{W}pPr/{W}rPr")):
+                sized = props is not None and props.find(f"{W}sz") is not None
+                sizes.append((int(self.val(props, f"{W}sz")) / 2,
+                              int(self.val(props, f"{W}szCs")) / 2) if sized else None)
+            self.assertEqual(len(set(sizes)), 1, "run and mark alike")
+            fonts = sample_run.find(f"{W}rPr/{W}rFonts")
             match = re.search(r"w:sz (\d+) pt and w:szCs (\d+) pt", label)
             if "no other size" in label:
                 self.assertEqual(sizes[0], None)
@@ -8678,8 +8694,11 @@ class BatchFourteenParagraphs(BatchFourteen):
                 self.assertTrue(all(unicodedata.east_asian_width(c) in "WF" for c in sample),
                                 sample)
                 self.assertTrue(any(unicodedata.name(c).startswith("CJK UNIFIED") for c in sample))
+                self.assertIn("East Asian text in SimSun", label)
+                self.assertEqual(dict(fonts.attrib), {f"{W}eastAsia": "SimSun"})
             else:
                 self.assertTrue(sample.isascii(), label)
+                self.assertIsNone(fonts, label)
             previous = sizes[0]
 
     def test_paragraph_units_grids_have_the_grids_their_labels_name(self):
@@ -8911,6 +8930,8 @@ class BatchFourteenParagraphs(BatchFourteen):
             self.assertNotIn(ord(leader), symbol)
             self.assertIn(0xF000 + ord(leader), symbol)
         self.assertIn("(only the symbol code F05F)", self.docs[name].purpose)
+        self.assertIn("dot, hyphen and middle dot leaders in it, and underscore and heavy "
+                      "leaders in Calibri", self.docs[name].purpose)
         paragraphs = self.body(name).findall(f"{W}p")
         self.assertEqual(len(paragraphs), 14)
         found = []
@@ -8981,8 +9002,21 @@ class BatchFourteenTableStyles(BatchFourteen):
         self.assertIsNone(styles.find(f"{W}docDefaults/{W}rPrDefault"))
         normal = self.style(name, "Normal")
         self.assertEqual([(c.tag, c.get(f"{W}val")) for c in normal.find(f"{W}rPr")],
-                         [(f"{W}sz", "20"), (f"{W}szCs", "20")])
+                         [(f"{W}sz", "22"), (f"{W}szCs", "22")])
         self.assertIsNone(normal.find(f"{W}pPr"))
+        # Normal's size is the one Word gives text when the document defaults give none:
+        # case 01 of E-defaults-empty's reference, which has no w:rPrDefault either.
+        reference = json.loads((Path(__file__).resolve().parents[1] / "corpus/reference/"
+                                "word-rules/E-defaults-empty/formatting.json").read_text())
+        (story,) = [s for s in reference["stories"] if s["story"] == "main"]
+        first = story["paragraphs"][0]
+        self.assertTrue(first["text"].startswith("Case 01: no font or size anywhere"))
+        self.assertEqual(int(self.val(normal, f"{W}rPr/{W}sz")) / 2,
+                         reference["fonts"][first["font"]]["size"])
+        empty = self.xml("E-defaults-empty", "word/styles.xml")
+        self.assertIsNone(empty.find(f"{W}docDefaults/{W}rPrDefault"))
+        self.assertIn("w:sz 22 (11 pt, the size Word gives text without them)",
+                      self.texts(self.body(name).find(f"{W}p")))
         self.assertEqual(self.compat_values(name)["overrideTableStyleFontSizeAndJustification"],
                          "1")
         self.assertEqual(len(self.cells(name)), 4)
@@ -9245,15 +9279,21 @@ class BatchFourteenThemeFonts(BatchFourteen):
                                       for slot in ("latin", "ea", "cs")],
                                      ["Verdana", "", "Tahoma"])
                 scripts = {f.get("script"): f.get("typeface") for f in collection.iter(f"{A}font")}
-                self.assertEqual(scripts, {"Mymr": "Times New Roman", "Java": "Cambria",
-                                           "Nkoo": "Courier New", "Olck": "Arial",
+                self.assertEqual(scripts, {"Mymr": "Constantia", "Java": "Cambria",
+                                           "Nkoo": "Consolas", "Olck": "Trebuchet MS",
                                            "Tfng": "Noto Sans"})
                 typefaces |= set(scripts.values())
                 self.assertIn(self.SCRIPTS[tag], scripts)
-            # Each script's font differs from the others and from the theme's own and the
-            # labels' fonts, so the font of a case names the script.
+            # Each script's font differs from the others, from the theme's own and the
+            # labels' fonts, and from the fonts Word commonly falls back to for an empty slot,
+            # so the font of a case names the script.
             self.assertEqual(len(typefaces), 5)
-            self.assertFalse(typefaces & {"Verdana", "Tahoma", "Georgia", "Calibri"})
+            self.assertFalse(typefaces & {"Verdana", "Tahoma", "Georgia", "Calibri",
+                                          "Times New Roman", "Arial", "Courier New",
+                                          "Segoe UI", "MS Mincho", "SimSun", "MS Gothic",
+                                          "Yu Mincho", "Yu Gothic"})
+            self.assertIn("in the theme's Latin, East Asian and complex script slots",
+                          self.docs[name].purpose)
             fonts = ", ".join(f"{s} {t}" for s, t in scripts.items())
             self.assertIn(fonts, self.docs[name].purpose)
             self.check_cases(name, tag)
