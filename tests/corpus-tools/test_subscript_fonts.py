@@ -183,8 +183,8 @@ class TestSubscriptFonts(unittest.TestCase):
                     self.assertAlmostEqual(got, want, delta=0.5 * 10 ** -places)
         # What the comment says the fonts tell apart: a descent rule drops D's subscripts
         # 0.105 s further than N's, an OS/2 rule S's 0.14625 s (0.225 s at s), at 12 pt
-        # 1.26, 1.755 and 2.7 pt; in N, typo and fixed lie 0.7 pt apart at 48 pt, OS/2 at s
-        # and fixed 0.62 pt.
+        # 1.26, 1.755 and 2.7 pt; in N at 48 pt, typo and fixed predict 4.92 and 4.22 pt, 0.7
+        # pt apart, OS/2 at s 3.60 pt, 0.62 pt from fixed, OS/2 2.34 pt and win 6.64 pt.
         n, d, sub = (metrics(fonts[k]) for k in "NDS")
         self.assertAlmostEqual(0.35 * (d["typo"] - n["typo"]) / -1000, 0.105)
         self.assertAlmostEqual(0.35 * (d["win"] - n["win"]) / 1000, 0.105)
@@ -193,13 +193,19 @@ class TestSubscriptFonts(unittest.TestCase):
         prose = " ".join(doc.split())
         for claim in ("drops D's subscripts 0.105 s further than N's (1.26 pt at 12 pt)",
                       "drops S's 0.14625 s further (0.225 s at s; 1.755 pt and 2.7 pt at 12 pt)",
-                      "(typo and fixed 0.7 pt apart at 48 pt, OS/2 at s and fixed 0.62 pt)"):
+                      "at 48 pt, typo 4.92 pt and fixed 4.22 pt (0.7 pt apart), OS/2 at s 3.60 pt "
+                      "(0.62 pt from fixed), but OS/2 at 0.65 s 2.34 pt and win 6.64 pt."):
             self.assertIn(claim, prose)
         self.assertAlmostEqual(0.105 * 12, 1.26)
         self.assertAlmostEqual(0.14625 * 12, 1.755)
         self.assertAlmostEqual(0.225 * 12, 2.7)
         self.assertAlmostEqual(round(0.35 * 48 * -n["typo"] / 1000 - 0.088 * 48, 2), 0.7)
         self.assertAlmostEqual(round(0.088 * 48 - 48 * n["subscript"] / 1000, 2), 0.62)
+        for drop, want in ((0.35 * 48 * -n["typo"] / 1000, 4.92), (0.088 * 48, 4.22),
+                           (48 * n["subscript"] / 1000, 3.60),
+                           (0.65 * 48 * n["subscript"] / 1000, 2.34),
+                           (0.35 * 48 * n["win"] / 1000, 6.64)):
+            self.assertAlmostEqual(round(drop, 2), want)
 
     def test_a_digital_signature_of_the_source_is_left_out(self):
         script = load()

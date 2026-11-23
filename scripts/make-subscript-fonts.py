@@ -52,8 +52,9 @@ out.
     S       48    4.922    6.636    9.360    14.400     4.224
     S       72    7.384    9.954   14.040    21.600     6.336
 
-In Noto Sans alone some of the rules lie close together (typo and fixed 0.7 pt apart at 48
-pt, OS/2 at s and fixed 0.62 pt), others do not (OS/2 at 0.65 s 2.34 pt, win 6.64 pt).
+In Noto Sans alone some of the rules predict drops close together, others not: at 48 pt,
+typo 4.92 pt and fixed 4.22 pt (0.7 pt apart), OS/2 at s 3.60 pt (0.62 pt from fixed),
+but OS/2 at 0.65 s 2.34 pt and win 6.64 pt.
 Between the fonts they part: a rule that reads the descent drops
 D's subscripts 0.105 s further than N's (1.26 pt at 12 pt) and S's as far as N's; one that
 reads ySubscriptYOffset drops S's 0.14625 s further (0.225 s at s; 1.755 pt and 2.7 pt at
