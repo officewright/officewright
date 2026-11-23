@@ -14,6 +14,8 @@ exclude = [
   "tests/footnote_numbering.rs",
   "tests/layout_corpus.rs",
   "tests/paragraph_units.rs",
+  "tests/table_cell_margins_style.rs",
+  "tests/table_style_override_off.rs",
   "tests/text_box_lines.rs",
 ]
 
