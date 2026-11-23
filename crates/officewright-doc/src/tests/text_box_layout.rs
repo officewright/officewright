@@ -21,7 +21,7 @@ fn graphic(shape: &str) -> String {
 
 /// A run with a drawing in the line, 100 by 50 pt, whose effects reach 1 pt to the left,
 /// of a shape holding `shape`.
-fn inline(shape: &str) -> String {
+pub(super) fn inline(shape: &str) -> String {
     format!(
         r#"<w:r><w:drawing {NAMESPACES}><wp:inline><wp:extent cx="1270000" cy="635000"/><wp:effectExtent l="12700" t="0" r="0" b="0"/><wp:docPr id="1" name="Text Box 1"/>{}</wp:inline></w:drawing></w:r>"#,
         graphic(shape)
@@ -39,7 +39,7 @@ fn floating(shape: &str) -> String {
 
 /// The parts of a shape that is a text box: these shape properties, the content of these
 /// blocks, and these attributes of `wps:bodyPr`.
-fn shape(properties: &str, blocks: &str, body: &str) -> String {
+pub(super) fn shape(properties: &str, blocks: &str, body: &str) -> String {
     format!(
         "<wps:spPr>{properties}</wps:spPr><wps:txbx><w:txbxContent>{blocks}</w:txbxContent></wps:txbx><wps:bodyPr {body}/>"
     )

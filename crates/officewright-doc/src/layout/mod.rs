@@ -529,6 +529,11 @@ impl<'a> Translator<'a> {
         if !continues || self.last_body {
             self.end_bookmarks(&mut out);
         }
+        if !continues {
+            // What has no paragraph here to end, in a story, a cell, a text box or a note,
+            // is dropped, not passed on to another story or cell.
+            self.pending_bookmarks.clear();
+        }
         if field.is_none() {
             self.pending_bookmarks = outer_bookmarks;
         }
@@ -538,8 +543,7 @@ impl<'a> Translator<'a> {
 
     /// Ends the last paragraph of `blocks` with the bookmarks met after it, which no
     /// paragraph of theirs follows: where Word puts what marks the end of a story or a
-    /// cell. With no paragraph there, they stay pending: a cell's for the blocks after it,
-    /// while a story's are dropped.
+    /// cell. With no paragraph there, they stay pending.
     fn end_bookmarks(&mut self, blocks: &mut Vec<ir::Block>) {
         if self.pending_bookmarks.is_empty() {
             return;

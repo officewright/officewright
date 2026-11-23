@@ -32,8 +32,6 @@ impl<'a> Translator<'a> {
         // Keyed by the interned target, so that a link to a known address costs as much as
         // its own anchor, however long the target that many links share.
         let key = LinkKey::Hyperlink(link.target_symbol(), anchor);
-        #[cfg(test)]
-        super::work(|work| work.link_key_bytes += anchor.len());
         if let Some(known) = self.link_keys.get(&key) {
             return known.clone();
         }
@@ -54,8 +52,6 @@ impl<'a> Translator<'a> {
             link.bookmark().unwrap_or_default(),
         );
         let key = LinkKey::Field(target.into(), anchor.into());
-        #[cfg(test)]
-        super::work(|work| work.link_key_bytes += target.len() + anchor.len());
         if let Some(known) = self.link_keys.get(&key) {
             return known.clone();
         }
@@ -70,7 +66,10 @@ impl<'a> Translator<'a> {
     /// the anchor names. None for a link with neither, or past the bytes of targets the IR
     /// may hold. `w:docLocation` is not part of it: what Word does with it is not known.
     ///
-    /// Every link to one address gets the same target, made once.
+    /// Every link to one address gets the same target, made once. The budget is checked
+    /// before the target is made, so that an address past it costs nothing; such an
+    /// address is left out even where links of another kind (a hyperlink and a field) made
+    /// the same target before.
     fn shared_target(&mut self, target: &str, anchor: &str) -> Option<Arc<ir::LinkTarget>> {
         let length = match (target, anchor) {
             ("", "") => return None,
@@ -85,13 +84,7 @@ impl<'a> Translator<'a> {
             );
             return None;
         }
-        #[cfg(test)]
-        super::work(|work| work.link_target_bytes += length);
-        let made = match (target, anchor) {
-            ("", anchor) => ir::LinkTarget::Bookmark(anchor.to_owned()),
-            (target, "") => ir::LinkTarget::Uri(target.to_owned()),
-            (target, anchor) => ir::LinkTarget::Uri(format!("{target}#{anchor}")),
-        };
+        let made = made(target, anchor);
         if let Some(shared) = self.link_targets.get(&made) {
             return Some(Arc::clone(shared));
         }
@@ -102,13 +95,46 @@ impl<'a> Translator<'a> {
     }
 }
 
+/// The target of a link with this target and this anchor, not both empty.
+fn made(target: &str, anchor: &str) -> ir::LinkTarget {
+    let made = match (target, anchor) {
+        ("", anchor) => ir::LinkTarget::Bookmark(anchor.to_owned()),
+        (target, "") => ir::LinkTarget::Uri(target.to_owned()),
+        (target, anchor) => ir::LinkTarget::Uri(format!("{target}#{anchor}")),
+    };
+    #[cfg(test)]
+    if let ir::LinkTarget::Uri(text) | ir::LinkTarget::Bookmark(text) = &made {
+        super::work(|work| work.link_target_bytes += text.len());
+    }
+    made
+}
+
 /// What makes a link's address, as the translation keys the targets it made: a
 /// hyperlink's interned target and its anchor, or a `HYPERLINK` field's target and
 /// anchor, copied from its instruction (empty for none).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum LinkKey<'a> {
     Hyperlink(Option<Sym>, &'a str),
     Field(Box<str>, Box<str>),
+}
+
+impl std::hash::Hash for LinkKey<'_> {
+    /// As derived would, counting in tests the bytes of text it hashes.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        let texts: [&str; 2] = match self {
+            Self::Hyperlink(symbol, anchor) => {
+                symbol.hash(state);
+                ["", anchor]
+            }
+            Self::Field(target, anchor) => [target, anchor],
+        };
+        for text in texts {
+            #[cfg(test)]
+            super::work(|work| work.link_key_bytes += text.len());
+            text.hash(state);
+        }
+    }
 }
 
 /// The IR's mark for the start of a link to `target`, which it shares.
