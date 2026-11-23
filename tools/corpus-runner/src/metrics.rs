@@ -1,6 +1,7 @@
 //! The render metrics of one document, our PDF against Word's reference: page counts, text,
 //! line endings, word positions, page breaks and the SSIM of every page.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -66,15 +67,27 @@ pub struct Scores {
     /// as not complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub word_fonts_complete: Option<bool>,
+    /// The fonts of Word's text, by the story they are in (`main`, `footnotes`,
+    /// `primary-header`, ...): those of its runs of two or more characters, paragraph
+    /// marks left out, or without the runs, of each first character of a paragraph with
+    /// text. A run of one character can name a font Word does not draw it in, for it
+    /// gives the characters of a `w:sym` their run's font, and a character that shows
+    /// nothing (a soft hyphen inside a line) draws no font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_text_fonts: Option<BTreeMap<String, Vec<String>>>,
+    /// The fonts our PDF embeds, as `pdffonts` names them, without their subset tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf_fonts: Option<Vec<String>>,
 }
 
 impl Scores {
     /// Sets the fonts Word used, and whether they are all of them, from the reference's
     /// formatting export; leaves both unset for a reference without one.
     pub fn read_word_fonts(&mut self, reference: &Path) -> Result<(), String> {
-        if let Some((fonts, complete)) = word_fonts(reference)? {
-            self.word_fonts = Some(fonts);
-            self.word_fonts_complete = Some(complete);
+        if let Some(fonts) = word_fonts(reference)? {
+            self.word_fonts = Some(fonts.all);
+            self.word_fonts_complete = Some(fonts.complete);
+            self.word_text_fonts = Some(fonts.text);
         }
         Ok(())
     }
@@ -359,12 +372,25 @@ pub fn score(ours: &Rendering, reference: &Rendering) -> Scores {
         fonts_not_embedded: None,
         word_fonts: None,
         word_fonts_complete: None,
+        word_text_fonts: None,
+        pdf_fonts: None,
     }
 }
 
-/// Whether `qpdf --check` passes without warnings, and the fonts `pdffonts` lists as not
-/// embedded.
-pub fn check_pdf(pdf: &Path) -> Result<(bool, Vec<String>), String> {
+/// What `qpdf --check` and `pdffonts` say of a PDF.
+#[derive(Debug, PartialEq)]
+pub struct PdfCheck {
+    /// `qpdf --check` passes without warnings.
+    pub valid: bool,
+    /// The fonts `pdffonts` lists as not embedded.
+    pub not_embedded: Vec<String>,
+    /// The fonts it lists as embedded, without their subset tags, sorted, each once.
+    pub embedded: Vec<String>,
+}
+
+/// Whether `qpdf --check` passes without warnings, and the fonts `pdffonts` lists as
+/// embedded and as not embedded.
+pub fn check_pdf(pdf: &Path) -> Result<PdfCheck, String> {
     let output = Command::new("qpdf")
         .arg("--check")
         .arg(pdf)
@@ -374,30 +400,65 @@ pub fn check_pdf(pdf: &Path) -> Result<(bool, Vec<String>), String> {
     // so searching it for "WARNING" would also fail a clean file in such a folder.
     let valid = output.status.success();
     let listing = tool(Command::new("pdffonts").arg(pdf))?;
-    Ok((valid, not_embedded(&String::from_utf8_lossy(&listing))))
+    let listing = String::from_utf8_lossy(&listing);
+    Ok(PdfCheck {
+        valid,
+        not_embedded: listed(&listing, "no"),
+        embedded: embedded(&listing),
+    })
 }
 
-/// The names in the rows of a `pdffonts` listing whose `emb` column says no. The columns
-/// are counted from the right (`emb sub uni object ID`), since a long font name shifts them
-/// and the type may hold spaces.
-fn not_embedded(listing: &str) -> Vec<String> {
+/// The names in the rows of a `pdffonts` listing whose `emb` column says `emb`. The
+/// columns are counted from the right (`emb sub uni object ID`), since a long font name
+/// shifts them and the type may hold spaces.
+fn listed(listing: &str, emb: &str) -> Vec<String> {
     listing
         .lines()
         .skip(2)
         .filter_map(|line| {
             let fields: Vec<&str> = line.split_whitespace().collect();
-            let emb = fields.len().checked_sub(5).and_then(|at| fields.get(at))?;
-            (*emb == "no")
+            let column = fields.len().checked_sub(5).and_then(|at| fields.get(at))?;
+            (*column == emb)
                 .then(|| fields.first().map(|name| (*name).to_owned()))
                 .flatten()
         })
         .collect()
 }
 
+/// The embedded fonts of a `pdffonts` listing, without the six capitals and `+` of a
+/// subset tag, sorted, each once.
+fn embedded(listing: &str) -> Vec<String> {
+    let mut names: Vec<String> = listed(listing, "yes")
+        .into_iter()
+        .map(|name| match name.split_once('+') {
+            Some((tag, base)) if tag.len() == 6 && tag.bytes().all(|b| b.is_ascii_uppercase()) => {
+                base.to_owned()
+            }
+            _ => name,
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The fonts Word used for a document, from its reference's `formatting.json`.
+#[derive(Debug, PartialEq)]
+pub struct WordFonts {
+    /// Every font of the export's table, sorted, each once; `(unresolved)` for a font
+    /// without a name.
+    pub all: Vec<String>,
+    /// Whether they are all of them: true only when the export holds the runs of
+    /// formatting and is complete.
+    pub complete: bool,
+    /// The fonts of the text by story, as [`Scores::word_text_fonts`] says, sorted, each
+    /// once.
+    pub text: BTreeMap<String, Vec<String>>,
+}
+
 /// The fonts Word used for the document, from its reference's `formatting.json` (written
-/// by make-reference.ps1 format 3 on), and whether they are all of them: true only when the
-/// export holds the runs of formatting and is complete; `None` for an older reference.
-pub fn word_fonts(reference: &Path) -> Result<Option<(Vec<String>, bool)>, String> {
+/// by make-reference.ps1 format 3 on); `None` for an older reference.
+pub fn word_fonts(reference: &Path) -> Result<Option<WordFonts>, String> {
     let path = reference.join("formatting.json");
     if !path.is_file() {
         return Ok(None);
@@ -410,19 +471,92 @@ pub fn word_fonts(reference: &Path) -> Result<Option<(Vec<String>, bool)>, Strin
         .get("fonts")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| format!("{}: no fonts table", path.display()))?;
-    let mut names: Vec<String> = fonts
+    let mut all: Vec<String> = fonts
         .iter()
-        .map(|font| {
-            font.get("name")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("(unresolved)")
-                .to_owned()
-        })
+        .map(|font| font_name(font).unwrap_or("(unresolved)").to_owned())
         .collect();
-    names.sort();
-    names.dedup();
+    all.sort();
+    all.dedup();
+    let mut text: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (story, index) in text_font_indices(&value) {
+        if let Some(name) = fonts.get(index).and_then(font_name) {
+            text.entry(story).or_default().push(name.to_owned());
+        }
+    }
+    for names in text.values_mut() {
+        names.sort();
+        names.dedup();
+    }
     let flag = |key: &str| value.get(key).and_then(serde_json::Value::as_bool) == Some(true);
-    Ok(Some((names, flag("runs") && flag("complete"))))
+    Ok(Some(WordFonts {
+        all,
+        complete: flag("runs") && flag("complete"),
+        text,
+    }))
+}
+
+/// The indices into the fonts table of the fonts of Word's text, with the stories they are
+/// in: of each run of a paragraph that has two or more characters, without the paragraph's
+/// mark, which is its last character; for a paragraph without runs, of its first character
+/// when it has text.
+fn text_font_indices(export: &serde_json::Value) -> Vec<(String, usize)> {
+    let as_index =
+        |value: &serde_json::Value| value.as_u64().and_then(|index| usize::try_from(index).ok());
+    let paragraphs = export
+        .get("stories")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|story| {
+            let name = story.get("story").and_then(serde_json::Value::as_str)?;
+            let paragraphs = story
+                .get("paragraphs")
+                .and_then(serde_json::Value::as_array)?;
+            Some(paragraphs.iter().map(move |paragraph| (name, paragraph)))
+        })
+        .flatten();
+    let mut indices = Vec::new();
+    for (story, paragraph) in paragraphs {
+        let runs = paragraph.get("runs").and_then(serde_json::Value::as_array);
+        match runs {
+            Some(runs) if !runs.is_empty() => {
+                let last = runs.len() - 1;
+                for (at, run) in runs.iter().enumerate() {
+                    let pair = run.as_array();
+                    let length = pair.and_then(|pair| pair.first()).and_then(as_index);
+                    let font = pair.and_then(|pair| pair.get(1)).and_then(as_index);
+                    let (Some(length), Some(font)) = (length, font) else {
+                        continue;
+                    };
+                    let characters = if at == last {
+                        length.saturating_sub(1)
+                    } else {
+                        length
+                    };
+                    if characters >= 2 {
+                        indices.push((story.to_owned(), font));
+                    }
+                }
+            }
+            _ => {
+                let has_text = paragraph
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| !text.is_empty());
+                if let Some(font) = paragraph.get("font").and_then(as_index) {
+                    if has_text {
+                        indices.push((story.to_owned(), font));
+                    }
+                }
+            }
+        }
+    }
+    indices
+}
+
+/// The name of a font of the export's table.
+fn font_name(font: &serde_json::Value) -> Option<&str> {
+    font.get("name").and_then(serde_json::Value::as_str)
 }
 
 /// The mean, 1 for no values.
@@ -679,7 +813,7 @@ mod tests {
         let clean = folder.join("clean.pdf");
         pdf(&clean, 0.0);
         assert!(
-            check_pdf(&clean).unwrap().0,
+            check_pdf(&clean).unwrap().valid,
             "a clean PDF in a folder named WARNING"
         );
         // A wrong startxref offset: qpdf reconstructs the cross-reference table and warns.
@@ -692,7 +826,7 @@ mod tests {
         damaged.extend_from_slice(b"startxref\n9\n%%EOF\n");
         let damaged_path = folder.join("damaged.pdf");
         std::fs::write(&damaged_path, damaged).unwrap();
-        assert!(!check_pdf(&damaged_path).unwrap().0, "qpdf warned");
+        assert!(!check_pdf(&damaged_path).unwrap().valid, "qpdf warned");
     }
 
     /// Through pdftotext and pdftoppm, which check.sh requires on Linux and macOS.
@@ -753,14 +887,25 @@ Helvetica                            Type 1            WinAnsi          no  no  
 TimesNewRomanPSMT                    TrueType          WinAnsi          no  no  yes     12  0\n\
 ABCDEF+AVeryLongFontNameThatPushesTheColumns-BoldItalic TrueType WinAnsi no  no  yes     14  0\n";
         assert_eq!(
-            not_embedded(listing),
+            listed(listing, "no"),
             [
                 "Helvetica",
                 "TimesNewRomanPSMT",
                 "ABCDEF+AVeryLongFontNameThatPushesTheColumns-BoldItalic"
             ]
         );
-        assert!(not_embedded("").is_empty());
+        assert!(listed("", "no").is_empty());
+        assert_eq!(embedded(listing), ["Carlito"]);
+        let tagged = "name type encoding emb sub uni object ID\n---\n\
+ABCDEF+Carlito CID TrueType Identity-H yes yes yes 9 0\n\
+GHIJKL+Carlito CID TrueType Identity-H yes yes yes 11 0\n\
+Abcdef+Odd CID TrueType Identity-H yes yes yes 13 0\n\
+ABC+Short CID TrueType Identity-H yes yes yes 15 0\n";
+        assert_eq!(
+            embedded(tagged),
+            ["ABC+Short", "Abcdef+Odd", "Carlito"],
+            "only six capitals and a plus make a subset tag"
+        );
     }
 
     #[test]
@@ -780,7 +925,11 @@ ABCDEF+AVeryLongFontNameThatPushesTheColumns-BoldItalic TrueType WinAnsi no  no 
         .unwrap();
         assert_eq!(
             word_fonts(&scratch.path).unwrap(),
-            Some((vec!["(unresolved)".to_owned(), "Calibri".to_owned()], false)),
+            Some(WordFonts {
+                all: vec!["(unresolved)".to_owned(), "Calibri".to_owned()],
+                complete: false,
+                text: BTreeMap::new(),
+            }),
             "without runs, the table has only the first characters' fonts"
         );
         let export = |runs: bool, complete: bool| {
@@ -789,7 +938,9 @@ ABCDEF+AVeryLongFontNameThatPushesTheColumns-BoldItalic TrueType WinAnsi no  no 
                 format!(r#"{{"complete": {complete}, "runs": {runs}, "fonts": [{{"name": "Carlito"}}]}}"#),
             )
             .unwrap();
-            word_fonts(&scratch.path).unwrap().map(|(_, all)| all)
+            word_fonts(&scratch.path)
+                .unwrap()
+                .map(|fonts| fonts.complete)
         };
         assert_eq!(export(true, true), Some(true));
         scores.read_word_fonts(&scratch.path).unwrap();
@@ -809,6 +960,56 @@ ABCDEF+AVeryLongFontNameThatPushesTheColumns-BoldItalic TrueType WinAnsi no  no 
         }
         std::fs::write(scratch.path.join("formatting.json"), "{}").unwrap();
         assert!(word_fonts(&scratch.path).is_err());
+    }
+
+    /// The fonts of the text leave out paragraph marks and runs of one character, which
+    /// can name a font Word does not draw them in (the characters of a `w:sym` take their
+    /// run's font in the export).
+    #[test]
+    fn word_text_fonts_are_those_of_runs_of_two_or_more_characters() {
+        let scratch = Scratch::new().unwrap();
+        std::fs::write(
+            scratch.path.join("formatting.json"),
+            r#"{"complete": true, "runs": true,
+                "fonts": [{"name": "Liberation Sans"}, {"name": "Calibri"}, {"name": "Noto Sans"},
+                          {"name": "Carlito"}, {"name": null}, {"name": "Liberation Serif"},
+                          {"name": "Liberation Mono"}],
+                "stories": [
+                  {"story": "main", "paragraphs": [
+                    {"text": "Case 04", "font": 0, "runs": [[70, 0], [1, 1], [1, 1], [1, 1]]},
+                    {"text": "ab", "font": 2, "runs": [[2, 2], [1, 3]]},
+                    {"text": "a", "font": 3, "runs": [[2, 3]]},
+                    {"text": "", "font": 5, "runs": [[1, 5]]},
+                    {"text": "x y", "font": 4, "runs": [[3, 4], [1, 1]]}]},
+                  {"story": "primary-footer", "paragraphs": [
+                    {"text": "Page", "font": 6},
+                    {"text": "", "font": 1}]}]}"#,
+        )
+        .unwrap();
+        let fonts = word_fonts(&scratch.path).unwrap().unwrap();
+        let by_story = |story: &str, names: &[&str]| {
+            (
+                story.to_owned(),
+                names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            fonts.text,
+            BTreeMap::from([
+                by_story("main", &["Liberation Sans", "Noto Sans"]),
+                by_story("primary-footer", &["Liberation Mono"]),
+            ]),
+            "Calibri only for one-character runs and marks, Carlito for one character and \
+             the mark, Liberation Serif for an empty paragraph's mark, a font without a name \
+             left out; Liberation Mono from a paragraph without runs"
+        );
+        assert_eq!(fonts.all.len(), 7);
+        let mut scores = score(&rendering(&[]), &rendering(&[]));
+        scores.read_word_fonts(&scratch.path).unwrap();
+        assert_eq!(scores.word_text_fonts.as_ref(), Some(&fonts.text));
     }
 
     #[test]

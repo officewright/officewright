@@ -11,6 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::Options;
+use crate::content;
 use crate::metrics;
 use crate::report::{self, Baseline, ChildExit, FileResult, Report, Status};
 
@@ -428,6 +429,17 @@ fn run_all(
                 milliseconds,
             );
             report::check_memory(&mut result, options.memory_limit_mb);
+            if result.layout_report.is_some() {
+                // Here, not in the child, so that the child's time and memory are the
+                // library's alone.
+                match content::scan(file) {
+                    Ok(scanned) => {
+                        result.content = Some(scanned.kinds);
+                        result.stories_not_shown = Some(scanned.stories_not_shown);
+                    }
+                    Err(error) => result.content_error = Some(error),
+                }
+            }
             if let Some((folder, pdf)) = scoring.get(name) {
                 let unrendered = render.is_some()
                     && (result.status != Status::Opened || result.render_error.is_some());
@@ -525,9 +537,10 @@ fn score_file(reference: &Path, pdf: &Path) -> Result<metrics::Scores, String> {
     let word = metrics::Rendering::reference(reference)?;
     let ours = metrics::Rendering::pdf(pdf)?;
     let mut scores = metrics::score(&ours, &word);
-    let (valid, not_embedded) = metrics::check_pdf(pdf)?;
-    scores.pdf_valid = Some(valid);
-    scores.fonts_not_embedded = Some(not_embedded);
+    let check = metrics::check_pdf(pdf)?;
+    scores.pdf_valid = Some(check.valid);
+    scores.fonts_not_embedded = Some(check.not_embedded);
+    scores.pdf_fonts = Some(check.embedded);
     scores.read_word_fonts(reference)?;
     Ok(scores)
 }
