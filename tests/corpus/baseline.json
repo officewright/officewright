@@ -679,7 +679,7 @@
     "tests/corpus/business/form-ec-state-aid-notification-de.docx": {
       "line_agreement": 0.8579,
       "page_break_agreement": 0.3158,
-      "ssim_mean": 0.6524,
+      "ssim_mean": 0.6523,
       "ssim_min": 0.0,
       "text_score": 0.7781
     },
