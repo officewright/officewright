@@ -4523,12 +4523,15 @@ def anchored_drawing(
     layout_in_cell: bool = True,
     effects: tuple[float, float, float, float] = (0, 0, 0, 0),
     hidden: bool = False,
+    anchor_hidden: bool = False,
 ) -> str:
     """A floating drawing (wp:anchor) of width x height pt, placed across and down as
     (relativeFrom, offset in points, or a wp:align value such as "center"), dist points from
     the text above, below, left and right of it (distT, distB, distL, distR), in front of the
     text or behind it; its relativeHeight (251658240 + n unless given), layoutInCell, the
-    reach of its effects (extent()) and whether its docPr is hidden."""
+    reach of its effects (extent()), whether its docPr is hidden, and whether wp:anchor
+    itself is (its hidden attribute, between layoutInCell and allowOverlap in the order of
+    CT_Anchor's attributes)."""
 
     def position(value: float | str) -> str:
         if isinstance(value, str):
@@ -4537,10 +4540,12 @@ def anchored_drawing(
 
     distances = " ".join(f'dist{side}="{emu(value)}"' for side, value in zip("TBLR", dist))
     height_order = 251658240 + n if relative_height is None else relative_height
+    anchor_flag = ' hidden="1"' if anchor_hidden else ""
     return (
         f'<wp:anchor {distances} simplePos="0" '
         f'relativeHeight="{height_order}" behindDoc="{int(behind)}" locked="0" '
-        f'layoutInCell="{int(layout_in_cell)}" allowOverlap="1"><wp:simplePos x="0" y="0"/>'
+        f'layoutInCell="{int(layout_in_cell)}"{anchor_flag} allowOverlap="1">'
+        '<wp:simplePos x="0" y="0"/>'
         f'<wp:positionH relativeFrom="{across[0]}">{position(across[1])}</wp:positionH>'
         f'<wp:positionV relativeFrom="{down[0]}">{position(down[1])}</wp:positionV>'
         f"{extent(width, height, effects)}{wrap}{doc_pr(n, hidden)}"
@@ -8463,7 +8468,7 @@ def anchor_column_character() -> Doc:
          anchored(5, ("character", "right"))),
         ("36 pt from the column, in a paragraph indented 72 pt",
          anchored(6, ("column", 36), ind=indented)),
-        ("36 pt from the margin, in the same indented paragraph (to compare)",
+        ("36 pt from the margin, in a paragraph indented like case 06's (to compare)",
          anchored(7, ("margin", 36), ind=indented)),
     ]
     body = "".join(para(run(f"Case {n:02d}: {label}"), keep_next=True) + content
@@ -9191,7 +9196,9 @@ def textbox_vml_inline_shapes() -> Doc:
 def hidden_drawings() -> Doc:
     # #592: wp:docPr hidden (ECMA-376 Part 1, §20.4.2.5) on DrawingML drawings, which the
     # model does not read; E-hidden-pictures hides pictures with w:vanish only. A VML picture
-    # with visibility:hidden, which Word does not show, is the last case.
+    # with visibility:hidden, which Word does not show, comes after them, and last a picture
+    # whose wp:anchor itself is hidden, which MS-OI29500 2.1.1350 a says Word does not support
+    # (it drops the attribute on save): a control that should be drawn and wrapped.
     inline_size, floating_size = (72, 36), (144, 72)
     fill = solid(BOX_FILL)
 
@@ -9242,6 +9249,12 @@ def hidden_drawings() -> Doc:
                  "mso-position-vertical-relative:paragraph")
     objects.append(("a floating VML picture, visibility:hidden, wrapped square (to compare)",
                     vml_frame("image1.png", "h1", vml_style, wrap="square", first=True)))
+    n = first + len(objects)
+    objects.append(("a floating picture, hidden on wp:anchor, not on docPr, wrapped square",
+                    picture_run(anchored_drawing(
+                        n, *floating_size, drawing_picture("image1.png", *floating_size),
+                        across=("margin", 0), down=("paragraph", 0), wrap=square,
+                        anchor_hidden=True))))
     # Two floating cases to a page, the first of them on a new page.
     body += "".join(
         para(run(f"Case {n:02d}: {label}"), space=spacing(before=12), keep_next=True,
@@ -9252,8 +9265,9 @@ def hidden_drawings() -> Doc:
         "E-hidden-drawings",
         "Whether Word draws, and wraps text around, DrawingML drawings whose wp:docPr is "
         "hidden: a picture, a text box and a shape inline, floating wrapped square and "
-        "floating not wrapped, beside a visible picture inline and floating, and a floating "
-        "VML picture with visibility:hidden",
+        "floating not wrapped, beside a visible picture inline and floating, a floating VML "
+        "picture with visibility:hidden, and a floating picture whose wp:anchor is hidden, "
+        "which Word does not support",
         body + para(run("End of the document.")),
         media=(("image1.png", grey_png(192, 96)),),
     )

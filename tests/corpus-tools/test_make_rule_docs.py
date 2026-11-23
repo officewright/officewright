@@ -7451,6 +7451,15 @@ class FloatingObjectDocuments(unittest.TestCase):
             self.assertEqual([out[n][0] for n in sorted(out)], expected_pages, name)
         return out
 
+    def assert_wide_margins(self, name, sect):
+        # A4 with margins of 72 pt on the left and at the top and of 144 pt on the right and at
+        # the bottom, without a gutter: the centre of the margins is not the page's, and the
+        # right and bottom margin areas are twice as wide as the left and top ones.
+        width, height, left, right, top, bottom = b14_geometry(sect)
+        self.assertEqual((width, height), (595.3, 841.9), name)
+        self.assertEqual((left, right, top, bottom), (72, 144, 72, 144), name)
+        self.assertEqual(sect.find(f"{W}pgMar").get(f"{W}gutter"), "0", name)
+
     def assert_label_clear(self, name, facts, sect, case):
         # No picture covers the label's line: the label lies 100 pt below the top margin, a
         # line of Calibri 11 pt tall.
@@ -7492,6 +7501,7 @@ class FloatingObjectDocuments(unittest.TestCase):
         name = "E-anchor-margin"
         cases = self.check_paged(name, list(range(1, 13)))
         for n, (page, p, sect) in cases.items():
+            self.assert_wide_margins(name, sect)
             label = b14_text(p)
             (anchor,) = p.iter(f"{WP}anchor")
             facts = b14_anchor(anchor)
@@ -7531,6 +7541,7 @@ class FloatingObjectDocuments(unittest.TestCase):
     def test_anchor_column_character(self):
         name = "E-anchor-column-character"
         line = carlito_line_height(11)
+        indents = {}
         for n, (page, label_p) in self.cases(name).items():
             label = b14_text(label_p)
             self.assertIsNotNone(label_p.find(f"{W}pPr/{W}keepNext"))
@@ -7555,7 +7566,9 @@ class FloatingObjectDocuments(unittest.TestCase):
             room = rules.TEXT_W / 20 - (0 if indent is None else int(indent.get(f"{W}left")) / 20)
             self.assertLess(carlito_width(b14_text(p)) + 12, room)
             self.assertEqual(indent is not None and indent.get(f"{W}left") == "1440",
-                             "indented 72 pt" in label or "same indented" in label, label)
+                             "indented 72 pt" in label or "indented like case 06's" in label,
+                             label)
+            indents[n] = None if indent is None else dict(indent.attrib)
             # 18 pt below the paragraph's top: below its one line, within its 60 pt after.
             self.assertEqual(facts["down"], ("paragraph", 18))
             after = int(p.find(f"{W}pPr/{W}spacing").get(f"{W}after")) / 20
@@ -7563,6 +7576,8 @@ class FloatingObjectDocuments(unittest.TestCase):
             self.assertGreater(18, line)
             self.assertLessEqual(18 + facts["size"][1], line + after)
         self.assertEqual(len(self.cases(name)), 7)
+        self.assertEqual(indents[7], indents[6])
+        self.assertIsNotNone(indents[6])
 
     def test_anchor_paragraph_line(self):
         name = "E-anchor-paragraph-line"
@@ -7961,6 +7976,8 @@ class FloatingObjectDocuments(unittest.TestCase):
     def test_vml_anchor_relative(self):
         name = "E-vml-anchor-relative"
         body = self.body(name)
+        self.assertEqual([p for p in body.iter(f"{W}sectPr")], [body.find(f"{W}sectPr")])
+        self.assert_wide_margins(name, body.find(f"{W}sectPr"))
         paragraphs = body.findall(f"{W}p")
         cases = self.cases(name)
         self.assertEqual([page for page, _ in cases.values()], [1, 1, 2, 3, 4, 5, 6, 7])
@@ -7992,6 +8009,16 @@ class FloatingObjectDocuments(unittest.TestCase):
                 areas = (f"{across} both ways" if across == down else f"{across} and {down}")
                 parity = "odd" if page % 2 else "even"
                 self.assertIn(f"12 pt from {areas}; page {page}, {parity}", label)
+        # Every margin area of #400's item 1, across and down, in the order of the cases.
+        areas = [(b14_css(next(p.iter(f"{VML}shape")))["mso-position-horizontal-relative"],
+                  b14_css(next(p.iter(f"{VML}shape")))["mso-position-vertical-relative"])
+                 for n, (page, p) in cases.items() if n > 2]
+        self.assertEqual(areas, [("left-margin-area", "top-margin-area"),
+                                 ("right-margin-area", "bottom-margin-area"),
+                                 ("inner-margin-area", "inner-margin-area"),
+                                 ("inner-margin-area", "inner-margin-area"),
+                                 ("outer-margin-area", "outer-margin-area"),
+                                 ("outer-margin-area", "outer-margin-area")])
         found = {(b14_css(next(p.iter(f"{VML}shape")))["mso-position-horizontal-relative"],
                   page % 2) for n, (page, p) in cases.items() if n > 2}
         for area in ("inner-margin-area", "outer-margin-area"):
@@ -8002,6 +8029,7 @@ class FloatingObjectDocuments(unittest.TestCase):
         name = "E-vml-anchor-align"
         cases = self.check_paged(name, list(range(1, 9)))
         for n, (page, p, sect) in cases.items():
+            self.assert_wide_margins(name, sect)
             label = b14_text(p)
             (shape,) = p.iter(f"{VML}shape")
             css = b14_css(shape)
@@ -8166,6 +8194,7 @@ class FloatingObjectDocuments(unittest.TestCase):
         paragraphs = self.body(name).findall(f"{W}p")
         fonts = {"Calibri": CARLITO, "Times New Roman": LIBERATION_SERIF,
                  "Noto Sans": NOTO_TRUETYPE}
+        kinds = []
         for n, (page, label_p) in self.cases(name).items():
             label = b14_text(label_p)
             holder = paragraphs[paragraphs.index(label_p) + 1]
@@ -8174,10 +8203,13 @@ class FloatingObjectDocuments(unittest.TestCase):
             self.assertIsNone(holder.find(f"{W}pPr/{W}spacing"), "0 pt before")
             (pict,) = holder.iter(f"{W}pict")
             (box,) = [e for e in pict if e.tag != f"{VML}shapetype"]
+            # A label naming a v:rect or a v:roundrect holds that element; every other one a
+            # v:shape of the text box type.
             kind = box.tag[len(VML):]
-            self.assertEqual(kind == "shape", box.get("type") == "#_x0000_t202")
-            self.assertIn({"rect": "a v:rect", "roundrect": "a v:roundrect"}.get(kind, "box"),
-                          label)
+            named = re.findall(r"\ba (v:rect|v:roundrect)\b", label)
+            self.assertEqual(kind, named[0][len("v:"):] if named else "shape", label)
+            self.assertEqual(box.get("type"), "#_x0000_t202" if kind == "shape" else None, label)
+            kinds.append(kind)
             css = b14_css(box)
             size = re.search(r"(\d+) x (\d+) pt", label)
             if size:
@@ -8214,12 +8246,13 @@ class FloatingObjectDocuments(unittest.TestCase):
             self.assertLess(carlito_width(line, points, fonts[font]) + float(css["width"][:-2])
                             + 12, rules.TEXT_W / 20, label)
         self.assertEqual(len(self.cases(name)), 9)
+        self.assertEqual(kinds, ["shape"] * 7 + ["rect", "roundrect"])
 
     def test_hidden_drawings(self):
         name = "E-hidden-drawings"
         paragraphs = self.body(name).findall(f"{W}p")
         cases = self.cases(name)
-        self.assertEqual(len(cases), 12)
+        self.assertEqual(len(cases), 13)
         pages = []
         for n, (page, label_p) in cases.items():
             label = b14_text(label_p)
@@ -8238,7 +8271,13 @@ class FloatingObjectDocuments(unittest.TestCase):
             self.assertEqual(bool(floating), "floating" in label, label)
             hidden = drawing.find(f"{WP}docPr").get("hidden")
             self.assertEqual(hidden, "1" if "docPr hidden" in label else None, label)
-            self.assertEqual("visible" in label, hidden is None, label)
+            # wp:anchor's own hidden attribute, which MS-OI29500 2.1.1350 a says Word does not
+            # support, only in the case that says so, and never with docPr's.
+            anchor_hidden = drawing.get("hidden") if floating else None
+            self.assertEqual(anchor_hidden, "1" if "hidden on wp:anchor" in label else None,
+                             label)
+            self.assertFalse(hidden and anchor_hidden, label)
+            self.assertEqual("visible" in label, hidden is None and anchor_hidden is None, label)
             text_box = drawing.find(f".//{WPS}txbx") is not None
             shape = drawing.find(f".//{WPS}wsp") is not None
             picture = drawing.find(f".//{PIC}pic") is not None
@@ -8258,7 +8297,7 @@ class FloatingObjectDocuments(unittest.TestCase):
                 self.assertEqual(int(drawing.find(f"{WP}extent").get("cx")) / EMU_PT, 72)
                 self.assertTrue(b14_text(holder).endswith(" after it."))
         # The inline cases on page 1, then two floating cases to a page.
-        self.assertEqual(pages, [1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5])
+        self.assertEqual(pages, [1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6])
 
 
 if __name__ == "__main__":
