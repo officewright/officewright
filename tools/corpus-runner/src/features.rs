@@ -28,7 +28,7 @@ pub enum Class {
 /// Words of the messages of `feature-unsupported` entries, each with the required feature
 /// it degrades, or `None` for an entry that degrades none. The first line whose words the
 /// message contains classes it.
-pub const MESSAGES: [(&str, Option<&str>); 130] = [
+pub const MESSAGES: [(&str, Option<&str>); 132] = [
     // Paragraphs: borders and shading (phase 1).
     ("paragraph borders are not drawn", Some("paragraph borders")),
     ("a shading pattern of stripes or crosses", Some("shading")),
@@ -36,6 +36,14 @@ pub const MESSAGES: [(&str, Option<&str>); 130] = [
     ("endnotes are not laid out", Some("notes")),
     ("footnotes referenced in table cells", Some("notes")),
     ("note numbers that start again on each page", Some("notes")),
+    (
+        "notes that start their numbers again on each page",
+        Some("notes"),
+    ),
+    (
+        "the numbers of notes that start again on each page",
+        Some("notes"),
+    ),
     ("note references in headers and footers", Some("notes")),
     ("the rest of a footnote cut on a page", Some("notes")),
     // Pictures: cropping and rotation (phase 2, required), PNG and JPEG anchored or inline
@@ -255,6 +263,16 @@ mod tests {
             ),
             (
                 "endnotes are not laid out yet: their texts are left out",
+                Class::Required("notes"),
+            ),
+            (
+                "notes that start their numbers again on each page but that no page lays out \
+                 are numbered through their section",
+                Class::Required("notes"),
+            ),
+            (
+                "the numbers of notes that start again on each page changed in each of 3 \
+                 layouts; they show those of the one before the last",
                 Class::Required("notes"),
             ),
             (
