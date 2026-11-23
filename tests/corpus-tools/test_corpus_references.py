@@ -5,9 +5,11 @@ committed document, there is one valid grey PNG per page at 110 dpi, the re-save
 exists, and the SOURCES.md row names the folder, the page count and the PDF's SHA-256.
 
 The checks scripts/corpus-import.py makes at import time are made again over what is
-committed, so a later change cannot slip past them: no person's name, profile path or
-embedded font in a re-saved copy, no language or number format Word added that SOURCES.md
-does not name as accepted, no profile path in geometry.json or formatting.json, no PNG chunk
+committed, so a later change cannot slip past them: no person's name or profile path in a
+re-saved copy, and no embedded font but the OFL test fonts the importer accepts, each named in
+the row's notes, no part of any committed package that holds a font but those test fonts, no
+language or number format Word added that SOURCES.md does not name as
+accepted, no profile path in geometry.json or formatting.json, no PNG chunk
 the importer does not write, and Word's page breaks as the re-saved copy has them. Every
 document of business/ and generated/ has a reference or a SOURCES.md row saying why it has
 none.
@@ -27,6 +29,7 @@ import re
 import struct
 import sys
 import unittest
+import zipfile
 from pathlib import Path
 
 from pngcheck import png_pixels
@@ -142,13 +145,44 @@ class References(unittest.TestCase):
         group, name = folder.parent.name, folder.name
         return CORPUS / "resaved" / group / f"{name}.docx", CORPUS / group / f"{name}.docx"
 
-    def test_re_saved_copies_carry_no_personal_data_or_embedded_fonts(self):
+    def test_re_saved_copies_carry_no_personal_data_and_embed_only_test_fonts(self):
+        allowed = importer.ofl_test_fonts()
+        tails = importer.font_tails(allowed)
         for folder in folders():
             resaved, _ = self.resaved(folder)
             with self.subTest(document=f"{folder.parent.name}/{folder.name}"):
                 problems = importer.docx_privacy_problems(resaved)
-                problems += importer.embedded_font_problems(importer.read_parts(resaved))
-                self.assertEqual(problems, [])
+                parts = importer.read_parts(resaved)
+                font_problems, embedded = importer.embedded_fonts(parts, allowed)
+                problems += importer.foreign_fonts(list(parts.items()), tails)
+                self.assertEqual(problems + font_problems, [])
+                # The row names the test fonts the copy embeds, and only a copy that embeds
+                # some has such a note.
+                said = [note for note in self.notes(folder)
+                        if note.startswith("fonts the re-saved copy embeds")]
+                self.assertEqual(said, [importer.embedded_note(embedded)] if embedded else [])
+
+    def test_no_committed_package_holds_a_font_but_the_test_fonts(self):
+        # Every part of every package of tests/corpus, originals and re-saved copies, and of
+        # the packages nested in them, checked by its content, as corpus-import.py checks a
+        # re-saved copy: only E-embedded-font holds a font, the test font it embeds, so no
+        # picture, text or other part is taken for one.
+        tails = importer.font_tails(importer.ofl_test_fonts())
+        packages = sorted(p for p in CORPUS.rglob("*") if p.is_file()
+                          and p.suffix.lower() in (".docx", ".docm", ".dotx", ".xlsx", ".pptx"))
+        self.assertTrue(packages)
+        found = []
+        for path in packages:
+            with self.subTest(path.relative_to(CORPUS).as_posix()):
+                with zipfile.ZipFile(path) as archive:
+                    entries = [(i.filename, archive.read(i)) for i in archive.infolist()]
+                self.assertEqual(importer.foreign_fonts(entries, tails), [])
+                found += [path.relative_to(CORPUS).as_posix()
+                          for _, data in entries if importer.holds_font(data)]
+        self.assertEqual([path for path in found if not path.endswith("/E-embedded-font.docx")],
+                         [])
+        if (CORPUS / "word-rules" / "E-embedded-font.docx").is_file():
+            self.assertIn("word-rules/E-embedded-font.docx", found)
 
     def row(self, folder):
         key = f"| reference/{folder.parent.name}/{folder.name}/ |"

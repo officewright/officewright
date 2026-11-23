@@ -311,6 +311,7 @@ writes.
 | word-rules/E-theme-font-lang-nqo.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Which theme font Word takes in the theme's Latin, East Asian and complex script slots when w:themeFontLang gives nqo (N'Ko) for all three, with a theme whose minor fonts are Verdana, none and Tahoma and which gives Mymr Constantia, Java Cambria, Nkoo Consolas, Olck Trebuchet MS, Tfng Noto Sans; also with the runs in nqo |
 | word-rules/E-theme-font-lang-sat.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Which theme font Word takes in the theme's Latin, East Asian and complex script slots when w:themeFontLang gives sat (Santali) for all three, with a theme whose minor fonts are Verdana, none and Tahoma and which gives Mymr Constantia, Java Cambria, Nkoo Consolas, Olck Trebuchet MS, Tfng Noto Sans; also with the runs in sat |
 | word-rules/E-theme-font-lang-zgh.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository) | Which theme font Word takes in the theme's Latin, East Asian and complex script slots when w:themeFontLang gives zgh-Tfng (Standard Moroccan Tamazight in Tifinagh) for all three, with a theme whose minor fonts are Verdana, none and Tahoma and which gives Mymr Constantia, Java Cambria, Nkoo Consolas, Olck Trebuchet MS, Tfng Noto Sans; also with the runs in zgh-Tfng |
+| word-rules/E-embedded-font.docx | Written by scripts/make-rule-docs.py | BUSL-1.1 (this repository), but the font it embeds, Liberation Mono Regular (tests/fonts/liberation/LiberationMono-Regular.ttf, SHA-256 f2b83c763e8afd21709333370bed4774337fae82267937e2b5aea7e2fbd922c1): SIL Open Font License 1.1 | Whether Word draws text in a font it does not have installed from the copy the document embeds (ECMA-376 §17.8): Liberation Mono Regular as word/fonts/font1.odttf, obfuscated with a fixed w:fontKey (§17.8.1), with w:embedTrueTypeFonts and without w:saveSubsetFonts, so that a re-saved copy keeps the whole font; every run, style, default and theme font in Liberation Mono: ten lines at 11 pt and at 12 pt, a paragraph that wraps, a line of Cyrillic and one of Greek |
 
 ## Apache POI test documents (`poi/`)
 
@@ -471,7 +472,11 @@ no count: the input's instances are dropped, and the copy's are paired by their 
 input instances of a list the copy kept none of. Word sometimes writes a language tag or
 number format into the re-saved copy that the input did not have, which says where Word ran.
 Such a copy is imported only when the maintainer accepts it (`--allow-locale`), and its Notes
-then list each such change after "accepted with --allow-locale".
+then list each such change after "accepted with --allow-locale". A re-saved copy keeps the
+fonts Word embedded in it only when each is one of the OFL test fonts of `tests/fonts` and
+`tests/fonts-word` that THIRD-PARTY-NOTICES.md names with its SHA-256 (compared de-obfuscated
+or as stored); the Notes then name each after "fonts the re-saved copy embeds, OFL test
+fonts:", by its file and SHA-256. A copy that embeds any other font is not imported.
 
 From `make-reference.ps1` format 3 on, the folder also holds `formatting.json`: the
 formatting Word computes for every paragraph of every story (whether its style is built in,
