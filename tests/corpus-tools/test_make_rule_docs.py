@@ -5561,6 +5561,7 @@ class Packages(unittest.TestCase):
         for count, (label, sect, stories) in zip((30, 10), found):
             m = margins(sect)
             self.assertEqual((m["top"], m["bottom"]), (-8400, -8300), label)
+            self.assertIn(f"fixed margins {-m['top'] / 20:g} and {-m['bottom'] / 20:g} pt", label)
             self.assertEqual(set(stories), {"header"}, label)
             self.assertEqual(self.b13_story_lines(stories["header"]), [(12, count)], label)
             self.assertIn(f"header of {count} lines", label)
@@ -5688,6 +5689,14 @@ class Packages(unittest.TestCase):
         polytonic = set().union(*(m for _, m in marks(rules.GREEK_POLYTONIC)))
         self.assertTrue(polytonic & {"\u0313", "\u0314"}, "a breathing")
         self.assertIn("\u0342", polytonic, "a perispomeni")
+        for name, text in (("capitals", rules.GREEK_CAPITALS),
+                           ("polytonic", rules.GREEK_POLYTONIC)):
+            letters = [c for c in text if not c.isspace()]
+            self.assertEqual(len(letters), len(marks(text)), f"{name}: precomposed only")
+        for text in (rules.GREEK_TONOS, rules.GREEK_CAPITALS):
+            accented = [c for c in text if tonos in unicodedata.normalize("NFD", c)]
+            self.assertTrue(all(0x0370 <= ord(c) <= 0x03FF for c in accented),
+                            "letters with tonos of Greek and Coptic, not their oxia twins")
 
     def test_batch_13_cell_mark_cases_have_the_markup_their_labels_name(self):
         parts, body, _ = self.batch_13("E-cell-mark-height-picture")
@@ -5718,15 +5727,28 @@ class Packages(unittest.TestCase):
         styles = ElementTree.fromstring(parts["word/styles.xml"])
         defaults = styles.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")
         self.assertEqual(defaults.find(f"{W}sz").get(f"{W}val"), "18")
+        labels = [self.b13_texts(p) for p in body.findall(f"{W}p")
+                  if self.b13_texts(p).startswith("Case ")]
+        self.assertEqual(len(labels), 2)
+        self.assertIn("rows 2 and 3 hold 8 pt text with 9 pt paragraph marks (the document "
+                      "default), their second and third cells merged vertically", labels[0])
         merged, plain = body.findall(f"{W}tbl")
         for table, is_merged in ((merged, True), (plain, False)):
             rows = table.findall(f"{W}tr")
             self.assertEqual(len(rows), 4)
+            for r in (rows[0], rows[3]):
+                runs = list(r.iter(f"{W}r"))
+                self.assertTrue(runs)
+                self.assertTrue(all(run.find(f"{W}rPr/{W}sz") is None for run in runs),
+                                "rows 1 and 4 are in the 9 pt default")
             for r in rows[1:3]:
-                first, *others = r.findall(f"{W}tc")
-                sizes = {run.find(f"{W}rPr/{W}sz").get(f"{W}val") for run in first.iter(f"{W}r")}
-                self.assertEqual(sizes, {"16"}, "8 pt text")
-                self.assertIsNone(first.find(f"{W}p/{W}pPr"), "the mark takes the default")
+                for c in r.findall(f"{W}tc"):
+                    merge = c.find(f"{W}tcPr/{W}vMerge")
+                    continued = merge is not None and merge.get(f"{W}val") is None
+                    sizes = {None if (s := run.find(f"{W}rPr/{W}sz")) is None else s.get(f"{W}val")
+                             for run in c.iter(f"{W}r")}
+                    self.assertEqual(sizes, set() if continued else {"16"}, "8 pt text")
+                    self.assertIsNone(c.find(f"{W}p/{W}pPr"), "the mark takes the default")
             merges = [[None if (m := c.find(f"{W}tcPr/{W}vMerge")) is None
                        else m.get(f"{W}val", "continue") for c in r.findall(f"{W}tc")]
                       for r in rows]
