@@ -14,8 +14,10 @@ under WSL). For every <name>.json there the script checks that
     (a second check, independent of the one on Windows);
   - the re-saved copy names no language and no number format the input did not have
     (they would say where Word ran), unless --allow-locale accepts them;
-  - the re-saved copy embeds no font but the OFL test fonts that THIRD-PARTY-NOTICES.md
-    names with their SHA-256, each compared once de-obfuscated (#145);
+  - the re-saved copy names no ZIP entry twice, and embeds no font but the OFL test fonts
+    that THIRD-PARTY-NOTICES.md names with their SHA-256: every font part is reached by a
+    font table entry and is such a font de-obfuscated with the entry's key or as stored
+    (embedded_fonts, #145);
   - Word kept the compatibility mode of the input, and pdfinfo and pdftotext count the pages
     Word counted.
 
@@ -336,8 +338,22 @@ def docx_privacy_problems(path: Path) -> list[str]:
 
 
 def read_parts(path: Path) -> dict[str, bytes]:
+    """The parts of a package by name. A package whose ZIP names an entry twice, the names
+    compared without case as OPC compares part names (ECMA-376 Part 2), is refused
+    (ValueError): only one of the entries would be checked, and the file is committed with
+    both."""
+    parts: dict[str, bytes] = {}
+    seen: dict[str, str] = {}
     with zipfile.ZipFile(path) as archive:
-        return {info.filename: archive.read(info) for info in archive.infolist()}
+        for info in archive.infolist():
+            name = info.filename
+            first = seen.get(name.casefold())
+            if first is not None:
+                also = "" if first == name else f", also as {name}"
+                raise ValueError(f"{path.name} names the entry {first} twice{also}")
+            seen[name.casefold()] = name
+            parts[name] = archive.read(info)
+    return parts
 
 
 def settings_root(parts: dict[str, bytes]) -> ElementTree.Element | None:

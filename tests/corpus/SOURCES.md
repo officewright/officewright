@@ -472,7 +472,11 @@ no count: the input's instances are dropped, and the copy's are paired by their 
 input instances of a list the copy kept none of. Word sometimes writes a language tag or
 number format into the re-saved copy that the input did not have, which says where Word ran.
 Such a copy is imported only when the maintainer accepts it (`--allow-locale`), and its Notes
-then list each such change after "accepted with --allow-locale".
+then list each such change after "accepted with --allow-locale". A re-saved copy keeps the
+fonts Word embedded in it only when each is one of the OFL test fonts of `tests/fonts` and
+`tests/fonts-word` that THIRD-PARTY-NOTICES.md names with its SHA-256 (compared de-obfuscated
+or as stored); the Notes then name each after "fonts the re-saved copy embeds, OFL test
+fonts:", by its file and SHA-256. A copy that embeds any other font is not imported.
 
 From `make-reference.ps1` format 3 on, the folder also holds `formatting.json`: the
 formatting Word computes for every paragraph of every story (whether its style is built in,

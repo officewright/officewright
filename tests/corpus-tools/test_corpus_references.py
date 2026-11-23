@@ -5,9 +5,10 @@ committed document, there is one valid grey PNG per page at 110 dpi, the re-save
 exists, and the SOURCES.md row names the folder, the page count and the PDF's SHA-256.
 
 The checks scripts/corpus-import.py makes at import time are made again over what is
-committed, so a later change cannot slip past them: no person's name, profile path or
-embedded font in a re-saved copy, no language or number format Word added that SOURCES.md
-does not name as accepted, no profile path in geometry.json or formatting.json, no PNG chunk
+committed, so a later change cannot slip past them: no person's name or profile path in a
+re-saved copy, and no embedded font but the OFL test fonts the importer accepts, each named in
+the row's notes, no language or number format Word added that SOURCES.md does not name as
+accepted, no profile path in geometry.json or formatting.json, no PNG chunk
 the importer does not write, and Word's page breaks as the re-saved copy has them. Every
 document of business/ and generated/ has a reference or a SOURCES.md row saying why it has
 none.

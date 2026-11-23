@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
+import warnings
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -966,6 +967,37 @@ class Import(unittest.TestCase):
             "word/fonts/font1.odttf, the embedRegular of 'Liberation Mono', is not one of the "
             f"OFL test fonts THIRD-PARTY-NOTICES.md names (SHA-256 {sha256(foreign)})", message)
         self.assertFalse((self.corpus / "resaved").exists())
+
+    def test_refuses_a_copy_that_names_a_font_part_twice(self):
+        # A dict of the parts would keep one entry of a repeated name and check only it,
+        # while the copy is committed with both: a synthetic foreign font, obfuscated with the
+        # document's key, beside the test font, in either order.
+        doc, record = self.embedded_font_result()
+        key = rules.EMBEDDED_MONO.key
+        foreign = rules.obfuscated(sfnt("ForeignSans", "Foreign Sans"), key)
+        resaved = self.results / record["resaved_file"]
+        font = "word/fonts/font1.odttf"
+        for order in ("foreign first", "foreign last"):
+            with self.subTest(order):
+                entries = []
+                for name, data in rules.parts(doc):
+                    if name == font and order == "foreign first":
+                        entries += [(name, foreign), (name, data)]
+                    elif name == font:
+                        entries += [(name, data), (name, foreign)]
+                    else:
+                        entries.append((name, data))
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")  # zipfile warns of the repeated name
+                    with zipfile.ZipFile(resaved, "w") as archive:
+                        for name, data in entries:
+                            archive.writestr(name, data)
+                record["resaved_sha256"] = sha256(resaved.read_bytes())
+                self.save_record(record)
+                message = self.refused()
+                self.assertIn(f"{doc.name}.docx: cannot read a package: {resaved.name} names "
+                              f"the entry {font} twice", message)
+                self.assertFalse((self.corpus / "resaved").exists())
 
     def test_refuses_a_page_count_pdftotext_does_not_find(self):
         self.bbox = BBOX.replace('<page width="595.320000" height="841.920000"></page>', "", 1)
@@ -3826,6 +3858,41 @@ class EmbeddedFonts(unittest.TestCase):
         self.assertEqual(self.check(bad), ([
             "word/fontTable.xml: the embedRegular of 'Liberation Mono' has a w:fontKey that is "
             "not a GUID"], []))
+        # Lower-case digits are read too, as officewright-doc's reader reads them, and give
+        # the same key.
+        self.assertEqual(importer.font_key("{00010203-0405-0607-0809-0a0b0c0d0e0f}"),
+                         bytes(range(15, -1, -1)))
+        lower = self.replaced("word/fontTable.xml", self.key.encode(), self.key.lower().encode())
+        self.assertNotEqual(self.key.lower(), self.key)
+        self.assertEqual(self.check(lower), self.check())
+        self.assertEqual(len(self.check(lower)[1]), 1)
+
+    def test_a_package_that_names_an_entry_twice_is_refused(self):
+        # Also when the names differ only in case, as OPC part names are compared.
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder)
+        foreign = rules.obfuscated(self.FOREIGN, self.key)
+        mixed = "word/FONTS/Font1.odttf"
+        for first, second, also in ((self.PART, self.PART, ""),
+                                    (self.PART, mixed, f", also as {mixed}"),
+                                    (mixed, self.PART, f", also as {self.PART}")):
+            with self.subTest(first=first, second=second):
+                path = folder / "copy.docx"
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")  # zipfile warns of the repeated name
+                    with zipfile.ZipFile(path, "w") as archive:
+                        archive.writestr(first, foreign)
+                        archive.writestr(second, self.parts[self.PART])
+                with self.assertRaises(ValueError) as caught:
+                    importer.read_parts(path)
+                self.assertEqual(str(caught.exception),
+                                 f"copy.docx names the entry {first} twice{also}")
+        # Names that differ otherwise are read.
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(self.PART, foreign)
+            archive.writestr("word/fonts/font2.odttf", foreign)
+        self.assertEqual(importer.read_parts(path),
+                         {self.PART: foreign, "word/fonts/font2.odttf": foreign})
 
     def test_a_font_part_no_entry_names_is_refused_wherever_it_is(self):
         # Even the test font: nothing says how to read a part no entry names.

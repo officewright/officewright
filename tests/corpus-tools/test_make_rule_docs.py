@@ -8331,8 +8331,7 @@ class FloatingObjectDocuments(unittest.TestCase):
 ROOT = Path(__file__).resolve().parents[2]
 LIBERATION_MONO = ROOT / "tests/fonts/liberation/LiberationMono-Regular.ttf"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
-
-
+R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 
 
@@ -8579,7 +8578,6 @@ class EmbeddedFontDocument(unittest.TestCase):
         # Nothing breaks the page: the cases share the first page.
         self.assertEqual([b for b in body.iter(f"{W}br") if b.get(f"{W}type")], [])
         self.assertEqual(list(body.iter(f"{W}pageBreakBefore")), [])
-R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 
 
 class BatchFourteen(unittest.TestCase):
