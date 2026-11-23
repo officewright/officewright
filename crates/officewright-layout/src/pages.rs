@@ -12544,6 +12544,10 @@ mod tests {
         // first, and is cut. 16: four lines, then a paragraph of four lines with widow
         // control, the first referencing a note of four lines, two lines of which fit
         // under it and none under the second line: the paragraph goes to the next page.
+        // 17: a line, then a paragraph of three lines with widow control, line 1
+        // referencing a note of one line and line 2 one of four: the note of line 1 counts
+        // under line 2, though widow control lets no page end there, and page 1 takes
+        // everything with two lines of the second note. 18: case 17 without the line.
         let lay = |mode: CompatMode, case: usize, cell: bool| {
             let document = with_notes_in(
                 mode,
@@ -12554,7 +12558,7 @@ mod tests {
                     let count = match case {
                         3 | 13 | 15 => 5,
                         5 => 7,
-                        6 | 11 | 14 | 16 => 4,
+                        6 | 11 | 14 | 16 | 17 | 18 => 4,
                         10 => 2,
                         _ => 6,
                     };
@@ -12622,6 +12626,8 @@ mod tests {
                             blocks.push(lines_with(4, &[(1, long)], true));
                             blocks
                         }
+                        17 => vec![line(&[]), lines_with(3, &[(1, short), (2, long)], true)],
+                        18 => vec![lines_with(3, &[(1, short), (2, long)], true)],
                         _ => paragraphs(8, &[(3, &[long])], None),
                     };
                     if cell {
@@ -12643,7 +12649,7 @@ mod tests {
             noted_pages(&document).0
         };
         for mode in [CompatMode::Word2013, CompatMode::Word2010] {
-            for case in 1..=16 {
+            for case in 1..=18 {
                 let body = lay(mode, case, false);
                 let cell = lay(mode, case, true);
                 assert_eq!(cell, body, "{mode:?}, case {case}");
@@ -12980,6 +12986,43 @@ mod tests {
                     "{case}, {mode:?}: {pages:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_note_is_weighed_against_the_notes_of_lines_of_other_cells_beside_its_line() {
+        use crate::ir::NotePosition;
+        // A row of two cells of five lines without widow control, at the top of the page,
+        // the lines of both lining up: line 2 of the first references a note of one line,
+        // line 2 of the second one of five (re-check of #577). Under line 2, the second note
+        // does not fit whole after the first, so it is cut: page 1 takes four lines of each
+        // cell, the first note and two lines of the second.
+        for mode in [CompatMode::Word2013, CompatMode::Word2010] {
+            let document = with_notes_in(
+                mode,
+                setup(),
+                NotePosition::PageBottom,
+                Inline::separator,
+                |document, style, mark| {
+                    let short = footnote(document, (style, mark), 1, spacing(0.0, 0.0));
+                    let long = footnote(document, (style, mark), 5, spacing(0.0, 0.0));
+                    let props = || spacing(0.0, 0.0).with_widow_control(false);
+                    let row = Row::default().with_cells([
+                        Cell::default().with_blocks([referencing(
+                            style,
+                            (1, 3),
+                            &[short],
+                            props(),
+                        )]),
+                        Cell::default().with_blocks([referencing(style, (1, 3), &[long], props())]),
+                    ]);
+                    vec![table_with(vec![row], 0.0).into()]
+                },
+            );
+            let (pages, _) = noted_pages(&document);
+            assert_eq!(pages.len(), 2, "{mode:?}: {pages:?}");
+            assert_eq!(texts_and_notes(&pages, 0), (8, 3), "{mode:?}: {pages:?}");
+            assert_eq!(texts_and_notes(&pages, 1), (2, 3), "{mode:?}: {pages:?}");
         }
     }
 
