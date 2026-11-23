@@ -1494,7 +1494,19 @@ fn an_object_that_going_around_it_would_take_to_the_next_page_is_reported() {
 /// Beside the picture, the paragraph's two lines on page 1 leave the picture to the third,
 /// on page 2; without it, the second holds it, which page 1 then takes no line from: of the
 /// paragraph it may take the first line alone, laid out without the picture.
-fn keeping((keep_lines, widow_control): (bool, bool), count: usize) -> Vec<Drawn> {
+fn keeping(rules: (bool, bool), count: usize) -> Vec<Drawn> {
+    let rest = " ".to_owned() + &vec!["AAAA"; count.saturating_sub(12)].join(" ");
+    kept_around(rules, |style, object| {
+        vec![words(12, style), object, Inline::text(rest, style)]
+    })
+}
+
+/// [`keeping`] with the paragraph's inlines that `make` gives around the picture, in the
+/// run style it is given.
+fn kept_around(
+    (keep_lines, widow_control): (bool, bool),
+    make: impl FnOnce(RunStyleId, Inline) -> Vec<Inline>,
+) -> Vec<Drawn> {
     let document = document(|style, document| {
         let mut blocks: Vec<Block> = (0..6).map(|_| paragraph(style, Vec::new(), 1)).collect();
         let wrapping = Wrapping::square([10.0, 0.0, 10.0, 0.0]);
@@ -1508,11 +1520,10 @@ fn keeping((keep_lines, widow_control): (bool, bool), count: usize) -> Vec<Drawn
         let props = exact()
             .with_keep_lines(keep_lines)
             .with_widow_control(widow_control);
-        let rest = " ".to_owned() + &vec!["AAAA"; count.saturating_sub(12)].join(" ");
         blocks.push(
             Paragraph::new(style)
                 .with_props(props)
-                .with_inlines([words(12, style), object, Inline::text(rest, style)])
+                .with_inlines(make(style, object))
                 .into(),
         );
         blocks
@@ -1586,4 +1597,104 @@ fn a_paragraph_that_may_split_takes_no_line_from_an_object_left_out_on() {
         keeping((false, false), 27),
         [(starts, words, 0), around(vec![5, 5, 5, 3])]
     );
+}
+
+#[test]
+fn a_paragraph_kept_together_up_to_a_page_break_goes_on_whole_where_an_object_is_left_out() {
+    // Kept together, without widow control: 12 words, the picture, 2 words, a page break
+    // and 9 words. Without the picture, its second line holds the picture and ends in the
+    // page break; page 1 may take no line from the picture's on, and the break no longer
+    // ends what it takes, so the paragraph is kept together up to the break: it goes on
+    // whole to page 2, around the picture, in lines of 5, 5 and 4 words, and the 9 words
+    // after the break take page 3.
+    let drawn = kept_around((true, false), |style, object| {
+        vec![
+            words(12, style),
+            object,
+            Inline::text(" AAAA AAAA", style),
+            Inline::page_break(style),
+            words(9, style),
+        ]
+    });
+    assert_eq!(
+        drawn,
+        [
+            ones(),
+            (vec![130.0; 3], vec![5, 5, 4], 1),
+            (vec![20.0], vec![9], 0)
+        ]
+    );
+}
+
+#[test]
+fn a_paragraph_kept_together_takes_the_line_before_a_page_break_with_an_object_after_it() {
+    // Kept together: 3 words, a page break, 2 words, the picture and 5 words. Page 1 takes
+    // the line up to the break, 3 words from the margin: the picture's line comes after the
+    // break and starts page 2, around the picture, 5 and 2 words, so no cut moves the
+    // first line on with it.
+    let drawn = kept_around((true, true), |style, object| {
+        vec![
+            words(3, style),
+            Inline::page_break(style),
+            words(2, style),
+            object,
+            Inline::text(" ".to_owned() + &["AAAA"; 5].join(" "), style),
+        ]
+    });
+    let (mut starts, mut words, _) = ones();
+    starts.push(20.0);
+    words.push(3);
+    assert_eq!(drawn, [(starts, words, 0), (vec![130.0; 2], vec![5, 2], 1)]);
+}
+
+/// A paragraph of one word, then one of `count` words with widow control that holds, after
+/// five of every nine words, four pictures of no size wrapped as `wrap`, placed from the
+/// margin and the paragraph.
+fn many_objects(count: usize, wrap: Wrap) -> Document {
+    document(|style, document| {
+        let wrapping = Wrapping {
+            wrap,
+            ..Wrapping::square([0.0; 4])
+        };
+        let mut inlines = Vec::new();
+        for word in 0..count {
+            inlines.push(Inline::text("AAAA ", style));
+            if word % 9 == 4 {
+                for _ in 0..4 {
+                    inlines.push(picture(
+                        document,
+                        (0.0, 0.0),
+                        at(0.0),
+                        from_paragraph(0.0),
+                        wrapping,
+                    ));
+                }
+            }
+        }
+        vec![
+            paragraph(style, Vec::new(), 1),
+            Paragraph::new(style)
+                .with_props(exact())
+                .with_inlines(inlines)
+                .into(),
+        ]
+    })
+}
+
+#[test]
+fn wrapping_walks_the_lines_of_each_page_only() {
+    // On every page the paragraph goes on to, the wrapping walks its lines that can be on
+    // that page, not all those left: twice the words, on twice the pages, walk about twice
+    // the lines, whether the pictures wrap text or not.
+    for wrap in [Wrap::None, Wrap::Square] {
+        let walked = |count: usize| {
+            super::WRAP_WALKED.with(|walked| walked.set(0));
+            let (laid, _) = lay(&many_objects(count, wrap));
+            let pages = laid.pages.len();
+            (pages, super::WRAP_WALKED.with(std::cell::Cell::get))
+        };
+        let (short, long) = (walked(900), walked(1800));
+        assert_eq!((short.0, long.0), (13, 26), "{wrap:?}");
+        assert!(long.1 <= short.1 * 5 / 2, "{wrap:?}: {short:?} {long:?}");
+    }
 }
